@@ -1,5 +1,18 @@
 const pool = require('../config/database');
 
+// Asegura que ningún BigInt llegue a res.json() (mysql2 puede devolver BigInt y JSON.stringify falla)
+function sanitizeForJson(obj) {
+  if (obj === null || obj === undefined) return obj;
+  if (typeof obj === 'bigint') return Number(obj);
+  if (Array.isArray(obj)) return obj.map(sanitizeForJson);
+  if (typeof obj === 'object' && obj.constructor === Object) {
+    const out = {};
+    for (const [k, v] of Object.entries(obj)) out[k] = sanitizeForJson(v);
+    return out;
+  }
+  return obj;
+}
+
 // Nuevo esquema: pedidos, pedido_examenes, historial_pedido, pedido_pacientes, etc.
 
 const generarNumeroPedido = async () => {
@@ -78,13 +91,19 @@ const listarPedidos = async (req, res) => {
     params.push(limitNum, offset);
 
     const [pedidos] = await pool.execute(query, params);
-    res.json({ pedidos, page: pageNum, limit: limitNum });
+    res.json({
+      pedidos: sanitizeForJson(pedidos),
+      page: pageNum,
+      limit: limitNum,
+    });
   } catch (error) {
     console.error('Error al listar pedidos:', error);
-    res.status(500).json({
-      error: 'Error al listar pedidos',
-      message: error.message,
-    });
+    const message = error.message || 'Error desconocido';
+    try {
+      res.status(500).json({ error: 'Error al listar pedidos', message });
+    } catch (e) {
+      res.status(500).send(JSON.stringify({ error: 'Error al listar pedidos', message }));
+    }
   }
 };
 
