@@ -23,8 +23,13 @@ const registrarHistorial = async (connection, pedido_id, tipo_evento, descripcio
 
 const listarPedidos = async (req, res) => {
   try {
+    if (!req.user || !req.user.id) {
+      return res.status(401).json({ error: 'Usuario no autenticado' });
+    }
     const { estado, empresa_id, vendedor_id, page = 1, limit = 20 } = req.query;
-    const offset = (Math.max(1, parseInt(page)) - 1) * Math.max(1, parseInt(limit));
+    const pageNum = Math.max(1, parseInt(String(page), 10) || 1);
+    const limitNum = Math.max(1, Math.min(100, parseInt(String(limit), 10) || 20));
+    const offset = (pageNum - 1) * limitNum;
 
     let query = `
       SELECT p.*,
@@ -61,22 +66,25 @@ const listarPedidos = async (req, res) => {
         'SELECT empresa_id FROM usuario_empresa WHERE usuario_id = ?',
         [req.user.id]
       );
-      const ids = empresas.map(e => e.empresa_id);
+      const ids = empresas.map((e) => e.empresa_id);
       if (ids.length === 0) {
-        return res.json({ pedidos: [], page: parseInt(page), limit: parseInt(limit) });
+        return res.json({ pedidos: [], page: pageNum, limit: limitNum });
       }
       query += ` AND p.empresa_id IN (${ids.map(() => '?').join(',')})`;
       params.push(...ids);
     }
 
     query += ' ORDER BY p.created_at DESC LIMIT ? OFFSET ?';
-    params.push(parseInt(limit), offset);
+    params.push(limitNum, offset);
 
     const [pedidos] = await pool.execute(query, params);
-    res.json({ pedidos, page: parseInt(page), limit: parseInt(limit) });
+    res.json({ pedidos, page: pageNum, limit: limitNum });
   } catch (error) {
     console.error('Error al listar pedidos:', error);
-    res.status(500).json({ error: 'Error al listar pedidos' });
+    res.status(500).json({
+      error: 'Error al listar pedidos',
+      message: error.message,
+    });
   }
 };
 
