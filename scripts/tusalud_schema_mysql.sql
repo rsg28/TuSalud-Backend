@@ -102,12 +102,13 @@ CREATE TABLE sedes (
 -- 4. EXAMENES
 -- =============================================================================
 CREATE TABLE examenes (
-  id          INT AUTO_INCREMENT PRIMARY KEY,
-  nombre      VARCHAR(255) NOT NULL,
-  categoria   VARCHAR(150),
-  codigo      VARCHAR(50),
-  activo      TINYINT(1) DEFAULT 1,
-  created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  id            INT AUTO_INCREMENT PRIMARY KEY,
+  identificador INT NULL COMMENT 'ID de negocio; puede repetirse entre exámenes distintos',
+  nombre        VARCHAR(255) NOT NULL,
+  categoria     VARCHAR(150),
+  codigo        VARCHAR(50),
+  activo        TINYINT(1) DEFAULT 1,
+  created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE examen_precio (
