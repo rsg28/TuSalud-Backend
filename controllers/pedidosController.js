@@ -40,16 +40,6 @@ const listarPedidos = async (req, res) => {
       return res.status(401).json({ error: 'Usuario no autenticado' });
     }
 
-    // DEBUG: quién llama y qué hay en la BD
-    console.log('[listarPedidos] usuario:', { id: req.user.id, rol: req.user.rol, email: req.user.email });
-    try {
-      const [totalRows] = await pool.execute('SELECT COUNT(*) AS total FROM pedidos WHERE estado != ?', ['CANCELADO']);
-      const [sinVendedorRows] = await pool.execute('SELECT COUNT(*) AS total FROM pedidos WHERE estado != ? AND vendedor_id IS NULL', ['CANCELADO']);
-      console.log('[listarPedidos] en BD: total no cancelados=', totalRows[0].total, 'sin vendedor=', sinVendedorRows[0].total);
-    } catch (e) {
-      console.log('[listarPedidos] debug count error', e.message);
-    }
-
     const { estado, empresa_id, vendedor_id, page = 1, limit = 20 } = req.query;
     const pageNum = Math.max(1, parseInt(String(page), 10) || 1);
     const limitNum = Math.max(1, Math.min(100, parseInt(String(limit), 10) || 20));
@@ -95,7 +85,6 @@ const listarPedidos = async (req, res) => {
       );
       const ids = empresas.map((e) => e.empresa_id);
       if (ids.length === 0) {
-        console.log('[listarPedidos] cliente sin empresas asignadas');
         return res.json({ pedidos: [], page: pageNum, limit: limitNum });
       }
       query += ` AND p.empresa_id IN (${ids.map(() => '?').join(',')})`;
@@ -107,9 +96,7 @@ const listarPedidos = async (req, res) => {
     const safeOffset = Math.max(0, Number(offset) || 0);
     query += ` ORDER BY p.created_at DESC LIMIT ${safeLimit} OFFSET ${safeOffset}`;
 
-    console.log('[listarPedidos] query params:', params);
     const [pedidos] = await pool.execute(query, params);
-    console.log('[listarPedidos] devolviendo', pedidos.length, 'pedidos');
     res.json({
       pedidos: sanitizeForJson(pedidos),
       page: pageNum,
@@ -205,7 +192,7 @@ const crearPedido = async (req, res) => {
   try {
     await connection.beginTransaction();
 
-    const { empresa_id, sede_id, cliente_usuario_id, observaciones, condiciones_pago, fecha_vencimiento, examenes } = req.body;
+    const { empresa_id, sede_id, cliente_usuario_id, observaciones, condiciones_pago, fecha_vencimiento, examenes, total_empleados: totalEmpleadosBody, totalEmpleados: totalEmpleadosCamel } = req.body;
     const vendedor_id = (req.user && (req.user.rol === 'vendedor' || req.user.rol === 'manager')) ? req.user.id : null;
     const cliente_id = (req.user && req.user.rol === 'cliente') ? req.user.id : (cliente_usuario_id || null);
 
@@ -224,14 +211,18 @@ const crearPedido = async (req, res) => {
 
     const numero_pedido = await generarNumeroPedido();
 
+    const rawTotal = totalEmpleadosBody ?? totalEmpleadosCamel;
+    const totalEmpleadosInicial = (rawTotal !== undefined && rawTotal !== null && Number(rawTotal) >= 0)
+      ? Math.max(0, parseInt(rawTotal, 10))
+      : 0;
+
     const [result] = await connection.execute(
       `INSERT INTO pedidos (numero_pedido, empresa_id, sede_id, vendedor_id, cliente_usuario_id, estado, total_empleados, observaciones, condiciones_pago, fecha_vencimiento)
-       VALUES (?, ?, ?, ?, ?, 'ESPERA_COTIZACION', 0, ?, ?, ?)`,
-      [numero_pedido, empresa_id, sede_id, vendedor_id, cliente_id, observaciones || null, condiciones_pago || null, fecha_vencimiento || null]
+       VALUES (?, ?, ?, ?, ?, 'ESPERA_COTIZACION', ?, ?, ?, ?)`,
+      [numero_pedido, empresa_id, sede_id, vendedor_id, cliente_id, totalEmpleadosInicial, observaciones || null, condiciones_pago || null, fecha_vencimiento || null]
     );
     const pedido_id = result.insertId;
 
-    let total_empleados = 0;
     if (examenes && Array.isArray(examenes) && examenes.length > 0) {
       for (const item of examenes) {
         const examen_id = item.examen_id;
@@ -247,9 +238,7 @@ const crearPedido = async (req, res) => {
           'INSERT INTO pedido_examenes (pedido_id, examen_id, cantidad, precio_base) VALUES (?, ?, ?, ?)',
           [pedido_id, examen_id, cantidad, precio_base]
         );
-        total_empleados += cantidad;
       }
-      await connection.execute('UPDATE pedidos SET total_empleados = ? WHERE id = ?', [total_empleados, pedido_id]);
     }
 
     await registrarHistorial(connection, pedido_id, 'CREACION', `Pedido ${numero_pedido} creado`, vendedor_id, null, { usuario_nombre: req.user ? req.user.nombre_completo : null });
@@ -293,9 +282,6 @@ const agregarExamen = async (req, res) => {
       'INSERT INTO pedido_examenes (pedido_id, examen_id, cantidad, precio_base) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE cantidad = cantidad + ?, precio_base = ?',
       [pedido_id, examen_id, cant, precio_base, cant, precio_base]
     );
-
-    const [totales] = await pool.execute('SELECT COALESCE(SUM(cantidad), 0) AS t FROM pedido_examenes WHERE pedido_id = ?', [pedido_id]);
-    await pool.execute('UPDATE pedidos SET total_empleados = ? WHERE id = ?', [totales[0].t, pedido_id]);
 
     res.json({ message: 'Examen agregado' });
   } catch (error) {
