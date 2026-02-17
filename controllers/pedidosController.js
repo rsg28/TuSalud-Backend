@@ -87,8 +87,10 @@ const listarPedidos = async (req, res) => {
       params.push(...ids);
     }
 
-    query += ' ORDER BY p.created_at DESC LIMIT ? OFFSET ?';
-    params.push(limitNum, offset);
+    // LIMIT/OFFSET como valores enteros en la query (evita ER_WRONG_ARGUMENTS con prepared statements)
+    const safeLimit = Math.max(1, Math.min(100, Number(limitNum) || 20));
+    const safeOffset = Math.max(0, Number(offset) || 0);
+    query += ` ORDER BY p.created_at DESC LIMIT ${safeLimit} OFFSET ${safeOffset}`;
 
     const [pedidos] = await pool.execute(query, params);
     res.json({
