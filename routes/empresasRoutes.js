@@ -18,8 +18,8 @@ const empresaValidation = [
 
 router.get('/', authenticateToken, getAllEmpresas);
 router.get('/:id', authenticateToken, getEmpresaById);
-router.post('/', authenticateToken, requireRole('manager', 'vendedor', 'medico'), empresaValidation, createEmpresa);
-router.put('/:id', authenticateToken, requireRole('manager', 'vendedor', 'medico'), empresaValidation, updateEmpresa);
+router.post('/', authenticateToken, requireRole('manager', 'vendedor'), empresaValidation, createEmpresa);
+router.put('/:id', authenticateToken, requireRole('manager', 'vendedor'), empresaValidation, updateEmpresa);
 router.delete('/:id', authenticateToken, requireRole('manager'), deleteEmpresa);
 
 module.exports = router;

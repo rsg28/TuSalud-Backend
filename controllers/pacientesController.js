@@ -1,32 +1,49 @@
 const pool = require('../config/database');
 const { validationResult } = require('express-validator');
 
-// Obtener todos los pacientes
+// En el nuevo esquema los "pacientes" son pedido_pacientes (empleados por pedido).
+
+// Listar pacientes: por pedido_id (obligatorio) o todos si no se filtra
 const getAllPacientes = async (req, res) => {
   try {
-    const { search, empresa_id, estado } = req.query;
-    let query = 'SELECT * FROM pacientes WHERE 1=1';
+    const { pedido_id, search } = req.query;
+    let query = `
+      SELECT pp.*, p.numero_pedido
+      FROM pedido_pacientes pp
+      JOIN pedidos p ON pp.pedido_id = p.id
+      WHERE 1=1
+    `;
     const params = [];
 
+    if (pedido_id) {
+      query += ' AND pp.pedido_id = ?';
+      params.push(pedido_id);
+    }
+
     if (search) {
-      query += ' AND (nombre LIKE ? OR apellido_paterno LIKE ? OR apellido_materno LIKE ? OR dni LIKE ?)';
-      const searchTerm = `%${search}%`;
-      params.push(searchTerm, searchTerm, searchTerm, searchTerm);
+      query += ' AND (pp.nombre_completo LIKE ? OR pp.dni LIKE ?)';
+      const term = `%${search}%`;
+      params.push(term, term);
     }
 
-    if (empresa_id) {
-      query += ' AND empresa_id = ?';
-      params.push(empresa_id);
-    }
-
-    if (estado) {
-      query += ' AND estado = ?';
-      params.push(estado);
-    }
-
-    query += ' ORDER BY created_at DESC';
+    query += ' ORDER BY pp.pedido_id DESC, pp.nombre_completo';
 
     const [pacientes] = await pool.execute(query, params);
+
+    // Opcional: cargar exámenes asignados y completados por paciente
+    for (const pa of pacientes) {
+      const [asignados] = await pool.execute(
+        'SELECT examen_id FROM paciente_examen_asignado WHERE paciente_id = ?',
+        [pa.id]
+      );
+      const [completados] = await pool.execute(
+        'SELECT examen_id FROM paciente_examen_completado WHERE paciente_id = ?',
+        [pa.id]
+      );
+      pa.examenes_asignados = asignados.map(a => a.examen_id);
+      pa.examenes_completados = completados.map(c => c.examen_id);
+    }
+
     res.json({ pacientes });
   } catch (error) {
     console.error('Error al obtener pacientes:', error);
@@ -34,24 +51,45 @@ const getAllPacientes = async (req, res) => {
   }
 };
 
-// Obtener un paciente por ID
+// Obtener un paciente por ID (pedido_pacientes.id)
 const getPacienteById = async (req, res) => {
   try {
     const { id } = req.params;
-    const [pacientes] = await pool.execute('SELECT * FROM pacientes WHERE id = ?', [id]);
+    const [rows] = await pool.execute(
+      `SELECT pp.*, p.numero_pedido, p.empresa_id
+       FROM pedido_pacientes pp
+       JOIN pedidos p ON pp.pedido_id = p.id
+       WHERE pp.id = ?`,
+      [id]
+    );
 
-    if (pacientes.length === 0) {
+    if (rows.length === 0) {
       return res.status(404).json({ error: 'Paciente no encontrado' });
     }
 
-    res.json({ paciente: pacientes[0] });
+    const [asignados] = await pool.execute(
+      'SELECT examen_id FROM paciente_examen_asignado WHERE paciente_id = ?',
+      [id]
+    );
+    const [completados] = await pool.execute(
+      'SELECT examen_id, fecha_completado FROM paciente_examen_completado WHERE paciente_id = ?',
+      [id]
+    );
+
+    res.json({
+      paciente: {
+        ...rows[0],
+        examenes_asignados: asignados.map(a => a.examen_id),
+        examenes_completados: completados
+      }
+    });
   } catch (error) {
     console.error('Error al obtener paciente:', error);
     res.status(500).json({ error: 'Error al obtener paciente' });
   }
 };
 
-// Crear un nuevo paciente
+// Crear paciente (en un pedido)
 const createPaciente = async (req, res) => {
   try {
     const errors = validationResult(req);
@@ -59,65 +97,44 @@ const createPaciente = async (req, res) => {
       return res.status(400).json({ errors: errors.array() });
     }
 
-    const {
-      tipo_documento, dni, apellido_paterno, apellido_materno, nombre, sexo,
-      fecha_nacimiento, edad, estado_civil, seguro_vida, estudios_academicos,
-      profesion, correo_electronico, celular, telefono_fijo, codigo_trabajador,
-      empresa_id, centro_costo, departamento, provincia, distrito, nacionalidad,
-      ubigeo, direccion
-    } = req.body;
+    const { pedido_id, dni, nombre_completo, cargo, area, examenes } = req.body;
 
-    // Verificar si el DNI ya existe
-    if (dni) {
-      const [existing] = await pool.execute('SELECT id FROM pacientes WHERE dni = ?', [dni]);
-      if (existing.length > 0) {
-        return res.status(400).json({ error: 'El DNI ya está registrado' });
-      }
-    }
-
-    // Calcular edad si no se proporciona
-    let calculatedAge = edad;
-    if (!calculatedAge && fecha_nacimiento) {
-      const birthDate = new Date(fecha_nacimiento);
-      const today = new Date();
-      calculatedAge = today.getFullYear() - birthDate.getFullYear();
-      const monthDiff = today.getMonth() - birthDate.getMonth();
-      if (monthDiff < 0 || (monthDiff === 0 && today.getDate() < birthDate.getDate())) {
-        calculatedAge--;
-      }
+    if (!pedido_id || !dni || !nombre_completo) {
+      return res.status(400).json({ error: 'pedido_id, dni y nombre_completo son requeridos' });
     }
 
     const [result] = await pool.execute(
-      `INSERT INTO pacientes (
-        tipo_documento, dni, apellido_paterno, apellido_materno, nombre, sexo,
-        fecha_nacimiento, edad, estado_civil, seguro_vida, estudios_academicos,
-        profesion, correo_electronico, celular, telefono_fijo, codigo_trabajador,
-        empresa_id, centro_costo, departamento, provincia, distrito, nacionalidad,
-        ubigeo, direccion
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        tipo_documento || null, dni || null, apellido_paterno || null, apellido_materno || null,
-        nombre || null, sexo || null, fecha_nacimiento || null, calculatedAge || null,
-        estado_civil || null, seguro_vida || null, estudios_academicos || null,
-        profesion || null, correo_electronico || null, celular || null, telefono_fijo || null,
-        codigo_trabajador || null, empresa_id || null, centro_costo || null,
-        departamento || null, provincia || null, distrito || null, nacionalidad || null,
-        ubigeo || null, direccion || null
-      ]
+      `INSERT INTO pedido_pacientes (pedido_id, dni, nombre_completo, cargo, area)
+       VALUES (?, ?, ?, ?, ?)`,
+      [pedido_id, dni, nombre_completo || null, cargo || null, area || null]
     );
 
-    const [newPaciente] = await pool.execute('SELECT * FROM pacientes WHERE id = ?', [result.insertId]);
+    const pacienteId = result.insertId;
+
+    if (examenes && Array.isArray(examenes) && examenes.length > 0) {
+      for (const examen_id of examenes) {
+        await pool.execute(
+          'INSERT IGNORE INTO paciente_examen_asignado (paciente_id, examen_id) VALUES (?, ?)',
+          [pacienteId, examen_id]
+        );
+      }
+    }
+
+    const [newPaciente] = await pool.execute(
+      'SELECT * FROM pedido_pacientes WHERE id = ?',
+      [pacienteId]
+    );
     res.status(201).json({ message: 'Paciente creado exitosamente', paciente: newPaciente[0] });
   } catch (error) {
     console.error('Error al crear paciente:', error);
     if (error.code === 'ER_DUP_ENTRY') {
-      return res.status(400).json({ error: 'El DNI ya está registrado' });
+      return res.status(400).json({ error: 'Ya existe un paciente con ese DNI en este pedido' });
     }
     res.status(500).json({ error: 'Error al crear paciente' });
   }
 };
 
-// Actualizar un paciente
+// Actualizar paciente
 const updatePaciente = async (req, res) => {
   try {
     const errors = validationResult(req);
@@ -126,90 +143,85 @@ const updatePaciente = async (req, res) => {
     }
 
     const { id } = req.params;
-    const {
-      tipo_documento, dni, apellido_paterno, apellido_materno, nombre, sexo,
-      fecha_nacimiento, edad, estado_civil, seguro_vida, estudios_academicos,
-      profesion, correo_electronico, celular, telefono_fijo, codigo_trabajador,
-      empresa_id, centro_costo, departamento, provincia, distrito, nacionalidad,
-      ubigeo, direccion
-    } = req.body;
+    const { dni, nombre_completo, cargo, area, examenes } = req.body;
 
-    // Verificar si el paciente existe
-    const [existing] = await pool.execute('SELECT id FROM pacientes WHERE id = ?', [id]);
+    const [existing] = await pool.execute('SELECT id FROM pedido_pacientes WHERE id = ?', [id]);
     if (existing.length === 0) {
       return res.status(404).json({ error: 'Paciente no encontrado' });
     }
 
-    // Verificar si el DNI ya existe en otro paciente
-    if (dni) {
-      const [duplicate] = await pool.execute('SELECT id FROM pacientes WHERE dni = ? AND id != ?', [dni, id]);
-      if (duplicate.length > 0) {
-        return res.status(400).json({ error: 'El DNI ya está registrado en otro paciente' });
-      }
-    }
-
-    // Calcular edad si cambió la fecha de nacimiento
-    let calculatedAge = edad;
-    if (!calculatedAge && fecha_nacimiento) {
-      const birthDate = new Date(fecha_nacimiento);
-      const today = new Date();
-      calculatedAge = today.getFullYear() - birthDate.getFullYear();
-      const monthDiff = today.getMonth() - birthDate.getMonth();
-      if (monthDiff < 0 || (monthDiff === 0 && today.getDate() < birthDate.getDate())) {
-        calculatedAge--;
-      }
-    }
-
     await pool.execute(
-      `UPDATE pacientes SET
-        tipo_documento = ?, dni = ?, apellido_paterno = ?, apellido_materno = ?, nombre = ?, sexo = ?,
-        fecha_nacimiento = ?, edad = ?, estado_civil = ?, seguro_vida = ?, estudios_academicos = ?,
-        profesion = ?, correo_electronico = ?, celular = ?, telefono_fijo = ?, codigo_trabajador = ?,
-        empresa_id = ?, centro_costo = ?, departamento = ?, provincia = ?, distrito = ?, nacionalidad = ?,
-        ubigeo = ?, direccion = ?
+      `UPDATE pedido_pacientes SET
+        dni = COALESCE(?, dni),
+        nombre_completo = COALESCE(?, nombre_completo),
+        cargo = ?, area = ?
       WHERE id = ?`,
-      [
-        tipo_documento || null, dni || null, apellido_paterno || null, apellido_materno || null,
-        nombre || null, sexo || null, fecha_nacimiento || null, calculatedAge || null,
-        estado_civil || null, seguro_vida || null, estudios_academicos || null,
-        profesion || null, correo_electronico || null, celular || null, telefono_fijo || null,
-        codigo_trabajador || null, empresa_id || null, centro_costo || null,
-        departamento || null, provincia || null, distrito || null, nacionalidad || null,
-        ubigeo || null, direccion || null, id
-      ]
+      [dni || null, nombre_completo || null, cargo || null, area || null, id]
     );
 
-    const [updatedPaciente] = await pool.execute('SELECT * FROM pacientes WHERE id = ?', [id]);
-    res.json({ message: 'Paciente actualizado exitosamente', paciente: updatedPaciente[0] });
+    if (examenes && Array.isArray(examenes)) {
+      await pool.execute('DELETE FROM paciente_examen_asignado WHERE paciente_id = ?', [id]);
+      for (const examen_id of examenes) {
+        await pool.execute(
+          'INSERT IGNORE INTO paciente_examen_asignado (paciente_id, examen_id) VALUES (?, ?)',
+          [id, examen_id]
+        );
+      }
+    }
+
+    const [updated] = await pool.execute('SELECT * FROM pedido_pacientes WHERE id = ?', [id]);
+    res.json({ message: 'Paciente actualizado exitosamente', paciente: updated[0] });
   } catch (error) {
     console.error('Error al actualizar paciente:', error);
-    if (error.code === 'ER_DUP_ENTRY') {
-      return res.status(400).json({ error: 'El DNI ya está registrado' });
-    }
     res.status(500).json({ error: 'Error al actualizar paciente' });
   }
 };
 
-// Eliminar un paciente
+// Marcar examen completado
+const marcarExamenCompletado = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { examen_id, completado } = req.body;
+
+    if (!examen_id) {
+      return res.status(400).json({ error: 'examen_id es requerido' });
+    }
+
+    const [pac] = await pool.execute('SELECT id FROM pedido_pacientes WHERE id = ?', [id]);
+    if (pac.length === 0) {
+      return res.status(404).json({ error: 'Paciente no encontrado' });
+    }
+
+    if (completado !== false) {
+      await pool.execute(
+        `INSERT IGNORE INTO paciente_examen_completado (paciente_id, examen_id) VALUES (?, ?)`,
+        [id, examen_id]
+      );
+    } else {
+      await pool.execute(
+        'DELETE FROM paciente_examen_completado WHERE paciente_id = ? AND examen_id = ?',
+        [id, examen_id]
+      );
+    }
+
+    res.json({ message: completado !== false ? 'Examen marcado como completado' : 'Examen desmarcado' });
+  } catch (error) {
+    console.error('Error al marcar examen:', error);
+    res.status(500).json({ error: 'Error al actualizar estado del examen' });
+  }
+};
+
+// Eliminar paciente
 const deletePaciente = async (req, res) => {
   try {
     const { id } = req.params;
 
-    // Verificar si el paciente existe
-    const [existing] = await pool.execute('SELECT id FROM pacientes WHERE id = ?', [id]);
+    const [existing] = await pool.execute('SELECT id FROM pedido_pacientes WHERE id = ?', [id]);
     if (existing.length === 0) {
       return res.status(404).json({ error: 'Paciente no encontrado' });
     }
 
-    // Verificar si hay citas o evaluaciones asociadas
-    const [citas] = await pool.execute('SELECT id FROM citas WHERE paciente_id = ? LIMIT 1', [id]);
-    if (citas.length > 0) {
-      return res.status(400).json({ 
-        error: 'No se puede eliminar el paciente porque tiene citas o evaluaciones asociadas' 
-      });
-    }
-
-    await pool.execute('DELETE FROM pacientes WHERE id = ?', [id]);
+    await pool.execute('DELETE FROM pedido_pacientes WHERE id = ?', [id]);
     res.json({ message: 'Paciente eliminado exitosamente' });
   } catch (error) {
     console.error('Error al eliminar paciente:', error);
@@ -222,5 +234,6 @@ module.exports = {
   getPacienteById,
   createPaciente,
   updatePaciente,
-  deletePaciente
+  deletePaciente,
+  marcarExamenCompletado
 };

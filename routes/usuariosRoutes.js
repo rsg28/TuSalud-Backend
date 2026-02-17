@@ -54,7 +54,7 @@ const updateUsuarioRol = async (req, res) => {
     const { id } = req.params;
     const { rol } = req.body;
 
-    const validRoles = ['medico', 'manager', 'vendedor', 'cliente'];
+    const validRoles = ['manager', 'vendedor', 'cliente'];
     if (!validRoles.includes(rol)) {
       return res.status(400).json({ error: 'Rol inválido' });
     }
@@ -111,7 +111,7 @@ const toggleUsuarioActivo = async (req, res) => {
 
 router.get('/', authenticateToken, requireRole('manager'), getAllUsuarios);
 router.put('/:id/rol', authenticateToken, requireRole('manager'), [
-  body('rol').isIn(['medico', 'manager', 'vendedor', 'cliente']).withMessage('Rol inválido')
+  body('rol').isIn(['manager', 'vendedor', 'cliente']).withMessage('Rol inválido')
 ], updateUsuarioRol);
 router.put('/:id/activo', authenticateToken, requireRole('manager'), toggleUsuarioActivo);
 

@@ -25,10 +25,13 @@ app.get('/health', (req, res) => {
 // Routes
 app.use('/api/auth', require('./routes/authRoutes'));
 app.use('/api/empresas', require('./routes/empresasRoutes'));
+app.use('/api/sedes', require('./routes/sedesRoutes'));
 app.use('/api/pacientes', require('./routes/pacientesRoutes'));
 app.use('/api/usuarios', require('./routes/usuariosRoutes'));
 app.use('/api/cotizaciones', require('./routes/cotizacionesRoutes'));
 app.use('/api/facturas', require('./routes/facturasRoutes'));
+app.use('/api/pedidos', require('./routes/pedidosRoutes'));
+app.use('/api/precios', require('./routes/preciosEmpresaRoutes'));
 
 // 404 handler
 app.use((req, res) => {
@@ -56,7 +59,7 @@ app.listen(PORT, async () => {
   console.log('═══════════════════════════════════════════════════════');
   console.log(`📡 Environment: ${process.env.NODE_ENV || 'development'}`);
   console.log(`🌐 Server running on: http://localhost:${PORT}`);
-  console.log(`📊 Database: ${process.env.DB_NAME || 'tusaludDB'}@${process.env.DB_HOST || 'localhost'}:${process.env.DB_PORT || '3306'}`);
+  console.log(`📊 Database: ${process.env.DB_NAME || 'tusalud'}@${process.env.DB_HOST || 'localhost'}:${process.env.DB_PORT || '3306'}`);
   console.log('═══════════════════════════════════════════════════════');
   console.log('');
   

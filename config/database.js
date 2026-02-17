@@ -6,7 +6,7 @@ const dbConfig = {
   host: process.env.DB_HOST || 'localhost',
   user: process.env.DB_USER || 'root',
   password: process.env.DB_PASSWORD || '',
-  database: process.env.DB_NAME || 'tusaludDB',
+  database: process.env.DB_NAME || 'tusalud',
   port: parseInt(process.env.DB_PORT || '3306', 10),
   waitForConnections: true,
   connectionLimit: 10,
@@ -34,7 +34,7 @@ async function testConnection() {
     console.error('❌ Database connection error:', err.message);
     console.error('💡 Make sure:');
     console.error('   1. MySQL server is running');
-    console.error('   2. Database "tusaludDB" exists (run database_schema.sql)');
+    console.error('   2. Database "tusalud" exists (run database/tusalud_schema_mysql.sql)');
     console.error('   3. Credentials in .env are correct');
     console.error(`   4. Connection details: ${dbConfig.user}@${dbConfig.host}:${dbConfig.port}`);
     return false;

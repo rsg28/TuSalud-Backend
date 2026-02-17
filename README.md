@@ -23,7 +23,7 @@ Crear el archivo `.env` en la raíz del proyecto con el siguiente contenido:
 DB_HOST=localhost
 DB_USER=root
 DB_PASSWORD=          # Tu contraseña de MySQL (dejar vacío si no tiene)
-DB_NAME=tusaludDB
+DB_NAME=tusalud
 DB_PORT=3306
 
 # Server Configuration
@@ -41,16 +41,24 @@ CORS_ORIGIN=http://localhost:8081
 **Nota:** Si tu MySQL no tiene contraseña, deja `DB_PASSWORD` vacío. Si tiene contraseña, escríbela sin comillas.
 
 3. Crear la base de datos:
+
+El esquema oficial está en la carpeta `database/` del monorepo (raíz del proyecto TuSalud):
+
 ```bash
-# Opción 1: Desde la línea de comandos
-mysql -u root -p < database_schema.sql
+# Crear la base (si no existe)
+mysql -u root -p -e "CREATE DATABASE IF NOT EXISTS tusalud;"
 
-# Opción 2: Si no tienes contraseña
-mysql -u root < database_schema.sql
-
-# Opción 3: Desde MySQL Workbench o phpMyAdmin
-# Abre database_schema.sql y ejecuta todo el script
+# Cargar el esquema MySQL (desde la raíz TuSalud, no desde TuSalud-Backend)
+mysql -u root -p tusalud < database/tusalud_schema_mysql.sql
 ```
+
+En servidor Linux (ej. EC2) con MySQL sin contraseña para root:
+```bash
+sudo mysql -e "CREATE DATABASE IF NOT EXISTS tusalud;"
+sudo mysql tusalud < /ruta/completa/database/tusalud_schema_mysql.sql
+```
+
+El archivo `database_schema.sql` en este backend solo contiene la referencia al script anterior.
 
 4. Probar la conexión a la base de datos:
 ```bash
@@ -104,35 +112,46 @@ TuSalud-Backend/
 ### Empresas
 - `GET /api/empresas` - Listar empresas (con filtros: `?search=`, `?estado=`, `?tipo_persona=`)
 - `GET /api/empresas/:id` - Obtener empresa por ID
-- `POST /api/empresas` - Crear empresa (requiere rol: manager, vendedor, medico)
-- `PUT /api/empresas/:id` - Actualizar empresa (requiere rol: manager, vendedor, medico)
+- `POST /api/empresas` - Crear empresa (requiere rol: manager, vendedor)
+- `PUT /api/empresas/:id` - Actualizar empresa (requiere rol: manager, vendedor)
 - `DELETE /api/empresas/:id` - Eliminar empresa (requiere rol: manager)
 
 ### Pacientes
 - `GET /api/pacientes` - Listar pacientes (con filtros: `?search=`, `?empresa_id=`, `?estado=`)
 - `GET /api/pacientes/:id` - Obtener paciente por ID
-- `POST /api/pacientes` - Crear paciente (requiere rol: manager, vendedor, medico)
-- `PUT /api/pacientes/:id` - Actualizar paciente (requiere rol: manager, vendedor, medico)
-- `DELETE /api/pacientes/:id` - Eliminar paciente (requiere rol: manager)
+- `POST /api/pacientes` - Crear paciente por pedido (requiere rol: manager, vendedor, cliente)
+- `PUT /api/pacientes/:id` - Actualizar paciente
+- `PUT /api/pacientes/:id/examen` - Marcar examen completado
+- `DELETE /api/pacientes/:id` - Eliminar paciente (requiere rol: manager, vendedor)
 
-### Cotizaciones
-- `GET /api/cotizaciones` - Listar cotizaciones (con filtros: `?search=`, `?estado=`, `?empresa_id=`, `?paciente_id=`, `?fecha_desde=`, `?fecha_hasta=`)
-- `GET /api/cotizaciones/:id` - Obtener cotización por ID (incluye detalles)
-- `POST /api/cotizaciones` - Crear cotización (requiere rol: manager, vendedor)
-- `PUT /api/cotizaciones/:id` - Actualizar cotización (requiere rol: manager, vendedor)
-- `DELETE /api/cotizaciones/:id` - Eliminar cotización (requiere rol: manager, vendedor)
+### Pedidos
+- `GET /api/pedidos` - Listar pedidos (filtros: `?estado=`, `?empresa_id=`, `?vendedor_id=`, `?page=`, `?limit=`)
+- `GET /api/pedidos/:pedido_id` - Obtener pedido (exámenes, cotizaciones, factura, pacientes, historial)
+- `POST /api/pedidos` - Crear pedido (body: empresa_id, sede_id, observaciones, condiciones_pago, examenes: [{ examen_id, cantidad }])
+- `GET /api/pedidos/:pedido_id/historial` - Historial del pedido
+- `POST /api/pedidos/:pedido_id/examenes` - Agregar examen al pedido (estado PENDIENTE)
+- `POST /api/pedidos/:pedido_id/listo-cotizacion` - Marcar listo para cotización
+- `POST /api/pedidos/:pedido_id/empleados` - Cargar empleados (body: empleados: [{ dni, nombre_completo, cargo?, area?, examenes? }])
+- `POST /api/pedidos/:pedido_id/completado` - Marcar pedido completado
 
-### Facturas
-- `GET /api/facturas` - Listar facturas (con filtros: `?search=`, `?estado=`, `?empresa_id=`, `?paciente_id=`, `?fecha_desde=`, `?fecha_hasta=`)
-- `GET /api/facturas/:id` - Obtener factura por ID (incluye detalles)
-- `POST /api/facturas` - Crear factura (requiere rol: manager, vendedor)
-- `PUT /api/facturas/:id` - Actualizar factura (requiere rol: manager, vendedor)
-- `DELETE /api/facturas/:id` - Eliminar factura (requiere rol: manager, vendedor)
+### Cotizaciones (por pedido)
+- `GET /api/cotizaciones` - Listar (filtros: `?pedido_id=`, `?estado=`, `?empresa_id=`)
+- `GET /api/cotizaciones/:id` - Obtener cotización con items
+- `POST /api/cotizaciones` - Crear (body: pedido_id, items: [{ examen_id, nombre, cantidad, precio_base, precio_final }], es_complementaria?, cotizacion_base_id?)
+- `PUT /api/cotizaciones/:id` - Actualizar (estado, items si BORRADOR)
+- `DELETE /api/cotizaciones/:id` - Eliminar (solo BORRADOR)
+
+### Facturas (por pedido)
+- `GET /api/facturas` - Listar (filtros: `?pedido_id=`, `?estado=`, `?empresa_id=`)
+- `GET /api/facturas/:id` - Obtener factura con cotizaciones y detalle
+- `POST /api/facturas` - Crear factura para pedido (body: pedido_id) — incluye cotización principal y complementarias aprobadas
+- `PUT /api/facturas/:id` - Actualizar (estado, fecha_pago)
+- `DELETE /api/facturas/:id` - Eliminar (solo si no PAGADA)
 
 ### Usuarios (Solo Manager)
 - `GET /api/usuarios` - Listar usuarios (con filtros: `?search=`, `?rol=`, `?activo=`, `?fecha_creacion=today|recent`)
 - `PUT /api/usuarios/:id/rol` - Actualizar rol de usuario
-  - Body: `{ rol: 'medico' | 'manager' | 'vendedor' | 'cliente' }`
+  - Body: `{ rol: 'manager' | 'vendedor' | 'cliente' }`
 - `PUT /api/usuarios/:id/activo` - Activar/desactivar usuario
   - Body: `{ activo: true | false }`
 

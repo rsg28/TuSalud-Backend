@@ -10,22 +10,14 @@ const {
 } = require('../controllers/facturasController');
 const { authenticateToken, requireRole } = require('../middleware/auth');
 
-// Validaciones para crear/actualizar factura
-const facturaValidation = [
-  body('fecha_emision').notEmpty().withMessage('La fecha de emisión es requerida'),
-  body('sede_id').notEmpty().withMessage('La sede es requerida'),
-  body('empresa_id').custom((value, { req }) => {
-    if (!value && !req.body.paciente_id) {
-      throw new Error('Debe especificar una empresa o un paciente');
-    }
-    return true;
-  })
+const createFacturaValidation = [
+  body('pedido_id').isInt().withMessage('pedido_id es requerido')
 ];
 
-router.get('/', authenticateToken, requireRole('manager', 'vendedor'), getAllFacturas);
-router.get('/:id', authenticateToken, requireRole('manager', 'vendedor'), getFacturaById);
-router.post('/', authenticateToken, requireRole('manager', 'vendedor'), facturaValidation, createFactura);
-router.put('/:id', authenticateToken, requireRole('manager', 'vendedor'), facturaValidation, updateFactura);
+router.get('/', authenticateToken, getAllFacturas);
+router.get('/:id', authenticateToken, getFacturaById);
+router.post('/', authenticateToken, requireRole('manager', 'vendedor'), createFacturaValidation, createFactura);
+router.put('/:id', authenticateToken, requireRole('manager', 'vendedor'), updateFactura);
 router.delete('/:id', authenticateToken, requireRole('manager', 'vendedor'), deleteFactura);
 
 module.exports = router;

@@ -1,56 +1,34 @@
 const pool = require('../config/database');
 const { validationResult } = require('express-validator');
 
-// Obtener todas las facturas
+// Nuevo esquema: facturas (pedido_id), factura_cotizacion (vincula cotizaciones), factura_detalle (líneas)
+
 const getAllFacturas = async (req, res) => {
   try {
-    const { search, estado, empresa_id, paciente_id, fecha_desde, fecha_hasta } = req.query;
+    const { pedido_id, estado, empresa_id } = req.query;
     let query = `
-      SELECT f.*, 
-        e.razon_social as empresa_nombre, e.ruc as empresa_ruc,
-        p.nombre as paciente_nombre, p.apellido_paterno, p.apellido_materno, p.dni as paciente_dni,
-        c.numero_cotizacion
+      SELECT f.*, p.numero_pedido, p.empresa_id, e.razon_social AS empresa_nombre, e.ruc AS empresa_ruc
       FROM facturas f
-      LEFT JOIN empresas e ON f.empresa_id = e.id
-      LEFT JOIN pacientes p ON f.paciente_id = p.id
-      LEFT JOIN cotizaciones c ON f.cotizacion_id = c.id
+      JOIN pedidos p ON f.pedido_id = p.id
+      JOIN empresas e ON p.empresa_id = e.id
       WHERE 1=1
     `;
     const params = [];
 
-    if (search) {
-      query += ' AND (f.numero_factura LIKE ? OR e.razon_social LIKE ? OR p.nombre LIKE ?)';
-      const searchTerm = `%${search}%`;
-      params.push(searchTerm, searchTerm, searchTerm);
+    if (pedido_id) {
+      query += ' AND f.pedido_id = ?';
+      params.push(pedido_id);
     }
-
     if (estado) {
       query += ' AND f.estado = ?';
       params.push(estado);
     }
-
     if (empresa_id) {
-      query += ' AND f.empresa_id = ?';
+      query += ' AND p.empresa_id = ?';
       params.push(empresa_id);
     }
 
-    if (paciente_id) {
-      query += ' AND f.paciente_id = ?';
-      params.push(paciente_id);
-    }
-
-    if (fecha_desde) {
-      query += ' AND f.fecha_emision >= ?';
-      params.push(fecha_desde);
-    }
-
-    if (fecha_hasta) {
-      query += ' AND f.fecha_emision <= ?';
-      params.push(fecha_hasta);
-    }
-
-    query += ' ORDER BY f.fecha_emision DESC, f.created_at DESC';
-
+    query += ' ORDER BY f.fecha_emision DESC';
     const [facturas] = await pool.execute(query, params);
     res.json({ facturas });
   } catch (error) {
@@ -59,25 +37,15 @@ const getAllFacturas = async (req, res) => {
   }
 };
 
-// Obtener una factura por ID con detalles
 const getFacturaById = async (req, res) => {
   try {
     const { id } = req.params;
-    
     const [facturas] = await pool.execute(
-      `SELECT f.*, 
-        e.razon_social as empresa_nombre, e.ruc as empresa_ruc, e.contacto as empresa_contacto,
-        p.nombre as paciente_nombre, p.apellido_paterno, p.apellido_materno, p.dni as paciente_dni,
-        s.nombre as sede_nombre,
-        u.nombre_completo as usuario_creador_nombre,
-        c.numero_cotizacion
-      FROM facturas f
-      LEFT JOIN empresas e ON f.empresa_id = e.id
-      LEFT JOIN pacientes p ON f.paciente_id = p.id
-      LEFT JOIN sedes s ON f.sede_id = s.id
-      LEFT JOIN usuarios u ON f.usuario_creador_id = u.id
-      LEFT JOIN cotizaciones c ON f.cotizacion_id = c.id
-      WHERE f.id = ?`,
+      `SELECT f.*, p.numero_pedido, p.empresa_id, e.razon_social AS empresa_nombre, e.ruc AS empresa_ruc
+       FROM facturas f
+       JOIN pedidos p ON f.pedido_id = p.id
+       JOIN empresas e ON p.empresa_id = e.id
+       WHERE f.id = ?`,
       [id]
     );
 
@@ -85,16 +53,23 @@ const getFacturaById = async (req, res) => {
       return res.status(404).json({ error: 'Factura no encontrada' });
     }
 
+    const [cotizaciones] = await pool.execute(
+      `SELECT fc.*, c.numero_cotizacion FROM factura_cotizacion fc
+       JOIN cotizaciones c ON fc.cotizacion_id = c.id
+       WHERE fc.factura_id = ?`,
+      [id]
+    );
+
     const [detalles] = await pool.execute(
-      `SELECT fd.*, e.nombre_examen, e.examen_principal, e.tipo_examen
-      FROM factura_detalle fd
-      JOIN examenes e ON fd.examen_id = e.id
-      WHERE fd.factura_id = ?`,
+      `SELECT fd.*, e.nombre AS examen_nombre FROM factura_detalle fd
+       LEFT JOIN examenes e ON fd.examen_id = e.id
+       WHERE fd.factura_id = ?`,
       [id]
     );
 
     res.json({
       factura: facturas[0],
+      cotizaciones,
       detalles
     });
   } catch (error) {
@@ -103,7 +78,7 @@ const getFacturaById = async (req, res) => {
   }
 };
 
-// Crear una nueva factura
+// Crear factura para un pedido (incluye cotización principal + complementarias aprobadas no facturadas)
 const createFactura = async (req, res) => {
   try {
     const errors = validationResult(req);
@@ -111,222 +86,143 @@ const createFactura = async (req, res) => {
       return res.status(400).json({ errors: errors.array() });
     }
 
-    const {
-      numero_factura, cotizacion_id, empresa_id, paciente_id, sede_id,
-      fecha_emision, fecha_vencimiento, estado, tipo_comprobante,
-      subtotal, descuento_total, igv, total, forma_pago, observaciones, detalles
-    } = req.body;
-
-    if (!empresa_id && !paciente_id) {
-      return res.status(400).json({ error: 'Debe especificar una empresa o un paciente' });
+    const { pedido_id } = req.body;
+    if (!pedido_id) {
+      return res.status(400).json({ error: 'pedido_id es requerido' });
     }
 
-    const calculatedIGV = igv !== undefined ? igv : (subtotal || 0) * 0.18;
-    const calculatedTotal = total !== undefined ? total : (subtotal || 0) + calculatedIGV - (descuento_total || 0);
+    const [pedido] = await pool.execute(
+      'SELECT id, empresa_id, cotizacion_principal_id FROM pedidos WHERE id = ?',
+      [pedido_id]
+    );
+    if (pedido.length === 0) {
+      return res.status(404).json({ error: 'Pedido no encontrado' });
+    }
 
-    if (numero_factura) {
-      const [existing] = await pool.execute(
-        'SELECT id FROM facturas WHERE numero_factura = ?',
-        [numero_factura]
-      );
-      if (existing.length > 0) {
-        return res.status(400).json({ error: 'El número de factura ya existe' });
-      }
+    const principalId = pedido[0].cotizacion_principal_id;
+    if (!principalId) {
+      return res.status(400).json({ error: 'El pedido no tiene cotización principal aprobada' });
+    }
+
+    // Cotizaciones aprobadas del pedido que aún no están en ninguna factura
+    const [cotizacionesParaFacturar] = await pool.execute(
+      `SELECT c.id, c.total, c.es_complementaria
+       FROM cotizaciones c
+       WHERE c.pedido_id = ? AND c.estado = 'APROBADA'
+         AND (c.id = ? OR c.cotizacion_base_id = ?)
+         AND NOT EXISTS (SELECT 1 FROM factura_cotizacion fc WHERE fc.cotizacion_id = c.id)`,
+      [pedido_id, principalId, principalId]
+    );
+
+    if (cotizacionesParaFacturar.length === 0) {
+      return res.status(400).json({ error: 'No hay cotizaciones aprobadas pendientes de facturar para este pedido' });
     }
 
     const connection = await pool.getConnection();
     await connection.beginTransaction();
 
     try {
+      const subtotal = cotizacionesParaFacturar.reduce((s, c) => s + Number(c.total), 0);
+      const igv = subtotal * 0.18;
+      const total = subtotal + igv;
+
+      const [seq] = await connection.execute('SELECT COALESCE(MAX(id), 0) + 1 AS n FROM facturas');
+      const numero_factura = `FAC-${new Date().getFullYear()}-${String(seq[0].n).padStart(6, '0')}`;
+
       const [result] = await connection.execute(
-        `INSERT INTO facturas (
-          numero_factura, cotizacion_id, empresa_id, paciente_id, sede_id, usuario_creador_id,
-          fecha_emision, fecha_vencimiento, estado, tipo_comprobante,
-          subtotal, descuento_total, igv, total, forma_pago, observaciones
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          numero_factura || null, cotizacion_id || null, empresa_id || null, paciente_id || null,
-          sede_id, req.user.id, fecha_emision, fecha_vencimiento || null,
-          estado || 'BORRADOR', tipo_comprobante || 'FACTURA',
-          subtotal || 0, descuento_total || 0, calculatedIGV, calculatedTotal,
-          forma_pago || null, observaciones || null
-        ]
+        `INSERT INTO facturas (numero_factura, pedido_id, subtotal, igv, total, estado, fecha_emision)
+         VALUES (?, ?, ?, ?, ?, 'PENDIENTE', CURDATE())`,
+        [numero_factura, pedido_id, subtotal, igv, total]
       );
+      const factura_id = result.insertId;
 
-      const facturaId = result.insertId;
-
-      if (detalles && Array.isArray(detalles) && detalles.length > 0) {
-        for (const detalle of detalles) {
-          await connection.execute(
-            `INSERT INTO factura_detalle (
-              factura_id, examen_id, descripcion, cantidad, precio_unitario,
-              descuento_aplicado, subtotal, observaciones
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-            [
-              facturaId, detalle.examen_id, detalle.descripcion || null,
-              detalle.cantidad || 1, detalle.precio_unitario,
-              detalle.descuento_aplicado || 0, detalle.subtotal,
-              detalle.observaciones || null
-            ]
-          );
-        }
+      for (const c of cotizacionesParaFacturar) {
+        await connection.execute(
+          'INSERT INTO factura_cotizacion (factura_id, cotizacion_id, monto, es_principal) VALUES (?, ?, ?, ?)',
+          [factura_id, c.id, c.total, c.id === principalId ? 1 : 0]
+        );
       }
+
+      // Rellenar factura_detalle desde cotizacion_items de las cotizaciones incluidas
+      const [items] = await connection.execute(
+        `SELECT ci.examen_id, ci.nombre AS descripcion, ci.cantidad, ci.precio_final AS precio_unitario,
+                (ci.cantidad * ci.precio_final) AS subtotal
+         FROM cotizacion_items ci
+         WHERE ci.cotizacion_id IN (${cotizacionesParaFacturar.map(c => '?').join(',')})`,
+        cotizacionesParaFacturar.map(c => c.id)
+      );
+      for (const it of items) {
+        await connection.execute(
+          'INSERT INTO factura_detalle (factura_id, examen_id, descripcion, cantidad, precio_unitario, subtotal) VALUES (?, ?, ?, ?, ?, ?)',
+          [factura_id, it.examen_id, it.descripcion, it.cantidad, it.precio_unitario, it.subtotal]
+        );
+      }
+
+      await connection.execute(
+        "UPDATE pedidos SET factura_id = ?, estado = 'FACTURADO' WHERE id = ?",
+        [factura_id, pedido_id]
+      );
 
       await connection.commit();
 
-      const [newFactura] = await pool.execute(
-        `SELECT f.*, 
-          e.razon_social as empresa_nombre,
-          p.nombre as paciente_nombre, p.apellido_paterno, p.apellido_materno
-        FROM facturas f
-        LEFT JOIN empresas e ON f.empresa_id = e.id
-        LEFT JOIN pacientes p ON f.paciente_id = p.id
-        WHERE f.id = ?`,
-        [facturaId]
-      );
-
+      const [newFactura] = await pool.execute('SELECT * FROM facturas WHERE id = ?', [factura_id]);
       res.status(201).json({
         message: 'Factura creada exitosamente',
         factura: newFactura[0]
       });
-    } catch (error) {
+    } catch (err) {
       await connection.rollback();
-      throw error;
+      throw err;
     } finally {
       connection.release();
     }
   } catch (error) {
     console.error('Error al crear factura:', error);
-    if (error.code === 'ER_DUP_ENTRY') {
-      return res.status(400).json({ error: 'El número de factura ya existe' });
-    }
     res.status(500).json({ error: 'Error al crear factura' });
   }
 };
 
-// Actualizar una factura
 const updateFactura = async (req, res) => {
   try {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      return res.status(400).json({ errors: errors.array() });
-    }
-
     const { id } = req.params;
-    const {
-      numero_factura, cotizacion_id, empresa_id, paciente_id, sede_id,
-      fecha_emision, fecha_vencimiento, estado, tipo_comprobante,
-      subtotal, descuento_total, igv, total, forma_pago, observaciones, detalles
-    } = req.body;
+    const { estado, fecha_pago } = req.body;
 
     const [existing] = await pool.execute('SELECT id, estado FROM facturas WHERE id = ?', [id]);
     if (existing.length === 0) {
       return res.status(404).json({ error: 'Factura no encontrada' });
     }
 
-    if (existing[0].estado !== 'BORRADOR') {
-      return res.status(400).json({ 
-        error: 'Solo se pueden editar facturas en estado BORRADOR' 
-      });
+    if (estado !== undefined) {
+      await pool.execute(
+        'UPDATE facturas SET estado = ?, fecha_pago = COALESCE(?, fecha_pago) WHERE id = ?',
+        [estado, fecha_pago || null, id]
+      );
     }
 
-    const calculatedIGV = igv !== undefined ? igv : (subtotal || 0) * 0.18;
-    const calculatedTotal = total !== undefined ? total : (subtotal || 0) + calculatedIGV - (descuento_total || 0);
-
-    if (numero_factura) {
-      const [duplicate] = await pool.execute(
-        'SELECT id FROM facturas WHERE numero_factura = ? AND id != ?',
-        [numero_factura, id]
-      );
-      if (duplicate.length > 0) {
-        return res.status(400).json({ error: 'El número de factura ya existe' });
-      }
-    }
-
-    const connection = await pool.getConnection();
-    await connection.beginTransaction();
-
-    try {
-      await connection.execute(
-        `UPDATE facturas SET
-          numero_factura = ?, cotizacion_id = ?, empresa_id = ?, paciente_id = ?, sede_id = ?,
-          fecha_emision = ?, fecha_vencimiento = ?, estado = ?, tipo_comprobante = ?,
-          subtotal = ?, descuento_total = ?, igv = ?, total = ?,
-          forma_pago = ?, observaciones = ?
-        WHERE id = ?`,
-        [
-          numero_factura || null, cotizacion_id || null, empresa_id || null, paciente_id || null, sede_id,
-          fecha_emision, fecha_vencimiento || null, estado, tipo_comprobante || 'FACTURA',
-          subtotal || 0, descuento_total || 0, calculatedIGV, calculatedTotal,
-          forma_pago || null, observaciones || null, id
-        ]
-      );
-
-      if (detalles && Array.isArray(detalles)) {
-        await connection.execute('DELETE FROM factura_detalle WHERE factura_id = ?', [id]);
-
-        for (const detalle of detalles) {
-          await connection.execute(
-            `INSERT INTO factura_detalle (
-              factura_id, examen_id, descripcion, cantidad, precio_unitario,
-              descuento_aplicado, subtotal, observaciones
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-            [
-              id, detalle.examen_id, detalle.descripcion || null,
-              detalle.cantidad || 1, detalle.precio_unitario,
-              detalle.descuento_aplicado || 0, detalle.subtotal,
-              detalle.observaciones || null
-            ]
-          );
-        }
-      }
-
-      await connection.commit();
-
-      const [updatedFactura] = await pool.execute(
-        `SELECT f.*, 
-          e.razon_social as empresa_nombre,
-          p.nombre as paciente_nombre, p.apellido_paterno, p.apellido_materno
-        FROM facturas f
-        LEFT JOIN empresas e ON f.empresa_id = e.id
-        LEFT JOIN pacientes p ON f.paciente_id = p.id
-        WHERE f.id = ?`,
-        [id]
-      );
-
-      res.json({
-        message: 'Factura actualizada exitosamente',
-        factura: updatedFactura[0]
-      });
-    } catch (error) {
-      await connection.rollback();
-      throw error;
-    } finally {
-      connection.release();
-    }
+    const [updated] = await pool.execute('SELECT * FROM facturas WHERE id = ?', [id]);
+    res.json({ message: 'Factura actualizada', factura: updated[0] });
   } catch (error) {
     console.error('Error al actualizar factura:', error);
     res.status(500).json({ error: 'Error al actualizar factura' });
   }
 };
 
-// Eliminar una factura
 const deleteFactura = async (req, res) => {
   try {
     const { id } = req.params;
-
-    const [existing] = await pool.execute('SELECT id, estado FROM facturas WHERE id = ?', [id]);
+    const [existing] = await pool.execute('SELECT id, estado, pedido_id FROM facturas WHERE id = ?', [id]);
     if (existing.length === 0) {
       return res.status(404).json({ error: 'Factura no encontrada' });
     }
-
-    if (existing[0].estado !== 'BORRADOR') {
-      return res.status(400).json({ 
-        error: 'Solo se pueden eliminar facturas en estado BORRADOR' 
-      });
+    if (existing[0].estado === 'PAGADA') {
+      return res.status(400).json({ error: 'No se puede eliminar una factura ya pagada' });
     }
 
+    await pool.execute('UPDATE pedidos SET factura_id = NULL WHERE factura_id = ?', [id]);
+    await pool.execute('DELETE FROM factura_cotizacion WHERE factura_id = ?', [id]);
+    await pool.execute('DELETE FROM factura_detalle WHERE factura_id = ?', [id]);
     await pool.execute('DELETE FROM facturas WHERE id = ?', [id]);
+
     res.json({ message: 'Factura eliminada exitosamente' });
   } catch (error) {
     console.error('Error al eliminar factura:', error);

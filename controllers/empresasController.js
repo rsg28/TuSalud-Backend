@@ -62,7 +62,7 @@ const createEmpresa = async (req, res) => {
     const {
       codigo, ruc, razon_social, tipo_persona, tipo_documento, dni,
       ap_paterno, ap_materno, nombres_completos, direccion, celular,
-      contacto, email, actividad_empresa, ubigeo, ciudad, condicion, estado,
+      contacto, email, actividad_empresa, ubigeo, ciudad, condicion, departamento, estado,
       nombre_responsable_pagos, telefono_responsable_pagos, correo_responsable_pagos,
       direccion_oficina_pagos, fecha_presentacion_facturas
     } = req.body;
@@ -79,15 +79,15 @@ const createEmpresa = async (req, res) => {
       `INSERT INTO empresas (
         codigo, ruc, razon_social, tipo_persona, tipo_documento, dni,
         ap_paterno, ap_materno, nombres_completos, direccion, celular,
-        contacto, email, actividad_empresa, ubigeo, ciudad, condicion, estado,
+        contacto, email, actividad_empresa, ubigeo, ciudad, condicion, departamento, estado,
         nombre_responsable_pagos, telefono_responsable_pagos, correo_responsable_pagos,
         direccion_oficina_pagos, fecha_presentacion_facturas
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         codigo || null, ruc || null, razon_social, tipo_persona || null, tipo_documento || null, dni || null,
         ap_paterno || null, ap_materno || null, nombres_completos || null, direccion || null, celular || null,
         contacto || null, email || null, actividad_empresa || null, ubigeo || null, ciudad || null,
-        condicion || null, estado || null, nombre_responsable_pagos || null, telefono_responsable_pagos || null,
+        condicion || null, departamento || null, estado || null, nombre_responsable_pagos || null, telefono_responsable_pagos || null,
         correo_responsable_pagos || null, direccion_oficina_pagos || null, fecha_presentacion_facturas || null
       ]
     );
@@ -115,7 +115,7 @@ const updateEmpresa = async (req, res) => {
     const {
       codigo, ruc, razon_social, tipo_persona, tipo_documento, dni,
       ap_paterno, ap_materno, nombres_completos, direccion, celular,
-      contacto, email, actividad_empresa, ubigeo, ciudad, condicion, estado,
+      contacto, email, actividad_empresa, ubigeo, ciudad, condicion, departamento, estado,
       nombre_responsable_pagos, telefono_responsable_pagos, correo_responsable_pagos,
       direccion_oficina_pagos, fecha_presentacion_facturas
     } = req.body;
@@ -138,7 +138,7 @@ const updateEmpresa = async (req, res) => {
       `UPDATE empresas SET
         codigo = ?, ruc = ?, razon_social = ?, tipo_persona = ?, tipo_documento = ?, dni = ?,
         ap_paterno = ?, ap_materno = ?, nombres_completos = ?, direccion = ?, celular = ?,
-        contacto = ?, email = ?, actividad_empresa = ?, ubigeo = ?, ciudad = ?, condicion = ?, estado = ?,
+        contacto = ?, email = ?, actividad_empresa = ?, ubigeo = ?, ciudad = ?, condicion = ?, departamento = ?, estado = ?,
         nombre_responsable_pagos = ?, telefono_responsable_pagos = ?, correo_responsable_pagos = ?,
         direccion_oficina_pagos = ?, fecha_presentacion_facturas = ?
       WHERE id = ?`,
@@ -146,7 +146,7 @@ const updateEmpresa = async (req, res) => {
         codigo || null, ruc || null, razon_social, tipo_persona || null, tipo_documento || null, dni || null,
         ap_paterno || null, ap_materno || null, nombres_completos || null, direccion || null, celular || null,
         contacto || null, email || null, actividad_empresa || null, ubigeo || null, ciudad || null,
-        condicion || null, estado || null, nombre_responsable_pagos || null, telefono_responsable_pagos || null,
+        condicion || null, departamento || null, estado || null, nombre_responsable_pagos || null, telefono_responsable_pagos || null,
         correo_responsable_pagos || null, direccion_oficina_pagos || null, fecha_presentacion_facturas || null,
         id
       ]
@@ -174,13 +174,11 @@ const deleteEmpresa = async (req, res) => {
       return res.status(404).json({ error: 'Empresa no encontrada' });
     }
 
-    // Verificar si hay pacientes o cotizaciones asociadas
-    const [pacientes] = await pool.execute('SELECT id FROM pacientes WHERE empresa_id = ? LIMIT 1', [id]);
-    const [cotizaciones] = await pool.execute('SELECT id FROM cotizaciones WHERE empresa_id = ? LIMIT 1', [id]);
-
-    if (pacientes.length > 0 || cotizaciones.length > 0) {
+    // Verificar si hay pedidos asociados
+    const [pedidos] = await pool.execute('SELECT id FROM pedidos WHERE empresa_id = ? LIMIT 1', [id]);
+    if (pedidos.length > 0) {
       return res.status(400).json({ 
-        error: 'No se puede eliminar la empresa porque tiene pacientes o cotizaciones asociadas' 
+        error: 'No se puede eliminar la empresa porque tiene pedidos asociados' 
       });
     }
 

@@ -10,22 +10,15 @@ const {
 } = require('../controllers/cotizacionesController');
 const { authenticateToken, requireRole } = require('../middleware/auth');
 
-// Validaciones para crear/actualizar cotización
 const cotizacionValidation = [
-  body('fecha_cotizacion').notEmpty().withMessage('La fecha de cotización es requerida'),
-  body('sede_id').notEmpty().withMessage('La sede es requerida'),
-  body('empresa_id').custom((value, { req }) => {
-    if (!value && !req.body.paciente_id) {
-      throw new Error('Debe especificar una empresa o un paciente');
-    }
-    return true;
-  })
+  body('pedido_id').isInt().withMessage('pedido_id es requerido'),
+  body('items').isArray({ min: 1 }).withMessage('items debe ser un array con al menos un elemento')
 ];
 
-router.get('/', authenticateToken, requireRole('manager', 'vendedor'), getAllCotizaciones);
-router.get('/:id', authenticateToken, requireRole('manager', 'vendedor'), getCotizacionById);
-router.post('/', authenticateToken, requireRole('manager', 'vendedor'), cotizacionValidation, createCotizacion);
-router.put('/:id', authenticateToken, requireRole('manager', 'vendedor'), cotizacionValidation, updateCotizacion);
+router.get('/', authenticateToken, getAllCotizaciones);
+router.get('/:id', authenticateToken, getCotizacionById);
+router.post('/', authenticateToken, requireRole('manager', 'vendedor', 'cliente'), cotizacionValidation, createCotizacion);
+router.put('/:id', authenticateToken, requireRole('manager', 'vendedor', 'cliente'), updateCotizacion);
 router.delete('/:id', authenticateToken, requireRole('manager', 'vendedor'), deleteCotizacion);
 
 module.exports = router;

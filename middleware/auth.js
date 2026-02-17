@@ -53,5 +53,8 @@ const requireRole = (...roles) => {
 
 module.exports = {
   authenticateToken,
-  requireRole
+  requireRole,
+  // Aliases para compatibilidad
+  verificarToken: authenticateToken,
+  verificarRol: (roles) => requireRole(...roles)
 };
