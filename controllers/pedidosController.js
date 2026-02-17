@@ -425,9 +425,19 @@ const obtenerArticulosPendientes = async (req, res) => {
 const cancelarPedido = async (req, res) => {
   try {
     const { pedido_id } = req.params;
-    const [pedido] = await pool.execute('SELECT id, estado FROM pedidos WHERE id = ?', [pedido_id]);
+    const [pedido] = await pool.execute('SELECT id, estado, empresa_id FROM pedidos WHERE id = ?', [pedido_id]);
     if (pedido.length === 0) {
       return res.status(404).json({ error: 'Pedido no encontrado' });
+    }
+    if (req.user.rol === 'cliente') {
+      const [empresas] = await pool.execute(
+        'SELECT empresa_id FROM usuario_empresa WHERE usuario_id = ?',
+        [req.user.id]
+      );
+      const ids = empresas.map((e) => e.empresa_id);
+      if (!ids.includes(pedido[0].empresa_id)) {
+        return res.status(403).json({ error: 'No puede cancelar este pedido' });
+      }
     }
     await pool.execute("UPDATE pedidos SET estado = 'CANCELADO' WHERE id = ?", [pedido_id]);
     res.json({ message: 'Pedido cancelado' });
