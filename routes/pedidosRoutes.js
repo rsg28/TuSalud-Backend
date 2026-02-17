@@ -5,7 +5,7 @@ const { authenticateToken, requireRole } = require('../middleware/auth');
 
 router.get('/', authenticateToken, pedidosController.listarPedidos);
 router.get('/pendientes-aprobacion', authenticateToken, requireRole('manager'), pedidosController.obtenerArticulosPendientes);
-router.post('/', authenticateToken, requireRole('vendedor', 'manager'), pedidosController.crearPedido);
+router.post('/', authenticateToken, requireRole('vendedor', 'manager', 'cliente'), pedidosController.crearPedido);
 
 router.get('/:pedido_id', authenticateToken, pedidosController.obtenerPedido);
 router.get('/:pedido_id/historial', authenticateToken, pedidosController.obtenerHistorial);

@@ -189,7 +189,8 @@ const crearPedido = async (req, res) => {
     await connection.beginTransaction();
 
     const { empresa_id, sede_id, cliente_usuario_id, observaciones, condiciones_pago, fecha_vencimiento, examenes } = req.body;
-    const vendedor_id = req.user ? req.user.id : null;
+    const vendedor_id = (req.user && (req.user.rol === 'vendedor' || req.user.rol === 'manager')) ? req.user.id : null;
+    const cliente_id = (req.user && req.user.rol === 'cliente') ? req.user.id : (cliente_usuario_id || null);
 
     if (!empresa_id || !sede_id) {
       return res.status(400).json({ error: 'empresa_id y sede_id son requeridos' });
@@ -209,7 +210,7 @@ const crearPedido = async (req, res) => {
     const [result] = await connection.execute(
       `INSERT INTO pedidos (numero_pedido, empresa_id, sede_id, vendedor_id, cliente_usuario_id, estado, total_empleados, observaciones, condiciones_pago, fecha_vencimiento)
        VALUES (?, ?, ?, ?, ?, 'PENDIENTE', 0, ?, ?, ?)`,
-      [numero_pedido, empresa_id, sede_id, vendedor_id, cliente_usuario_id || null, observaciones || null, condiciones_pago || null, fecha_vencimiento || null]
+      [numero_pedido, empresa_id, sede_id, vendedor_id, cliente_id, observaciones || null, condiciones_pago || null, fecha_vencimiento || null]
     );
     const pedido_id = result.insertId;
 

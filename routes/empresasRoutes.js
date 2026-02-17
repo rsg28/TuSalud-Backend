@@ -3,6 +3,7 @@ const router = express.Router();
 const { body } = require('express-validator');
 const {
   getAllEmpresas,
+  getMisEmpresas,
   getEmpresaById,
   createEmpresa,
   updateEmpresa,
@@ -17,6 +18,7 @@ const empresaValidation = [
 ];
 
 router.get('/', authenticateToken, getAllEmpresas);
+router.get('/mias', authenticateToken, getMisEmpresas);
 router.get('/:id', authenticateToken, getEmpresaById);
 router.post('/', authenticateToken, requireRole('manager', 'vendedor'), empresaValidation, createEmpresa);
 router.put('/:id', authenticateToken, requireRole('manager', 'vendedor'), empresaValidation, updateEmpresa);

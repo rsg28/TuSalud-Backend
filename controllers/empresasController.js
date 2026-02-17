@@ -34,6 +34,26 @@ const getAllEmpresas = async (req, res) => {
   }
 };
 
+// Empresas asociadas al usuario actual (usuario_empresa)
+const getMisEmpresas = async (req, res) => {
+  try {
+    if (!req.user || !req.user.id) {
+      return res.status(401).json({ error: 'Usuario no autenticado' });
+    }
+    const [empresas] = await pool.execute(
+      `SELECT e.* FROM empresas e
+       INNER JOIN usuario_empresa ue ON ue.empresa_id = e.id
+       WHERE ue.usuario_id = ?
+       ORDER BY ue.es_principal DESC, e.razon_social ASC`,
+      [req.user.id]
+    );
+    res.json({ empresas });
+  } catch (error) {
+    console.error('Error al obtener mis empresas:', error);
+    res.status(500).json({ error: 'Error al obtener empresas' });
+  }
+};
+
 // Obtener una empresa por ID
 const getEmpresaById = async (req, res) => {
   try {
@@ -192,6 +212,7 @@ const deleteEmpresa = async (req, res) => {
 
 module.exports = {
   getAllEmpresas,
+  getMisEmpresas,
   getEmpresaById,
   createEmpresa,
   updateEmpresa,
