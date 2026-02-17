@@ -112,7 +112,15 @@ const createEmpresa = async (req, res) => {
       ]
     );
 
-    const [newEmpresa] = await pool.execute('SELECT * FROM empresas WHERE id = ?', [result.insertId]);
+    const empresaId = result.insertId;
+    // Si quien crea es un cliente, asociar la empresa al usuario (uno puede tener varias)
+    if (req.user && req.user.rol === 'cliente') {
+      await pool.execute(
+        'INSERT INTO usuario_empresa (usuario_id, empresa_id, es_principal) VALUES (?, ?, 1)',
+        [req.user.id, empresaId]
+      );
+    }
+    const [newEmpresa] = await pool.execute('SELECT * FROM empresas WHERE id = ?', [empresaId]);
     res.status(201).json({ message: 'Empresa creada exitosamente', empresa: newEmpresa[0] });
   } catch (error) {
     console.error('Error al crear empresa:', error);
