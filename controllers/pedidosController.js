@@ -39,6 +39,17 @@ const listarPedidos = async (req, res) => {
     if (!req.user || !req.user.id) {
       return res.status(401).json({ error: 'Usuario no autenticado' });
     }
+
+    // DEBUG: quién llama y qué hay en la BD
+    console.log('[listarPedidos] usuario:', { id: req.user.id, rol: req.user.rol, email: req.user.email });
+    try {
+      const [totalRows] = await pool.execute('SELECT COUNT(*) AS total FROM pedidos WHERE estado != ?', ['CANCELADO']);
+      const [sinVendedorRows] = await pool.execute('SELECT COUNT(*) AS total FROM pedidos WHERE estado != ? AND vendedor_id IS NULL', ['CANCELADO']);
+      console.log('[listarPedidos] en BD: total no cancelados=', totalRows[0].total, 'sin vendedor=', sinVendedorRows[0].total);
+    } catch (e) {
+      console.log('[listarPedidos] debug count error', e.message);
+    }
+
     const { estado, empresa_id, vendedor_id, page = 1, limit = 20 } = req.query;
     const pageNum = Math.max(1, parseInt(String(page), 10) || 1);
     const limitNum = Math.max(1, Math.min(100, parseInt(String(limit), 10) || 20));
@@ -72,17 +83,19 @@ const listarPedidos = async (req, res) => {
       params.push(vendedor_id);
     }
 
-    if (req.user.rol === 'vendedor') {
-      query += ' AND p.vendedor_id = ?';
+    const rol = (req.user.rol || '').toLowerCase();
+    if (rol === 'vendedor') {
+      query += ' AND (p.vendedor_id = ? OR p.vendedor_id IS NULL)';
       params.push(req.user.id);
     }
-    if (req.user.rol === 'cliente') {
+    if (rol === 'cliente') {
       const [empresas] = await pool.execute(
         'SELECT empresa_id FROM usuario_empresa WHERE usuario_id = ?',
         [req.user.id]
       );
       const ids = empresas.map((e) => e.empresa_id);
       if (ids.length === 0) {
+        console.log('[listarPedidos] cliente sin empresas asignadas');
         return res.json({ pedidos: [], page: pageNum, limit: limitNum });
       }
       query += ` AND p.empresa_id IN (${ids.map(() => '?').join(',')})`;
@@ -94,7 +107,9 @@ const listarPedidos = async (req, res) => {
     const safeOffset = Math.max(0, Number(offset) || 0);
     query += ` ORDER BY p.created_at DESC LIMIT ${safeLimit} OFFSET ${safeOffset}`;
 
+    console.log('[listarPedidos] query params:', params);
     const [pedidos] = await pool.execute(query, params);
+    console.log('[listarPedidos] devolviendo', pedidos.length, 'pedidos');
     res.json({
       pedidos: sanitizeForJson(pedidos),
       page: pageNum,
