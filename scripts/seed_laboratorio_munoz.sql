@@ -538,18 +538,18 @@ INSERT INTO tmp_examenes (identificador, nombre, categoria, codigo, precio) VALU
 INSERT INTO examenes (identificador, nombre, categoria, codigo, activo)
 SELECT identificador, nombre, categoria, codigo, 1 FROM tmp_examenes;
 
--- Precios en las 3 sedes
+-- Precios en las 3 sedes (JOIN por codigo para matchear solo los exámenes recién insertados de este script)
 INSERT INTO examen_precio (examen_id, sede_id, precio)
 SELECT e.id, @sede_arequipa, t.precio FROM tmp_examenes t
-JOIN examenes e ON e.identificador = t.identificador AND e.nombre = t.nombre;
+JOIN examenes e ON e.identificador = t.identificador AND e.nombre = t.nombre AND e.codigo = t.codigo;
 
 INSERT INTO examen_precio (examen_id, sede_id, precio)
 SELECT e.id, @sede_lima, t.precio FROM tmp_examenes t
-JOIN examenes e ON e.identificador = t.identificador AND e.nombre = t.nombre;
+JOIN examenes e ON e.identificador = t.identificador AND e.nombre = t.nombre AND e.codigo = t.codigo;
 
 INSERT INTO examen_precio (examen_id, sede_id, precio)
 SELECT e.id, @sede_cusco, t.precio FROM tmp_examenes t
-JOIN examenes e ON e.identificador = t.identificador AND e.nombre = t.nombre;
+JOIN examenes e ON e.identificador = t.identificador AND e.nombre = t.nombre AND e.codigo = t.codigo;
 
 DROP TEMPORARY TABLE IF EXISTS tmp_examenes;
 
