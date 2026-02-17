@@ -60,6 +60,8 @@ const listarPedidos = async (req, res) => {
     if (estado) {
       query += ' AND p.estado = ?';
       params.push(estado);
+    } else {
+      query += " AND p.estado != 'CANCELADO'";
     }
     if (empresa_id) {
       query += ' AND p.empresa_id = ?';
@@ -420,6 +422,21 @@ const obtenerArticulosPendientes = async (req, res) => {
   res.json({ articulos: [] });
 };
 
+const cancelarPedido = async (req, res) => {
+  try {
+    const { pedido_id } = req.params;
+    const [pedido] = await pool.execute('SELECT id, estado FROM pedidos WHERE id = ?', [pedido_id]);
+    if (pedido.length === 0) {
+      return res.status(404).json({ error: 'Pedido no encontrado' });
+    }
+    await pool.execute("UPDATE pedidos SET estado = 'CANCELADO' WHERE id = ?", [pedido_id]);
+    res.json({ message: 'Pedido cancelado' });
+  } catch (error) {
+    console.error('Error al cancelar pedido:', error);
+    res.status(500).json({ error: 'Error al cancelar pedido' });
+  }
+};
+
 module.exports = {
   listarPedidos,
   obtenerPedido,
@@ -429,5 +446,6 @@ module.exports = {
   obtenerHistorial,
   cargarEmpleados,
   marcarCompletado,
+  cancelarPedido,
   obtenerArticulosPendientes
 };

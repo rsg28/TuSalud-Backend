@@ -14,5 +14,6 @@ router.post('/:pedido_id/examenes', authenticateToken, requireRole('vendedor', '
 router.post('/:pedido_id/listo-cotizacion', authenticateToken, requireRole('vendedor', 'manager'), pedidosController.marcarListoParaCotizacion);
 router.post('/:pedido_id/empleados', authenticateToken, requireRole('vendedor', 'manager', 'cliente'), pedidosController.cargarEmpleados);
 router.post('/:pedido_id/completado', authenticateToken, requireRole('vendedor', 'manager'), pedidosController.marcarCompletado);
+router.post('/:pedido_id/cancelar', authenticateToken, requireRole('vendedor', 'manager'), pedidosController.cancelarPedido);
 
 module.exports = router;
