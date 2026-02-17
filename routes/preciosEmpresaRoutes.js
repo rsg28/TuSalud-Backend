@@ -10,6 +10,9 @@ const { verificarToken, verificarRol } = require('../middleware/auth');
 // Obtener matriz de artículos (exámenes con precios por sede)
 router.get('/matriz', verificarToken, preciosController.obtenerMatrizArticulos);
 
+// Buscar exámenes por texto (query: q, sede_id)
+router.get('/buscar', verificarToken, preciosController.buscarExamenes);
+
 // Listar precios por sede
 router.get('/sede/:sede_id', verificarToken, preciosController.listarPreciosSede);
 

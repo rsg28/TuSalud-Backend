@@ -87,6 +87,18 @@ const createEmpresa = async (req, res) => {
       direccion_oficina_pagos, fecha_presentacion_facturas
     } = req.body;
 
+    // Verificar si ya existe una empresa con la misma razón social (sin distinguir mayúsculas)
+    const razonNorm = (razon_social || '').trim();
+    if (razonNorm) {
+      const [existingNombre] = await pool.execute(
+        'SELECT id FROM empresas WHERE LOWER(TRIM(razon_social)) = LOWER(?)',
+        [razonNorm]
+      );
+      if (existingNombre.length > 0) {
+        return res.status(400).json({ error: 'Ya existe una empresa con esa razón social' });
+      }
+    }
+
     // Verificar si el RUC ya existe
     if (ruc) {
       const [existing] = await pool.execute('SELECT id FROM empresas WHERE ruc = ?', [ruc]);

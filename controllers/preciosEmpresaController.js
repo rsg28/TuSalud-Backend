@@ -55,6 +55,41 @@ exports.obtenerMatrizArticulos = async (req, res) => {
   }
 };
 
+// Buscar exámenes por texto (nombre o código) con precio para la sede
+exports.buscarExamenes = async (req, res) => {
+  try {
+    const { sede_id, q } = req.query;
+    if (!sede_id) {
+      return res.status(400).json({ error: 'sede_id es requerido' });
+    }
+    const term = (q || '').trim();
+    if (!term || term.length < 2) {
+      return res.json({ examenes: [] });
+    }
+    const like = `%${term}%`;
+    const [examenes] = await pool.query(
+      `SELECT 
+        e.id AS examen_id,
+        e.nombre AS nombre_examen,
+        e.categoria AS examen_principal,
+        COALESCE(ep.precio, ep_general.precio) AS precio
+      FROM examenes e
+      LEFT JOIN examen_precio ep ON e.id = ep.examen_id AND ep.sede_id = ?
+      LEFT JOIN examen_precio ep_general ON e.id = ep_general.examen_id AND ep_general.sede_id IS NULL
+      WHERE e.activo = 1
+        AND (e.nombre LIKE ? OR e.codigo LIKE ?)
+        AND (ep.id IS NOT NULL OR ep_general.id IS NOT NULL)
+      ORDER BY e.nombre
+      LIMIT 30`,
+      [sede_id, like, like]
+    );
+    res.json({ examenes });
+  } catch (error) {
+    console.error('Error al buscar exámenes:', error);
+    res.status(500).json({ error: 'Error al buscar exámenes' });
+  }
+};
+
 // Listar precios por sede (examen_precio)
 exports.listarPreciosSede = async (req, res) => {
   try {
