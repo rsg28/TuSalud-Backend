@@ -211,7 +211,7 @@ const crearPedido = async (req, res) => {
 
     const [result] = await connection.execute(
       `INSERT INTO pedidos (numero_pedido, empresa_id, sede_id, vendedor_id, cliente_usuario_id, estado, total_empleados, observaciones, condiciones_pago, fecha_vencimiento)
-       VALUES (?, ?, ?, ?, ?, 'PENDIENTE', 0, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, 'ESPERA_COTIZACION', 0, ?, ?, ?)`,
       [numero_pedido, empresa_id, sede_id, vendedor_id, cliente_id, observaciones || null, condiciones_pago || null, fecha_vencimiento || null]
     );
     const pedido_id = result.insertId;
@@ -263,8 +263,8 @@ const agregarExamen = async (req, res) => {
     if (pedido.length === 0) {
       return res.status(404).json({ error: 'Pedido no encontrado' });
     }
-    if (pedido[0].estado !== 'PENDIENTE') {
-      return res.status(400).json({ error: 'Solo se pueden agregar exámenes a pedidos en estado PENDIENTE' });
+    if (pedido[0].estado !== 'PENDIENTE' && pedido[0].estado !== 'ESPERA_COTIZACION') {
+      return res.status(400).json({ error: 'Solo se pueden agregar exámenes a pedidos en espera de cotización' });
     }
 
     const cant = Math.max(1, parseInt(cantidad) || 1);
@@ -297,8 +297,8 @@ const marcarListoParaCotizacion = async (req, res) => {
     if (pedido.length === 0) {
       return res.status(404).json({ error: 'Pedido no encontrado' });
     }
-    if (pedido[0].estado !== 'PENDIENTE') {
-      return res.status(400).json({ error: 'Solo pedidos en PENDIENTE pueden marcarse listos para cotización' });
+    if (pedido[0].estado !== 'PENDIENTE' && pedido[0].estado !== 'ESPERA_COTIZACION') {
+      return res.status(400).json({ error: 'Solo pedidos a la espera de cotización pueden marcarse listos' });
     }
 
     const [tieneExamenes] = await pool.execute('SELECT 1 FROM pedido_examenes WHERE pedido_id = ? LIMIT 1', [pedido_id]);
