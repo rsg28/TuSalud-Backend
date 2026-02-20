@@ -202,7 +202,7 @@ const obtenerPedido = async (req, res) => {
   }
 };
 
-// GET /api/pedidos/:pedido_id/pacientes-examenes — pacientes del pedido con exámenes y progreso (completado/no)
+// GET /api/pedidos/:pedido_id/pacientes-examenes — lista pacientes del pedido y exámenes asignados/completados
 const obtenerPacientesExamenes = async (req, res) => {
   try {
     const pedidoId = parseInt(String(req.params.pedido_id || ''), 10);
@@ -211,14 +211,13 @@ const obtenerPacientesExamenes = async (req, res) => {
     }
 
     const [pedidos] = await pool.execute(
-      'SELECT id, numero_pedido, total_empleados FROM pedidos WHERE id = ?',
+      'SELECT id, numero_pedido FROM pedidos WHERE id = ?',
       [pedidoId]
     );
     if (pedidos.length === 0) {
       return res.status(404).json({ error: 'Pedido no encontrado' });
     }
     const numero_pedido = pedidos[0].numero_pedido;
-    const total_empleados = pedidos[0].total_empleados != null ? Number(pedidos[0].total_empleados) : 0;
 
     const [pacientes] = await pool.execute(
       `SELECT pp.id, pp.dni, pp.nombre_completo, pp.cargo, pp.area
@@ -227,9 +226,6 @@ const obtenerPacientesExamenes = async (req, res) => {
        ORDER BY pp.nombre_completo`,
       [pedidoId]
     );
-    if (process.env.NODE_ENV !== 'production') {
-      console.log('[pacientes-examenes] pedido_id=', pedidoId, 'pacientes_count=', pacientes.length);
-    }
 
     let total_examenes_asignados = 0;
     let total_examenes_completados = 0;
@@ -269,7 +265,7 @@ const obtenerPacientesExamenes = async (req, res) => {
       }));
     }
 
-    const payload = {
+    res.json({
       numero_pedido,
       pacientes: resultado,
       resumen: {
@@ -277,11 +273,7 @@ const obtenerPacientesExamenes = async (req, res) => {
         total_examenes_asignados,
         total_examenes_completados
       }
-    };
-    if (resultado.length === 0 && total_empleados > 0) {
-      payload.aviso = 'El pedido indica empleados pero aún no se ha cargado la lista de empleados. Use "Cargar empleados" desde el detalle del pedido (cuando el pedido esté en Cotización aprobada).';
-    }
-    res.json(payload);
+    });
   } catch (error) {
     console.error('Error al obtener pacientes y exámenes:', error);
     res.status(500).json({ error: 'Error al obtener pacientes y exámenes' });
