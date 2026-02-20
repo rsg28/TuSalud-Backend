@@ -5,7 +5,7 @@ const { validationResult } = require('express-validator');
 
 const getAllFacturas = async (req, res) => {
   try {
-    const { pedido_id, estado, empresa_id } = req.query;
+    const { pedido_id, user_id, estado, empresa_id } = req.query;
     let query = `
       SELECT f.*, p.numero_pedido, p.empresa_id, e.razon_social AS empresa_nombre, e.ruc AS empresa_ruc
       FROM facturas f
@@ -18,6 +18,10 @@ const getAllFacturas = async (req, res) => {
     if (pedido_id) {
       query += ' AND f.pedido_id = ?';
       params.push(pedido_id);
+    }
+    if (user_id) {
+      query += ' AND p.cliente_usuario_id = ?';
+      params.push(user_id);
     }
     if (estado) {
       query += ' AND f.estado = ?';

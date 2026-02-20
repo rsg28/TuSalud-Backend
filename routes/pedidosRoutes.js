@@ -3,17 +3,46 @@ const router = express.Router();
 const pedidosController = require('../controllers/pedidosController');
 const { authenticateToken, requireRole } = require('../middleware/auth');
 
-router.get('/', authenticateToken, pedidosController.listarPedidos);
+// GET /api/pedidos — Lista todos los pedidos (filtros por query: empresa_id, estado, vendedor_id, user_id, etc.). Solo vendedor y manager.
+router.get('/', authenticateToken, requireRole('vendedor', 'manager'), pedidosController.listarPedidos);
+
+// GET /api/pedidos/mios — Lista los pedidos del usuario autenticado (cliente_usuario_id = yo). Para que el cliente vea solo los suyos.
+router.get('/mios', authenticateToken, pedidosController.listarMisPedidos);
+
+// GET /api/pedidos/pendientes-aprobacion — Artículos/cotizaciones pendientes de aprobación por manager
 router.get('/pendientes-aprobacion', authenticateToken, requireRole('manager'), pedidosController.obtenerArticulosPendientes);
+
+// POST /api/pedidos — Crea un nuevo pedido (vendedor, manager o cliente)
 router.post('/', authenticateToken, requireRole('vendedor', 'manager', 'cliente'), pedidosController.crearPedido);
 
+// GET /api/pedidos/:pedido_id/pacientes-examenes — Lista pacientes del pedido y exámenes asignados/completados
+router.get('/:pedido_id/pacientes-examenes', authenticateToken, pedidosController.obtenerPacientesExamenes);
+
+// GET /api/pedidos/:pedido_id/cotizaciones — Lista todas las cotizaciones del pedido
+router.get('/:pedido_id/cotizaciones', authenticateToken, pedidosController.obtenerCotizacionesDelPedido);
+
+// GET /api/pedidos/:pedido_id/facturas — Lista todas las facturas del pedido
+router.get('/:pedido_id/facturas', authenticateToken, pedidosController.obtenerFacturasDelPedido);
+
+// GET /api/pedidos/:pedido_id — Obtiene el detalle de un pedido
 router.get('/:pedido_id', authenticateToken, pedidosController.obtenerPedido);
+
+// GET /api/pedidos/:pedido_id/historial — Obtiene el historial de eventos del pedido
 router.get('/:pedido_id/historial', authenticateToken, pedidosController.obtenerHistorial);
 
+// POST /api/pedidos/:pedido_id/examenes — Agrega un examen al pedido (vendedor o manager)
 router.post('/:pedido_id/examenes', authenticateToken, requireRole('vendedor', 'manager'), pedidosController.agregarExamen);
+
+// POST /api/pedidos/:pedido_id/listo-cotizacion — Marca el pedido como listo para cotización (vendedor o manager)
 router.post('/:pedido_id/listo-cotizacion', authenticateToken, requireRole('vendedor', 'manager'), pedidosController.marcarListoParaCotizacion);
+
+// POST /api/pedidos/:pedido_id/empleados — Carga la lista de empleados/pacientes del pedido (vendedor, manager o cliente)
 router.post('/:pedido_id/empleados', authenticateToken, requireRole('vendedor', 'manager', 'cliente'), pedidosController.cargarEmpleados);
+
+// POST /api/pedidos/:pedido_id/completado — Marca el pedido como completado (vendedor o manager)
 router.post('/:pedido_id/completado', authenticateToken, requireRole('vendedor', 'manager'), pedidosController.marcarCompletado);
+
+// POST /api/pedidos/:pedido_id/cancelar — Cancela el pedido (vendedor, manager o cliente)
 router.post('/:pedido_id/cancelar', authenticateToken, requireRole('vendedor', 'manager', 'cliente'), pedidosController.cancelarPedido);
 
 module.exports = router;

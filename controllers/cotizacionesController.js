@@ -11,7 +11,7 @@ const generarNumeroCotizacion = async () => {
 
 const getAllCotizaciones = async (req, res) => {
   try {
-    const { pedido_id, estado, empresa_id } = req.query;
+    const { pedido_id, user_id, estado, empresa_id } = req.query;
     let query = `
       SELECT c.*,
         p.numero_pedido, p.empresa_id,
@@ -26,6 +26,10 @@ const getAllCotizaciones = async (req, res) => {
     if (pedido_id) {
       query += ' AND c.pedido_id = ?';
       params.push(pedido_id);
+    }
+    if (user_id) {
+      query += ' AND c.creador_id = ?';
+      params.push(user_id);
     }
     if (estado) {
       query += ' AND c.estado = ?';

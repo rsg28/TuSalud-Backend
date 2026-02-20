@@ -40,10 +40,15 @@ const listarPedidos = async (req, res) => {
       return res.status(401).json({ error: 'Usuario no autenticado' });
     }
 
-    const { estado, empresa_id, vendedor_id, page = 1, limit = 20 } = req.query;
+    const { estado, empresa_id, vendedor_id, user_id, page = 1, limit = 20 } = req.query;
     const pageNum = Math.max(1, parseInt(String(page), 10) || 1);
     const limitNum = Math.max(1, Math.min(100, parseInt(String(limit), 10) || 20));
     const offset = (pageNum - 1) * limitNum;
+
+    const rol = (req.user.rol || '').toLowerCase();
+    if (user_id && rol === 'cliente' && parseInt(String(user_id), 10) !== req.user.id) {
+      return res.status(403).json({ error: 'Solo puedes consultar tus propios pedidos' });
+    }
 
     let query = `
       SELECT p.*,
@@ -72,8 +77,11 @@ const listarPedidos = async (req, res) => {
       query += ' AND p.vendedor_id = ?';
       params.push(vendedor_id);
     }
+    if (user_id) {
+      query += ' AND p.cliente_usuario_id = ?';
+      params.push(user_id);
+    }
 
-    const rol = (req.user.rol || '').toLowerCase();
     if (rol === 'vendedor') {
       query += ' AND (p.vendedor_id = ? OR p.vendedor_id IS NULL)';
       params.push(req.user.id);
@@ -111,6 +119,12 @@ const listarPedidos = async (req, res) => {
       res.status(500).send(JSON.stringify({ error: 'Error al listar pedidos', message }));
     }
   }
+};
+
+/** Lista los pedidos del usuario autenticado (cliente_usuario_id = req.user.id). Para que el cliente vea solo los suyos. */
+const listarMisPedidos = async (req, res) => {
+  req.query.user_id = String(req.user.id);
+  return listarPedidos(req, res);
 };
 
 const obtenerPedido = async (req, res) => {
@@ -173,17 +187,92 @@ const obtenerPedido = async (req, res) => {
       [pedido_id]
     );
 
-    res.json({
+    const payload = sanitizeForJson({
       ...pedido,
       examenes,
       cotizaciones,
       factura,
-      pacientes,
+      pacientes: Array.isArray(pacientes) ? pacientes.map((p) => sanitizeForJson({ ...p })) : [],
       historial
     });
+    res.json(payload);
   } catch (error) {
     console.error('Error al obtener pedido:', error);
     res.status(500).json({ error: 'Error al obtener pedido' });
+  }
+};
+
+// GET /api/pedidos/:pedido_id/pacientes-examenes — pacientes del pedido con exámenes y progreso (completado/no)
+const obtenerPacientesExamenes = async (req, res) => {
+  try {
+    const { pedido_id } = req.params;
+    const [pedidos] = await pool.execute(
+      'SELECT id, numero_pedido FROM pedidos WHERE id = ?',
+      [pedido_id]
+    );
+    if (pedidos.length === 0) {
+      return res.status(404).json({ error: 'Pedido no encontrado' });
+    }
+    const numero_pedido = pedidos[0].numero_pedido;
+
+    const [pacientes] = await pool.execute(
+      `SELECT pp.id, pp.dni, pp.nombre_completo, pp.cargo, pp.area
+       FROM pedido_pacientes pp
+       WHERE pp.pedido_id = ?
+       ORDER BY pp.nombre_completo`,
+      [pedido_id]
+    );
+
+    let total_examenes_asignados = 0;
+    let total_examenes_completados = 0;
+    const resultado = [];
+
+    for (const p of pacientes) {
+      const [examenes] = await pool.execute(
+        `SELECT pea.examen_id, ex.nombre,
+                CASE WHEN pec.id IS NOT NULL THEN 1 ELSE 0 END AS completado,
+                pec.fecha_completado
+         FROM paciente_examen_asignado pea
+         LEFT JOIN examenes ex ON ex.id = pea.examen_id
+         LEFT JOIN paciente_examen_completado pec ON pec.paciente_id = pea.paciente_id AND pec.examen_id = pea.examen_id
+         WHERE pea.paciente_id = ?
+         ORDER BY ex.nombre`,
+        [p.id]
+      );
+      const examenesList = examenes.map((e) => ({
+        examen_id: e.examen_id,
+        nombre: e.nombre || `Examen ${e.examen_id}`,
+        completado: Boolean(e.completado),
+        fecha_completado: e.fecha_completado ? (e.fecha_completado instanceof Date ? e.fecha_completado.toISOString() : String(e.fecha_completado)) : null
+      }));
+      const completadosPaciente = examenesList.filter((e) => e.completado).length;
+      total_examenes_asignados += examenesList.length;
+      total_examenes_completados += completadosPaciente;
+
+      resultado.push(sanitizeForJson({
+        id: p.id,
+        dni: p.dni,
+        nombre_completo: p.nombre_completo,
+        cargo: p.cargo,
+        area: p.area,
+        examenes: examenesList,
+        examenes_completados: completadosPaciente,
+        examenes_total: examenesList.length
+      }));
+    }
+
+    res.json({
+      numero_pedido,
+      pacientes: resultado,
+      resumen: {
+        total_pacientes: resultado.length,
+        total_examenes_asignados,
+        total_examenes_completados
+      }
+    });
+  } catch (error) {
+    console.error('Error al obtener pacientes y exámenes:', error);
+    res.status(500).json({ error: 'Error al obtener pacientes y exámenes' });
   }
 };
 
@@ -341,6 +430,54 @@ const obtenerHistorial = async (req, res) => {
   }
 };
 
+/** Todas las cotizaciones del pedido (por pedido_id). */
+const obtenerCotizacionesDelPedido = async (req, res) => {
+  try {
+    const { pedido_id } = req.params;
+    const [pedido] = await pool.execute('SELECT id FROM pedidos WHERE id = ?', [pedido_id]);
+    if (pedido.length === 0) {
+      return res.status(404).json({ error: 'Pedido no encontrado' });
+    }
+    const [cotizaciones] = await pool.execute(
+      `SELECT c.*, p.numero_pedido, e.razon_social AS empresa_nombre, e.ruc AS empresa_ruc
+       FROM cotizaciones c
+       JOIN pedidos p ON c.pedido_id = p.id
+       JOIN empresas e ON p.empresa_id = e.id
+       WHERE c.pedido_id = ?
+       ORDER BY c.es_complementaria ASC, c.fecha DESC, c.id ASC`,
+      [pedido_id]
+    );
+    res.json({ cotizaciones: sanitizeForJson(cotizaciones) });
+  } catch (error) {
+    console.error('Error al obtener cotizaciones del pedido:', error);
+    res.status(500).json({ error: 'Error al obtener cotizaciones del pedido' });
+  }
+};
+
+/** Todas las facturas del pedido (por pedido_id). */
+const obtenerFacturasDelPedido = async (req, res) => {
+  try {
+    const { pedido_id } = req.params;
+    const [pedido] = await pool.execute('SELECT id FROM pedidos WHERE id = ?', [pedido_id]);
+    if (pedido.length === 0) {
+      return res.status(404).json({ error: 'Pedido no encontrado' });
+    }
+    const [facturas] = await pool.execute(
+      `SELECT f.*, p.numero_pedido, e.razon_social AS empresa_nombre, e.ruc AS empresa_ruc
+       FROM facturas f
+       JOIN pedidos p ON f.pedido_id = p.id
+       JOIN empresas e ON p.empresa_id = e.id
+       WHERE f.pedido_id = ?
+       ORDER BY f.fecha_emision DESC`,
+      [pedido_id]
+    );
+    res.json({ facturas: sanitizeForJson(facturas) });
+  } catch (error) {
+    console.error('Error al obtener facturas del pedido:', error);
+    res.status(500).json({ error: 'Error al obtener facturas del pedido' });
+  }
+};
+
 const cargarEmpleados = async (req, res) => {
   const connection = await pool.getConnection();
   try {
@@ -450,7 +587,11 @@ const cancelarPedido = async (req, res) => {
 
 module.exports = {
   listarPedidos,
+  listarMisPedidos,
   obtenerPedido,
+  obtenerPacientesExamenes,
+  obtenerCotizacionesDelPedido,
+  obtenerFacturasDelPedido,
   crearPedido,
   agregarExamen,
   marcarListoParaCotizacion,
