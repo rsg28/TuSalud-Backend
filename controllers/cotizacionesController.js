@@ -1,6 +1,9 @@
 const pool = require('../config/database');
 const { validationResult } = require('express-validator');
 
+// Estados válidos de cotización. El manager solo aprueba (APROBADA_POR_MANAGER), no rechaza.
+const ESTADOS_COTIZACION = ['BORRADOR', 'ENVIADA', 'ENVIADA_AL_CLIENTE', 'ENVIADA_AL_MANAGER', 'APROBADA_POR_MANAGER', 'APROBADA', 'RECHAZADA'];
+
 // Nuevo esquema: cotizaciones por pedido_id, cotizacion_items (nombre, cantidad, precio_base, precio_final, variacion_pct)
 
 const generarNumeroCotizacion = async () => {
@@ -226,6 +229,9 @@ const updateCotizacion = async (req, res) => {
 
     try {
       if (estado !== undefined) {
+        if (!ESTADOS_COTIZACION.includes(estado)) {
+          throw new Error(`estado debe ser uno de: ${ESTADOS_COTIZACION.join(', ')}`);
+        }
         const esEnviada = ['ENVIADA', 'ENVIADA_AL_CLIENTE', 'ENVIADA_AL_MANAGER'].includes(estado);
         const esAprobada = estado === 'APROBADA';
         await connection.execute(
@@ -311,6 +317,9 @@ const updateEstadoCotizacion = async (req, res) => {
     if (!estado || typeof estado !== 'string') {
       return res.status(400).json({ error: 'estado es requerido' });
     }
+    if (!ESTADOS_COTIZACION.includes(estado)) {
+      return res.status(400).json({ error: `estado debe ser uno de: ${ESTADOS_COTIZACION.join(', ')}` });
+    }
     const [existing] = await pool.execute('SELECT id, estado, pedido_id, es_complementaria FROM cotizaciones WHERE id = ?', [id]);
     if (existing.length === 0) {
       return res.status(404).json({ error: 'Cotización no encontrada' });
@@ -322,21 +331,25 @@ const updateEstadoCotizacion = async (req, res) => {
         'UPDATE cotizaciones SET estado = ?, mensaje_rechazo = COALESCE(?, mensaje_rechazo) WHERE id = ?',
         [estado, mensaje_rechazo !== undefined ? mensaje_rechazo : null, id]
       );
+      const pedido_id = existing[0].pedido_id;
+      const es_complementaria = existing[0].es_complementaria;
       const estadosEnviada = ['ENVIADA', 'ENVIADA_AL_CLIENTE', 'ENVIADA_AL_MANAGER'];
       if (estadosEnviada.includes(estado)) {
         await connection.execute(
           "UPDATE pedidos SET estado = 'FALTA_APROBAR_COTIZACION' WHERE id = ?",
-          [existing[0].pedido_id]
+          [pedido_id]
         );
-      } else if (estado === 'APROBADA' && !existing[0].es_complementaria) {
+      } else if (estado === 'APROBADA_POR_MANAGER') {
+        // Manager aprobó; no se cambia el pedido (el vendedor enviará al cliente después)
+      } else if (estado === 'APROBADA' && !es_complementaria) {
         await connection.execute(
           "UPDATE pedidos SET estado = 'COTIZACION_APROBADA', cotizacion_principal_id = ? WHERE id = ?",
-          [id, existing[0].pedido_id]
+          [id, pedido_id]
         );
-      } else if (estado === 'RECHAZADA' && !existing[0].es_complementaria) {
+      } else if (estado === 'RECHAZADA' && !es_complementaria) {
         await connection.execute(
           "UPDATE pedidos SET estado = 'COTIZACION_RECHAZADA' WHERE id = ?",
-          [existing[0].pedido_id]
+          [pedido_id]
         );
       }
       await connection.commit();

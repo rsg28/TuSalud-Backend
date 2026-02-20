@@ -1,12 +1,12 @@
 -- =============================================================================
--- Extiende el ENUM de estado en cotizaciones para soportar:
--- Recibida (por cliente / aprobada o rechazada por manager), Borrador, Enviada (al cliente / al manager)
+-- Actualiza el ENUM de estado en cotizaciones:
+-- - Quitar RECIBIDA_POR_CLIENTE (no se usa).
+-- - Añadir APROBADA_POR_MANAGER (manager aprobó; vendedor puede enviar al cliente).
+-- El manager solo aprueba, no rechaza.
 -- =============================================================================
 
--- Añadir nuevos valores al ENUM manteniendo los existentes para compatibilidad.
--- Valores actuales: BORRADOR, ENVIADA, APROBADA, RECHAZADA
--- Nuevos: ENVIADA_AL_CLIENTE, ENVIADA_AL_MANAGER, RECIBIDA_POR_CLIENTE
--- (ENVIADA se mantiene; los nuevos permiten distinguir destino/envío)
+-- Migrar filas que tengan RECIBIDA_POR_CLIENTE a ENVIADA_AL_CLIENTE antes de cambiar el ENUM
+UPDATE cotizaciones SET estado = 'ENVIADA_AL_CLIENTE' WHERE estado = 'RECIBIDA_POR_CLIENTE';
 
 ALTER TABLE cotizaciones
   MODIFY COLUMN estado ENUM(
@@ -14,10 +14,7 @@ ALTER TABLE cotizaciones
     'ENVIADA',
     'ENVIADA_AL_CLIENTE',
     'ENVIADA_AL_MANAGER',
-    'RECIBIDA_POR_CLIENTE',
+    'APROBADA_POR_MANAGER',
     'APROBADA',
     'RECHAZADA'
   ) NOT NULL DEFAULT 'BORRADOR';
-
--- Opcional: migrar filas existentes ENVIADA a ENVIADA_AL_CLIENTE si se desea mayor claridad
--- UPDATE cotizaciones SET estado = 'ENVIADA_AL_CLIENTE' WHERE estado = 'ENVIADA';
