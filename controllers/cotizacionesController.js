@@ -12,6 +12,9 @@ const generarNumeroCotizacion = async () => {
 const getAllCotizaciones = async (req, res) => {
   try {
     const { pedido_id, user_id, estado, empresa_id } = req.query;
+    const rol = req.user?.rol;
+    const userId = req.user?.id;
+
     let query = `
       SELECT c.*,
         p.numero_pedido, p.empresa_id,
@@ -22,6 +25,22 @@ const getAllCotizaciones = async (req, res) => {
       WHERE 1=1
     `;
     const params = [];
+
+    // Filtro por rol: vendedor, manager o cliente solo ven lo que les corresponde
+    if (rol === 'vendedor') {
+      query += " AND NOT (c.creador_tipo = 'CLIENTE' AND c.estado = 'BORRADOR')";
+    } else if (rol === 'manager') {
+      query += " AND c.estado = 'ENVIADA_AL_MANAGER'";
+    } else if (rol === 'cliente' && userId) {
+      query += ` AND (
+        p.cliente_usuario_id = ? OR p.empresa_id IN (SELECT empresa_id FROM usuario_empresa WHERE usuario_id = ?)
+      ) AND (
+        (c.creador_tipo = 'CLIENTE' AND c.creador_id = ?) OR (c.creador_tipo = 'VENDEDOR' AND c.estado != 'BORRADOR')
+      )`;
+      params.push(userId, userId, userId);
+    } else {
+      query += ' AND 1=0';
+    }
 
     if (pedido_id) {
       query += ' AND c.pedido_id = ?';
