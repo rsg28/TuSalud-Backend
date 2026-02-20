@@ -285,7 +285,7 @@ const crearPedido = async (req, res) => {
   try {
     await connection.beginTransaction();
 
-    const { empresa_id, sede_id, cliente_usuario_id, observaciones, condiciones_pago, fecha_vencimiento, examenes, total_empleados: totalEmpleadosBody, totalEmpleados: totalEmpleadosCamel } = req.body;
+    const { empresa_id, sede_id, cliente_usuario_id, observaciones, condiciones_pago, fecha_vencimiento, examenes, empleados, total_empleados: totalEmpleadosBody, totalEmpleados: totalEmpleadosCamel } = req.body;
     const vendedor_id = (req.user && (req.user.rol === 'vendedor' || req.user.rol === 'manager')) ? req.user.id : null;
     const cliente_id = (req.user && req.user.rol === 'cliente') ? req.user.id : (cliente_usuario_id || null);
 
@@ -303,11 +303,11 @@ const crearPedido = async (req, res) => {
     }
 
     const numero_pedido = await generarNumeroPedido();
-
+    const empleadosList = Array.isArray(empleados) ? empleados : [];
     const rawTotal = totalEmpleadosBody ?? totalEmpleadosCamel;
-    const totalEmpleadosInicial = (rawTotal !== undefined && rawTotal !== null && Number(rawTotal) >= 0)
-      ? Math.max(0, parseInt(rawTotal, 10))
-      : 0;
+    const totalEmpleadosInicial = empleadosList.length > 0
+      ? empleadosList.length
+      : ((rawTotal !== undefined && rawTotal !== null && Number(rawTotal) >= 0) ? Math.max(0, parseInt(rawTotal, 10)) : 0);
 
     const [result] = await connection.execute(
       `INSERT INTO pedidos (numero_pedido, empresa_id, sede_id, vendedor_id, cliente_usuario_id, estado, total_empleados, observaciones, condiciones_pago, fecha_vencimiento)
@@ -316,10 +316,12 @@ const crearPedido = async (req, res) => {
     );
     const pedido_id = result.insertId;
 
+    const pedidoExamenIds = new Set();
     if (examenes && Array.isArray(examenes) && examenes.length > 0) {
       for (const item of examenes) {
         const examen_id = item.examen_id;
         const cantidad = Math.max(1, parseInt(item.cantidad) || 1);
+        pedidoExamenIds.add(examen_id);
 
         const [precio] = await connection.execute(
           `SELECT precio FROM examen_precio WHERE examen_id = ? AND (sede_id = ? OR sede_id IS NULL) AND (vigente_hasta IS NULL OR vigente_hasta >= CURDATE()) ORDER BY sede_id IS NOT NULL DESC LIMIT 1`,
@@ -332,6 +334,30 @@ const crearPedido = async (req, res) => {
           [pedido_id, examen_id, cantidad, precio_base]
         );
       }
+    }
+
+    for (const emp of empleadosList) {
+      const dni = String(emp.dni ?? '').trim();
+      const nombre_completo = String(emp.nombre_completo ?? 'Sin nombre').trim();
+      if (!dni) continue;
+      const [insPac] = await connection.execute(
+        `INSERT INTO pedido_pacientes (pedido_id, dni, nombre_completo, cargo, area)
+         VALUES (?, ?, ?, ?, ?)`,
+        [pedido_id, dni, nombre_completo, emp.cargo ?? null, emp.area ?? null]
+      );
+      const paciente_id = insPac.insertId;
+      const examenesEmp = Array.isArray(emp.examenes) ? emp.examenes : [];
+      for (const examen_id of examenesEmp) {
+        if (!pedidoExamenIds.has(examen_id)) continue;
+        await connection.execute(
+          'INSERT IGNORE INTO paciente_examen_asignado (paciente_id, examen_id) VALUES (?, ?)',
+          [paciente_id, examen_id]
+        );
+      }
+    }
+
+    if (empleadosList.length > 0) {
+      await connection.execute('UPDATE pedidos SET total_empleados = ? WHERE id = ?', [empleadosList.length, pedido_id]);
     }
 
     await registrarHistorial(connection, pedido_id, 'CREACION', `Pedido ${numero_pedido} creado`, vendedor_id, null, { usuario_nombre: req.user ? req.user.nombre_completo : null });
@@ -482,6 +508,49 @@ const obtenerFacturasDelPedido = async (req, res) => {
   }
 };
 
+/** GET /api/pedidos/:pedido_id/pacientes-completados — Pacientes del pedido que ya completaron todos sus exámenes (paciente_examen_completado). */
+const obtenerPacientesCompletados = async (req, res) => {
+  try {
+    const pedidoId = parseInt(String(req.params.pedido_id || ''), 10);
+    if (!Number.isInteger(pedidoId) || pedidoId <= 0) {
+      return res.status(400).json({ error: 'pedido_id inválido' });
+    }
+    const [pedido] = await pool.execute('SELECT id, numero_pedido FROM pedidos WHERE id = ?', [pedidoId]);
+    if (pedido.length === 0) {
+      return res.status(404).json({ error: 'Pedido no encontrado' });
+    }
+
+    const [pacientes] = await pool.execute(
+      `SELECT pp.id, pp.dni, pp.nombre_completo, pp.cargo, pp.area,
+        (SELECT COUNT(*) FROM paciente_examen_asignado pea WHERE pea.paciente_id = pp.id) AS total_asignados,
+        (SELECT COUNT(*) FROM paciente_examen_completado pec WHERE pec.paciente_id = pp.id) AS total_completados
+       FROM pedido_pacientes pp
+       WHERE pp.pedido_id = ?`,
+      [pedidoId]
+    );
+
+    const completados = pacientes.filter((p) => Number(p.total_asignados) > 0 && Number(p.total_asignados) === Number(p.total_completados));
+    const resultado = completados.map((p) => ({
+      id: p.id,
+      dni: p.dni,
+      nombre_completo: p.nombre_completo,
+      cargo: p.cargo,
+      area: p.area,
+      examenes_asignados: Number(p.total_asignados),
+      examenes_completados: Number(p.total_completados)
+    }));
+
+    res.json({
+      numero_pedido: pedido[0].numero_pedido,
+      pacientes_completados: sanitizeForJson(resultado),
+      total: resultado.length
+    });
+  } catch (error) {
+    console.error('Error al obtener pacientes completados:', error);
+    res.status(500).json({ error: 'Error al obtener pacientes completados' });
+  }
+};
+
 const cargarEmpleados = async (req, res) => {
   const connection = await pool.getConnection();
   try {
@@ -596,6 +665,7 @@ module.exports = {
   obtenerPacientesExamenes,
   obtenerCotizacionesDelPedido,
   obtenerFacturasDelPedido,
+  obtenerPacientesCompletados,
   crearPedido,
   agregarExamen,
   marcarListoParaCotizacion,

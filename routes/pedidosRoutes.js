@@ -24,6 +24,9 @@ router.get('/:pedido_id/cotizaciones', authenticateToken, pedidosController.obte
 // GET /api/pedidos/:pedido_id/facturas — Lista todas las facturas del pedido
 router.get('/:pedido_id/facturas', authenticateToken, pedidosController.obtenerFacturasDelPedido);
 
+// GET /api/pedidos/:pedido_id/pacientes-completados — Pacientes del pedido que completaron todos sus exámenes
+router.get('/:pedido_id/pacientes-completados', authenticateToken, pedidosController.obtenerPacientesCompletados);
+
 // GET /api/pedidos/:pedido_id — Obtiene el detalle de un pedido
 router.get('/:pedido_id', authenticateToken, pedidosController.obtenerPedido);
 
