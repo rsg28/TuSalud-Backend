@@ -6,6 +6,7 @@ const {
   getCotizacionById,
   createCotizacion,
   updateCotizacion,
+  updateEstadoCotizacion,
   deleteCotizacion
 } = require('../controllers/cotizacionesController');
 const { authenticateToken, requireRole } = require('../middleware/auth');
@@ -19,6 +20,7 @@ router.get('/', authenticateToken, getAllCotizaciones);
 router.get('/:id', authenticateToken, getCotizacionById);
 router.post('/', authenticateToken, requireRole('manager', 'vendedor', 'cliente'), cotizacionValidation, createCotizacion);
 router.put('/:id', authenticateToken, requireRole('manager', 'vendedor', 'cliente'), updateCotizacion);
+router.patch('/:id/estado', authenticateToken, requireRole('manager', 'vendedor', 'cliente'), updateEstadoCotizacion);
 router.delete('/:id', authenticateToken, requireRole('manager', 'vendedor'), deleteCotizacion);
 
 module.exports = router;

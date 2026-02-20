@@ -176,7 +176,7 @@ CREATE TABLE cotizaciones (
   pedido_id                INT NOT NULL,
   cotizacion_base_id       INT NULL,
   es_complementaria        TINYINT(1) NOT NULL DEFAULT 0,
-  estado                   ENUM('BORRADOR','ENVIADA','APROBADA','RECHAZADA') NOT NULL DEFAULT 'BORRADOR',
+  estado                   ENUM('BORRADOR','ENVIADA','ENVIADA_AL_CLIENTE','ENVIADA_AL_MANAGER','RECIBIDA_POR_CLIENTE','APROBADA','RECHAZADA') NOT NULL DEFAULT 'BORRADOR',
   creador_tipo             ENUM('VENDEDOR','CLIENTE') NOT NULL DEFAULT 'VENDEDOR',
   creador_id               INT NULL,
   total                    DECIMAL(14,2) NOT NULL DEFAULT 0,

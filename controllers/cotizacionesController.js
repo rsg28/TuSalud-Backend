@@ -207,12 +207,14 @@ const updateCotizacion = async (req, res) => {
 
     try {
       if (estado !== undefined) {
+        const esEnviada = ['ENVIADA', 'ENVIADA_AL_CLIENTE', 'ENVIADA_AL_MANAGER'].includes(estado);
+        const esAprobada = estado === 'APROBADA';
         await connection.execute(
-          'UPDATE cotizaciones SET estado = ?, fecha_envio = IF(? = "ENVIADA", NOW(), fecha_envio), fecha_aprobacion = IF(? = "APROBADA", NOW(), fecha_aprobacion), solicitud_manager_pendiente = COALESCE(?, solicitud_manager_pendiente), mensaje_rechazo = COALESCE(?, mensaje_rechazo) WHERE id = ?',
+          'UPDATE cotizaciones SET estado = ?, fecha_envio = IF(?, NOW(), fecha_envio), fecha_aprobacion = IF(?, NOW(), fecha_aprobacion), solicitud_manager_pendiente = COALESCE(?, solicitud_manager_pendiente), mensaje_rechazo = COALESCE(?, mensaje_rechazo) WHERE id = ?',
           [
             estado,
-            estado,
-            estado,
+            esEnviada,
+            esAprobada,
             solicitud_manager_pendiente !== undefined ? (solicitud_manager_pendiente ? 1 : 0) : null,
             mensaje_rechazo !== undefined ? mensaje_rechazo : null,
             id
@@ -220,7 +222,8 @@ const updateCotizacion = async (req, res) => {
         );
         const pedido_id = existing[0].pedido_id;
         const es_complementaria = existing[0].es_complementaria;
-        if (estado === 'ENVIADA') {
+        const estadosEnviada = ['ENVIADA', 'ENVIADA_AL_CLIENTE', 'ENVIADA_AL_MANAGER'];
+        if (estadosEnviada.includes(estado)) {
           await connection.execute(
             "UPDATE pedidos SET estado = 'FALTA_APROBAR_COTIZACION' WHERE id = ?",
             [pedido_id]
@@ -281,6 +284,57 @@ const updateCotizacion = async (req, res) => {
   }
 };
 
+/** PATCH /api/cotizaciones/:id/estado — Actualiza solo el estado (y opcionalmente mensaje_rechazo). */
+const updateEstadoCotizacion = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { estado, mensaje_rechazo } = req.body;
+    if (!estado || typeof estado !== 'string') {
+      return res.status(400).json({ error: 'estado es requerido' });
+    }
+    const [existing] = await pool.execute('SELECT id, estado, pedido_id, es_complementaria FROM cotizaciones WHERE id = ?', [id]);
+    if (existing.length === 0) {
+      return res.status(404).json({ error: 'Cotización no encontrada' });
+    }
+    const connection = await pool.getConnection();
+    await connection.beginTransaction();
+    try {
+      await connection.execute(
+        'UPDATE cotizaciones SET estado = ?, mensaje_rechazo = COALESCE(?, mensaje_rechazo) WHERE id = ?',
+        [estado, mensaje_rechazo !== undefined ? mensaje_rechazo : null, id]
+      );
+      const estadosEnviada = ['ENVIADA', 'ENVIADA_AL_CLIENTE', 'ENVIADA_AL_MANAGER'];
+      if (estadosEnviada.includes(estado)) {
+        await connection.execute(
+          "UPDATE pedidos SET estado = 'FALTA_APROBAR_COTIZACION' WHERE id = ?",
+          [existing[0].pedido_id]
+        );
+      } else if (estado === 'APROBADA' && !existing[0].es_complementaria) {
+        await connection.execute(
+          "UPDATE pedidos SET estado = 'COTIZACION_APROBADA', cotizacion_principal_id = ? WHERE id = ?",
+          [id, existing[0].pedido_id]
+        );
+      } else if (estado === 'RECHAZADA' && !existing[0].es_complementaria) {
+        await connection.execute(
+          "UPDATE pedidos SET estado = 'COTIZACION_RECHAZADA' WHERE id = ?",
+          [existing[0].pedido_id]
+        );
+      }
+      await connection.commit();
+      const [updated] = await pool.execute('SELECT * FROM cotizaciones WHERE id = ?', [id]);
+      res.json({ message: 'Estado actualizado', cotizacion: updated[0] });
+    } catch (err) {
+      await connection.rollback();
+      throw err;
+    } finally {
+      connection.release();
+    }
+  } catch (error) {
+    console.error('Error al actualizar estado:', error);
+    res.status(500).json({ error: 'Error al actualizar estado' });
+  }
+};
+
 const deleteCotizacion = async (req, res) => {
   try {
     const { id } = req.params;
@@ -304,5 +358,6 @@ module.exports = {
   getCotizacionById,
   createCotizacion,
   updateCotizacion,
+  updateEstadoCotizacion,
   deleteCotizacion
 };
