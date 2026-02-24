@@ -71,6 +71,28 @@ const getAllCotizaciones = async (req, res) => {
   }
 };
 
+/** GET /api/cotizaciones/enviadas-al-manager — Solo manager. Lista cotizaciones por estado: ENVIADA_AL_MANAGER (enviado) o APROBADA_POR_MANAGER (recibido). */
+const getCotizacionesEnviadasAlManager = async (req, res) => {
+  try {
+    const estado = req.query.estado === 'APROBADA_POR_MANAGER' ? 'APROBADA_POR_MANAGER' : 'ENVIADA_AL_MANAGER';
+    const [cotizaciones] = await pool.execute(
+      `SELECT c.*,
+        p.numero_pedido, p.empresa_id,
+        e.razon_social AS empresa_nombre, e.ruc AS empresa_ruc
+       FROM cotizaciones c
+       JOIN pedidos p ON c.pedido_id = p.id
+       JOIN empresas e ON p.empresa_id = e.id
+       WHERE c.estado = ?
+       ORDER BY c.fecha DESC, c.created_at DESC`,
+      [estado]
+    );
+    res.json({ cotizaciones });
+  } catch (error) {
+    console.error('Error al obtener cotizaciones enviadas al manager:', error);
+    res.status(500).json({ error: 'Error al obtener cotizaciones' });
+  }
+};
+
 const getCotizacionById = async (req, res) => {
   try {
     const { id } = req.params;
@@ -387,6 +409,7 @@ const deleteCotizacion = async (req, res) => {
 
 module.exports = {
   getAllCotizaciones,
+  getCotizacionesEnviadasAlManager,
   getCotizacionById,
   createCotizacion,
   updateCotizacion,

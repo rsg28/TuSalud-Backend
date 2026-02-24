@@ -3,6 +3,7 @@ const router = express.Router();
 const { body } = require('express-validator');
 const {
   getAllCotizaciones,
+  getCotizacionesEnviadasAlManager,
   getCotizacionById,
   createCotizacion,
   updateCotizacion,
@@ -17,6 +18,7 @@ const cotizacionValidation = [
 ];
 
 router.get('/', authenticateToken, getAllCotizaciones);
+router.get('/enviadas-al-manager', authenticateToken, requireRole('manager'), getCotizacionesEnviadasAlManager);
 router.get('/:id', authenticateToken, getCotizacionById);
 router.post('/', authenticateToken, requireRole('manager', 'vendedor', 'cliente'), cotizacionValidation, createCotizacion);
 router.put('/:id', authenticateToken, requireRole('manager', 'vendedor', 'cliente'), updateCotizacion);
