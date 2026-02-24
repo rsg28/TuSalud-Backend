@@ -460,6 +460,53 @@ const obtenerHistorial = async (req, res) => {
   }
 };
 
+/** GET /api/pedidos/:pedido_id/estado — Devuelve solo el estado del pedido (tabla pedidos). */
+const obtenerEstadoPedido = async (req, res) => {
+  try {
+    const { pedido_id } = req.params;
+    const [rows] = await pool.execute(
+      'SELECT estado FROM pedidos WHERE id = ?',
+      [pedido_id]
+    );
+    if (rows.length === 0) {
+      return res.status(404).json({ error: 'Pedido no encontrado' });
+    }
+    res.json({ estado: rows[0].estado });
+  } catch (error) {
+    console.error('Error al obtener estado del pedido:', error);
+    res.status(500).json({ error: 'Error al obtener estado' });
+  }
+};
+
+const ESTADOS_PEDIDO = ['PENDIENTE', 'ESPERA_COTIZACION', 'LISTO_PARA_COTIZACION', 'FALTA_APROBAR_COTIZACION', 'COTIZACION_APROBADA', 'FALTA_PAGO_FACTURA', 'COTIZACION_RECHAZADA', 'FACTURADO', 'COMPLETADO', 'CANCELADO'];
+
+/** PATCH /api/pedidos/:pedido_id/estado — Actualiza solo el estado del pedido. */
+const actualizarEstadoPedido = async (req, res) => {
+  try {
+    const { pedido_id } = req.params;
+    const { estado } = req.body;
+    if (!estado || typeof estado !== 'string') {
+      return res.status(400).json({ error: 'estado es requerido' });
+    }
+    const estadoUpper = estado.toUpperCase();
+    if (!ESTADOS_PEDIDO.includes(estadoUpper)) {
+      return res.status(400).json({ error: `estado debe ser uno de: ${ESTADOS_PEDIDO.join(', ')}` });
+    }
+    const [result] = await pool.execute(
+      'UPDATE pedidos SET estado = ? WHERE id = ?',
+      [estadoUpper, pedido_id]
+    );
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ error: 'Pedido no encontrado' });
+    }
+    const [rows] = await pool.execute('SELECT id, estado FROM pedidos WHERE id = ?', [pedido_id]);
+    res.json({ message: 'Estado actualizado', pedido: rows[0] });
+  } catch (error) {
+    console.error('Error al actualizar estado del pedido:', error);
+    res.status(500).json({ error: 'Error al actualizar estado' });
+  }
+};
+
 /** Todas las cotizaciones del pedido (por pedido_id). */
 const obtenerCotizacionesDelPedido = async (req, res) => {
   try {
@@ -634,27 +681,63 @@ const obtenerArticulosPendientes = async (req, res) => {
 };
 
 const cancelarPedido = async (req, res) => {
+  const connection = await pool.getConnection();
   try {
     const { pedido_id } = req.params;
-    const [pedido] = await pool.execute('SELECT id, estado, empresa_id FROM pedidos WHERE id = ?', [pedido_id]);
+    const [pedido] = await connection.execute('SELECT id, estado, empresa_id FROM pedidos WHERE id = ?', [pedido_id]);
     if (pedido.length === 0) {
+      connection.release();
       return res.status(404).json({ error: 'Pedido no encontrado' });
     }
     if (req.user.rol === 'cliente') {
-      const [empresas] = await pool.execute(
+      const [empresas] = await connection.execute(
         'SELECT empresa_id FROM usuario_empresa WHERE usuario_id = ?',
         [req.user.id]
       );
       const ids = empresas.map((e) => e.empresa_id);
       if (!ids.includes(pedido[0].empresa_id)) {
+        connection.release();
         return res.status(403).json({ error: 'No puede cancelar este pedido' });
       }
     }
-    await pool.execute("UPDATE pedidos SET estado = 'CANCELADO' WHERE id = ?", [pedido_id]);
-    res.json({ message: 'Pedido cancelado' });
+
+    await connection.beginTransaction();
+
+    // Quitar referencias del pedido a cotización principal y factura para poder borrarlas
+    await connection.execute(
+      'UPDATE pedidos SET cotizacion_principal_id = NULL, factura_id = NULL WHERE id = ?',
+      [pedido_id]
+    );
+
+    // Facturas tienen FK pedido_id ON DELETE RESTRICT: borrar antes que el pedido
+    const [facturas] = await connection.execute('SELECT id FROM facturas WHERE pedido_id = ?', [pedido_id]);
+    const facturaIds = facturas.map((f) => f.id);
+    if (facturaIds.length > 0) {
+      const placeholders = facturaIds.map(() => '?').join(',');
+      await connection.execute(`DELETE FROM factura_detalle WHERE factura_id IN (${placeholders})`, facturaIds);
+      await connection.execute(`DELETE FROM factura_cotizacion WHERE factura_id IN (${placeholders})`, facturaIds);
+      await connection.execute('DELETE FROM facturas WHERE pedido_id = ?', [pedido_id]);
+    }
+
+    // Borrar historial del pedido (opcional: también se borra por CASCADE al borrar pedido)
+    await connection.execute('DELETE FROM historial_pedido WHERE pedido_id = ?', [pedido_id]);
+
+    // Cotizaciones complementarias referencian a otra cotización del mismo pedido: quitar FK primero
+    await connection.execute('UPDATE cotizaciones SET cotizacion_base_id = NULL WHERE pedido_id = ?', [pedido_id]);
+    // Borrar cotizaciones del pedido (y cotizacion_items por CASCADE)
+    await connection.execute('DELETE FROM cotizaciones WHERE pedido_id = ?', [pedido_id]);
+
+    // Borrar pedido (CASCADE: pedido_examenes, pedido_pacientes, paciente_examen_*)
+    await connection.execute('DELETE FROM pedidos WHERE id = ?', [pedido_id]);
+
+    await connection.commit();
+    res.json({ message: 'Pedido cancelado y eliminado correctamente' });
   } catch (error) {
+    await connection.rollback();
     console.error('Error al cancelar pedido:', error);
     res.status(500).json({ error: 'Error al cancelar pedido' });
+  } finally {
+    connection.release();
   }
 };
 
@@ -670,6 +753,8 @@ module.exports = {
   agregarExamen,
   marcarListoParaCotizacion,
   obtenerHistorial,
+  obtenerEstadoPedido,
+  actualizarEstadoPedido,
   cargarEmpleados,
   marcarCompletado,
   cancelarPedido,

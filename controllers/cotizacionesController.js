@@ -303,6 +303,16 @@ const updateCotizacion = async (req, res) => {
             "UPDATE pedidos SET estado = 'COTIZACION_APROBADA', cotizacion_principal_id = ? WHERE id = ?",
             [id, pedido_id]
           );
+        } else if (estado === 'APROBADA_POR_MANAGER') {
+          await connection.execute(
+            "UPDATE pedidos SET estado = 'FALTA_APROBAR_COTIZACION' WHERE id = ?",
+            [pedido_id]
+          );
+          await connection.execute(
+            `INSERT INTO historial_pedido (pedido_id, cotizacion_id, tipo_evento, descripcion, usuario_id, usuario_nombre, valor_anterior, valor_nuevo, atendidos, no_atendidos)
+             VALUES (?, ?, 'COTIZACION_APROBADA', 'El manager aprobó la cotización. Lista para enviar al cliente.', ?, ?, NULL, NULL, NULL, NULL)`,
+            [pedido_id, id, req.user?.id || null, req.user?.nombre_completo || null]
+          );
         } else if (estado === 'RECHAZADA' && !es_complementaria) {
           await connection.execute(
             "UPDATE pedidos SET estado = 'COTIZACION_RECHAZADA' WHERE id = ?",
@@ -385,7 +395,15 @@ const updateEstadoCotizacion = async (req, res) => {
           [pedido_id]
         );
       } else if (estado === 'APROBADA_POR_MANAGER') {
-        // Manager aprobó; no se cambia el pedido (el vendedor enviará al cliente después)
+        await connection.execute(
+          "UPDATE pedidos SET estado = 'FALTA_APROBAR_COTIZACION' WHERE id = ?",
+          [pedido_id]
+        );
+        await connection.execute(
+          `INSERT INTO historial_pedido (pedido_id, cotizacion_id, tipo_evento, descripcion, usuario_id, usuario_nombre, valor_anterior, valor_nuevo, atendidos, no_atendidos)
+           VALUES (?, ?, 'COTIZACION_APROBADA', 'El manager aprobó la cotización. Lista para enviar al cliente.', ?, ?, NULL, NULL, NULL, NULL)`,
+          [pedido_id, id, req.user?.id || null, req.user?.nombre_completo || null]
+        );
       } else if (estado === 'APROBADA' && !es_complementaria) {
         await connection.execute(
           "UPDATE pedidos SET estado = 'COTIZACION_APROBADA', cotizacion_principal_id = ? WHERE id = ?",
