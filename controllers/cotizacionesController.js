@@ -71,10 +71,9 @@ const getAllCotizaciones = async (req, res) => {
   }
 };
 
-/** GET /api/cotizaciones/enviadas-al-manager — Solo manager. Lista cotizaciones por estado: ENVIADA_AL_MANAGER (enviado) o APROBADA_POR_MANAGER (recibido). */
+/** GET /api/cotizaciones/enviadas-al-manager — Solo manager. Lista cotizaciones ENVIADA_AL_MANAGER y APROBADA_POR_MANAGER. */
 const getCotizacionesEnviadasAlManager = async (req, res) => {
   try {
-    const estado = req.query.estado === 'APROBADA_POR_MANAGER' ? 'APROBADA_POR_MANAGER' : 'ENVIADA_AL_MANAGER';
     const [cotizaciones] = await pool.execute(
       `SELECT c.*,
         p.numero_pedido, p.empresa_id,
@@ -82,9 +81,9 @@ const getCotizacionesEnviadasAlManager = async (req, res) => {
        FROM cotizaciones c
        JOIN pedidos p ON c.pedido_id = p.id
        JOIN empresas e ON p.empresa_id = e.id
-       WHERE c.estado = ?
+       WHERE c.estado IN ('ENVIADA_AL_MANAGER', 'APROBADA_POR_MANAGER')
        ORDER BY c.fecha DESC, c.created_at DESC`,
-      [estado]
+      []
     );
     res.json({ cotizaciones });
   } catch (error) {
@@ -126,6 +125,30 @@ const getCotizacionById = async (req, res) => {
   } catch (error) {
     console.error('Error al obtener cotización:', error);
     res.status(500).json({ error: 'Error al obtener cotización' });
+  }
+};
+
+/** GET /api/cotizaciones/:id/items — Devuelve solo los ítems de una cotización. */
+const getCotizacionItems = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const [existe] = await pool.execute('SELECT id FROM cotizaciones WHERE id = ?', [id]);
+    if (existe.length === 0) {
+      return res.status(404).json({ error: 'Cotización no encontrada' });
+    }
+    const [items] = await pool.execute(
+      `SELECT ci.id, ci.cotizacion_id, ci.examen_id, ci.nombre, ci.cantidad, ci.precio_base, ci.precio_final, ci.variacion_pct, ci.subtotal,
+        ex.nombre AS examen_nombre
+       FROM cotizacion_items ci
+       LEFT JOIN examenes ex ON ci.examen_id = ex.id
+       WHERE ci.cotizacion_id = ?
+       ORDER BY ci.id`,
+      [id]
+    );
+    res.json({ items });
+  } catch (error) {
+    console.error('Error al obtener ítems de cotización:', error);
+    res.status(500).json({ error: 'Error al obtener ítems' });
   }
 };
 
@@ -411,6 +434,7 @@ module.exports = {
   getAllCotizaciones,
   getCotizacionesEnviadasAlManager,
   getCotizacionById,
+  getCotizacionItems,
   createCotizacion,
   updateCotizacion,
   updateEstadoCotizacion,

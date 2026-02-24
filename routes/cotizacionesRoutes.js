@@ -5,6 +5,7 @@ const {
   getAllCotizaciones,
   getCotizacionesEnviadasAlManager,
   getCotizacionById,
+  getCotizacionItems,
   createCotizacion,
   updateCotizacion,
   updateEstadoCotizacion,
@@ -19,6 +20,7 @@ const cotizacionValidation = [
 
 router.get('/', authenticateToken, getAllCotizaciones);
 router.get('/enviadas-al-manager', authenticateToken, requireRole('manager'), getCotizacionesEnviadasAlManager);
+router.get('/:id/items', authenticateToken, getCotizacionItems);
 router.get('/:id', authenticateToken, getCotizacionById);
 router.post('/', authenticateToken, requireRole('manager', 'vendedor', 'cliente'), cotizacionValidation, createCotizacion);
 router.put('/:id', authenticateToken, requireRole('manager', 'vendedor', 'cliente'), updateCotizacion);
