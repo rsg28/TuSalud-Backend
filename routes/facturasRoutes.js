@@ -20,6 +20,6 @@ router.get('/:id', authenticateToken, getFacturaById);
 router.post('/', authenticateToken, requireRole('manager', 'vendedor'), createFacturaValidation, createFactura);
 router.put('/:id', authenticateToken, requireRole('manager', 'vendedor'), updateFactura);
 router.post('/:id/enviar-cliente', authenticateToken, requireRole('manager', 'vendedor'), enviarFacturaAlCliente);
-router.delete('/:id', authenticateToken, requireRole('manager', 'vendedor'), deleteFactura);
+router.delete('/:id', authenticateToken, requireRole('vendedor'), deleteFactura);
 
 module.exports = router;
