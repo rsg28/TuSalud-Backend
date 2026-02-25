@@ -167,6 +167,12 @@ const createFactura = async (req, res) => {
         [factura_id, pedido_id]
       );
 
+      await connection.execute(
+        `INSERT INTO historial_pedido (pedido_id, cotizacion_id, tipo_evento, descripcion, usuario_id, usuario_nombre, valor_anterior, valor_nuevo, atendidos, no_atendidos)
+         VALUES (?, NULL, 'FACTURA_EMITIDA', 'Factura emitida.', ?, ?, NULL, NULL, NULL, NULL)`,
+        [pedido_id, req.user?.id || null, req.user?.nombre_completo || null]
+      );
+
       await connection.commit();
 
       const [newFactura] = await pool.execute('SELECT * FROM facturas WHERE id = ?', [factura_id]);
@@ -211,6 +217,30 @@ const updateFactura = async (req, res) => {
   }
 };
 
+/** POST /api/facturas/:id/enviar-cliente — Registra en historial que la factura fue enviada al cliente. */
+const enviarFacturaAlCliente = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const [existing] = await pool.execute('SELECT id, pedido_id FROM facturas WHERE id = ?', [id]);
+    if (existing.length === 0) {
+      return res.status(404).json({ error: 'Factura no encontrada' });
+    }
+    const pedido_id = existing[0].pedido_id;
+
+    await pool.execute(
+      `INSERT INTO historial_pedido (pedido_id, cotizacion_id, tipo_evento, descripcion, usuario_id, usuario_nombre, valor_anterior, valor_nuevo, atendidos, no_atendidos)
+       VALUES (?, NULL, 'FACTURA_ENVIADA_CLIENTE', 'Factura enviada al cliente.', ?, ?, NULL, NULL, NULL, NULL)`,
+      [pedido_id, req.user?.id || null, req.user?.nombre_completo || null]
+    );
+
+    const [updated] = await pool.execute('SELECT * FROM facturas WHERE id = ?', [id]);
+    res.json({ message: 'Factura enviada al cliente', factura: updated[0] });
+  } catch (error) {
+    console.error('Error al enviar factura al cliente:', error);
+    res.status(500).json({ error: 'Error al enviar factura al cliente' });
+  }
+};
+
 const deleteFactura = async (req, res) => {
   try {
     const { id } = req.params;
@@ -222,7 +252,17 @@ const deleteFactura = async (req, res) => {
       return res.status(400).json({ error: 'No se puede eliminar una factura ya pagada' });
     }
 
-    await pool.execute('UPDATE pedidos SET factura_id = NULL WHERE factura_id = ?', [id]);
+    const pedido_id = existing[0].pedido_id;
+
+    await pool.execute(
+      "UPDATE pedidos SET factura_id = NULL, estado = 'COTIZACION_APROBADA' WHERE factura_id = ?",
+      [id]
+    );
+    await pool.execute(
+      `INSERT INTO historial_pedido (pedido_id, cotizacion_id, tipo_evento, descripcion, usuario_id, usuario_nombre, valor_anterior, valor_nuevo, atendidos, no_atendidos)
+       VALUES (?, NULL, 'FACTURA_ANULADA', 'Factura anulada.', ?, ?, NULL, NULL, NULL, NULL)`,
+      [pedido_id, req.user?.id || null, req.user?.nombre_completo || null]
+    );
     await pool.execute('DELETE FROM factura_cotizacion WHERE factura_id = ?', [id]);
     await pool.execute('DELETE FROM factura_detalle WHERE factura_id = ?', [id]);
     await pool.execute('DELETE FROM facturas WHERE id = ?', [id]);
@@ -239,5 +279,6 @@ module.exports = {
   getFacturaById,
   createFactura,
   updateFactura,
+  enviarFacturaAlCliente,
   deleteFactura
 };

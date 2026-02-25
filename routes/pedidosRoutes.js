@@ -12,6 +12,9 @@ router.get('/mios', authenticateToken, pedidosController.listarMisPedidos);
 // GET /api/pedidos/pendientes-aprobacion — Artículos/cotizaciones pendientes de aprobación por manager
 router.get('/pendientes-aprobacion', authenticateToken, requireRole('manager'), pedidosController.obtenerArticulosPendientes);
 
+// GET /api/pedidos/con-cotizacion-aprobada — Pedidos con al menos una cotización aprobada por el cliente (para facturación)
+router.get('/con-cotizacion-aprobada', authenticateToken, requireRole('vendedor', 'manager'), pedidosController.listarPedidosConCotizacionAprobada);
+
 // GET /api/pedidos/:pedido_id/pacientes-examenes — Lista pacientes del pedido y exámenes asignados/completados
 router.get('/:pedido_id/pacientes-examenes', authenticateToken, pedidosController.obtenerPacientesExamenes);
 

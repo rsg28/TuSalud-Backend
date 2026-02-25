@@ -127,6 +127,80 @@ const listarMisPedidos = async (req, res) => {
   return listarPedidos(req, res);
 };
 
+/** GET /api/pedidos/con-cotizacion-aprobada — Lista pedidos que tienen al menos una cotización aprobada por el cliente (estado APROBADA). Útil para facturación. */
+const listarPedidosConCotizacionAprobada = async (req, res) => {
+  try {
+    if (!req.user || !req.user.id) {
+      return res.status(401).json({ error: 'Usuario no autenticado' });
+    }
+
+    const { estado, empresa_id, vendedor_id, page = 1, limit = 20 } = req.query;
+    const pageNum = Math.max(1, parseInt(String(page), 10) || 1);
+    const limitNum = Math.max(1, Math.min(100, parseInt(String(limit), 10) || 20));
+    const offset = (pageNum - 1) * limitNum;
+
+    const rol = (req.user.rol || '').toLowerCase();
+
+    let query = `
+      SELECT p.*,
+        e.razon_social AS empresa_nombre, e.ruc AS empresa_ruc,
+        s.nombre AS sede_nombre,
+        u.nombre_completo AS vendedor_nombre
+      FROM pedidos p
+      JOIN empresas e ON p.empresa_id = e.id
+      JOIN sedes s ON p.sede_id = s.id
+      LEFT JOIN usuarios u ON p.vendedor_id = u.id
+      WHERE p.estado != 'CANCELADO'
+        AND EXISTS (SELECT 1 FROM cotizaciones c WHERE c.pedido_id = p.id AND c.estado = 'APROBADA')
+    `;
+    const params = [];
+
+    if (estado) {
+      query += ' AND p.estado = ?';
+      params.push(estado);
+    }
+    if (empresa_id) {
+      query += ' AND p.empresa_id = ?';
+      params.push(empresa_id);
+    }
+    if (vendedor_id) {
+      query += ' AND p.vendedor_id = ?';
+      params.push(vendedor_id);
+    }
+
+    if (rol === 'vendedor') {
+      query += ' AND (p.vendedor_id = ? OR p.vendedor_id IS NULL)';
+      params.push(req.user.id);
+    }
+    if (rol === 'cliente') {
+      const [empresas] = await pool.execute(
+        'SELECT empresa_id FROM usuario_empresa WHERE usuario_id = ?',
+        [req.user.id]
+      );
+      const ids = empresas.map((e) => e.empresa_id);
+      if (ids.length === 0) {
+        return res.json({ pedidos: [], page: pageNum, limit: limitNum });
+      }
+      query += ` AND p.empresa_id IN (${ids.map(() => '?').join(',')})`;
+      params.push(...ids);
+    }
+
+    const safeLimit = Math.max(1, Math.min(100, Number(limitNum) || 20));
+    const safeOffset = Math.max(0, Number(offset) || 0);
+    query += ` ORDER BY p.created_at DESC LIMIT ${safeLimit} OFFSET ${safeOffset}`;
+
+    const [pedidos] = await pool.execute(query, params);
+    res.json({
+      pedidos: sanitizeForJson(pedidos),
+      page: pageNum,
+      limit: limitNum,
+    });
+  } catch (error) {
+    console.error('Error al listar pedidos con cotización aprobada:', error);
+    res.status(500).json({ error: 'Error al listar pedidos', message: error.message || 'Error desconocido' });
+  }
+};
+
 const obtenerPedido = async (req, res) => {
   try {
     const { pedido_id } = req.params;
@@ -159,7 +233,7 @@ const obtenerPedido = async (req, res) => {
     );
 
     const [cotizaciones] = await pool.execute(
-      'SELECT id, numero_cotizacion, estado, es_complementaria, total, fecha FROM cotizaciones WHERE pedido_id = ? ORDER BY es_complementaria ASC, id ASC',
+      'SELECT id, numero_cotizacion, estado, es_complementaria, total, fecha, mensaje_rechazo FROM cotizaciones WHERE pedido_id = ? ORDER BY es_complementaria ASC, id ASC',
       [pedido_id]
     );
 
@@ -743,6 +817,7 @@ const cancelarPedido = async (req, res) => {
 module.exports = {
   listarPedidos,
   listarMisPedidos,
+  listarPedidosConCotizacionAprobada,
   obtenerPedido,
   obtenerPacientesExamenes,
   obtenerCotizacionesDelPedido,

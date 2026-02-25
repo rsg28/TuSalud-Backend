@@ -95,8 +95,12 @@ const getCotizacionesEnviadasAlManager = async (req, res) => {
 const getCotizacionById = async (req, res) => {
   try {
     const { id } = req.params;
+    const userId = req.user?.id;
+    const rol = req.user?.rol;
+
     const [cotizaciones] = await pool.execute(
-      `SELECT c.*, p.numero_pedido, p.empresa_id, e.razon_social AS empresa_nombre, e.ruc AS empresa_ruc,
+      `SELECT c.*, p.numero_pedido, p.empresa_id, p.cliente_usuario_id,
+        e.razon_social AS empresa_nombre, e.ruc AS empresa_ruc,
         u.nombre_completo AS creador_nombre
        FROM cotizaciones c
        JOIN pedidos p ON c.pedido_id = p.id
@@ -108,6 +112,22 @@ const getCotizacionById = async (req, res) => {
 
     if (cotizaciones.length === 0) {
       return res.status(404).json({ error: 'Cotización no encontrada' });
+    }
+
+    // Cliente solo puede ver cotizaciones de pedidos que le pertenecen
+    if (rol === 'cliente' && userId) {
+      const cot = cotizaciones[0];
+      const [autorizado] = await pool.execute(
+        `SELECT 1 FROM pedidos p
+         WHERE p.id = ? AND (
+           p.cliente_usuario_id = ? OR
+           p.empresa_id IN (SELECT empresa_id FROM usuario_empresa WHERE usuario_id = ?)
+         )`,
+        [cot.pedido_id, userId, userId]
+      );
+      if (autorizado.length === 0) {
+        return res.status(403).json({ error: 'No tiene permiso para ver esta cotización' });
+      }
     }
 
     const [items] = await pool.execute(
@@ -132,10 +152,32 @@ const getCotizacionById = async (req, res) => {
 const getCotizacionItems = async (req, res) => {
   try {
     const { id } = req.params;
-    const [existe] = await pool.execute('SELECT id FROM cotizaciones WHERE id = ?', [id]);
+    const userId = req.user?.id;
+    const rol = req.user?.rol;
+
+    const [existe] = await pool.execute(
+      'SELECT id, pedido_id FROM cotizaciones WHERE id = ?',
+      [id]
+    );
     if (existe.length === 0) {
       return res.status(404).json({ error: 'Cotización no encontrada' });
     }
+
+    // Cliente solo puede ver ítems de cotizaciones de sus pedidos
+    if (rol === 'cliente' && userId) {
+      const [autorizado] = await pool.execute(
+        `SELECT 1 FROM pedidos p
+         WHERE p.id = ? AND (
+           p.cliente_usuario_id = ? OR
+           p.empresa_id IN (SELECT empresa_id FROM usuario_empresa WHERE usuario_id = ?)
+         )`,
+        [existe[0].pedido_id, userId, userId]
+      );
+      if (autorizado.length === 0) {
+        return res.status(403).json({ error: 'No tiene permiso para ver esta cotización' });
+      }
+    }
+
     const [items] = await pool.execute(
       `SELECT ci.id, ci.cotizacion_id, ci.examen_id, ci.nombre, ci.cantidad, ci.precio_base, ci.precio_final, ci.variacion_pct, ci.subtotal,
         ex.nombre AS examen_nombre
@@ -278,7 +320,7 @@ const updateCotizacion = async (req, res) => {
           throw new Error(`estado debe ser uno de: ${ESTADOS_COTIZACION.join(', ')}`);
         }
         const esEnviada = ['ENVIADA', 'ENVIADA_AL_CLIENTE', 'ENVIADA_AL_MANAGER'].includes(estado);
-        const esAprobada = estado === 'APROBADA';
+        const esAprobada = estado === 'APROBADA' || estado === 'APROBADA_POR_MANAGER';
         await connection.execute(
           'UPDATE cotizaciones SET estado = ?, fecha_envio = IF(?, NOW(), fecha_envio), fecha_aprobacion = IF(?, NOW(), fecha_aprobacion), solicitud_manager_pendiente = COALESCE(?, solicitud_manager_pendiente), mensaje_rechazo = COALESCE(?, mensaje_rechazo) WHERE id = ?',
           [
@@ -298,6 +340,19 @@ const updateCotizacion = async (req, res) => {
             "UPDATE pedidos SET estado = 'FALTA_APROBAR_COTIZACION' WHERE id = ?",
             [pedido_id]
           );
+          if (estado === 'ENVIADA_AL_MANAGER') {
+            await connection.execute(
+              `INSERT INTO historial_pedido (pedido_id, cotizacion_id, tipo_evento, descripcion, usuario_id, usuario_nombre, valor_anterior, valor_nuevo, atendidos, no_atendidos)
+               VALUES (?, ?, 'COTIZACION_ENVIADA', 'Cotización enviada al manager para revisión.', ?, ?, NULL, NULL, NULL, NULL)`,
+              [pedido_id, id, req.user?.id || null, req.user?.nombre_completo || null]
+            );
+          } else if (estado === 'ENVIADA_AL_CLIENTE') {
+            await connection.execute(
+              `INSERT INTO historial_pedido (pedido_id, cotizacion_id, tipo_evento, descripcion, usuario_id, usuario_nombre, valor_anterior, valor_nuevo, atendidos, no_atendidos)
+               VALUES (?, ?, 'COTIZACION_ENVIADA', 'Cotización enviada al cliente para aprobación.', ?, ?, NULL, NULL, NULL, NULL)`,
+              [pedido_id, id, req.user?.id || null, req.user?.nombre_completo || null]
+            );
+          }
         } else if (estado === 'APROBADA' && !es_complementaria) {
           await connection.execute(
             "UPDATE pedidos SET estado = 'COTIZACION_APROBADA', cotizacion_principal_id = ? WHERE id = ?",
@@ -330,7 +385,9 @@ const updateCotizacion = async (req, res) => {
         );
       }
 
-      if (items && Array.isArray(items) && existing[0].estado === 'BORRADOR') {
+      // Actualizar ítems en BORRADOR o ENVIADA_AL_MANAGER (cuando el manager edita y aprueba)
+      const puedeActualizarItems = existing[0].estado === 'BORRADOR' || existing[0].estado === 'ENVIADA_AL_MANAGER';
+      if (items && Array.isArray(items) && puedeActualizarItems) {
         await connection.execute('DELETE FROM cotizacion_items WHERE cotizacion_id = ?', [id]);
         let total = 0;
         for (const it of items) {
@@ -382,9 +439,10 @@ const updateEstadoCotizacion = async (req, res) => {
     const connection = await pool.getConnection();
     await connection.beginTransaction();
     try {
+      const esAprobada = estado === 'APROBADA' || estado === 'APROBADA_POR_MANAGER';
       await connection.execute(
-        'UPDATE cotizaciones SET estado = ?, mensaje_rechazo = COALESCE(?, mensaje_rechazo) WHERE id = ?',
-        [estado, mensaje_rechazo !== undefined ? mensaje_rechazo : null, id]
+        'UPDATE cotizaciones SET estado = ?, mensaje_rechazo = COALESCE(?, mensaje_rechazo), fecha_aprobacion = IF(?, NOW(), fecha_aprobacion) WHERE id = ?',
+        [estado, mensaje_rechazo !== undefined ? mensaje_rechazo : null, esAprobada, id]
       );
       const pedido_id = existing[0].pedido_id;
       const es_complementaria = existing[0].es_complementaria;
@@ -394,6 +452,19 @@ const updateEstadoCotizacion = async (req, res) => {
           "UPDATE pedidos SET estado = 'FALTA_APROBAR_COTIZACION' WHERE id = ?",
           [pedido_id]
         );
+        if (estado === 'ENVIADA_AL_MANAGER') {
+          await connection.execute(
+            `INSERT INTO historial_pedido (pedido_id, cotizacion_id, tipo_evento, descripcion, usuario_id, usuario_nombre, valor_anterior, valor_nuevo, atendidos, no_atendidos)
+             VALUES (?, ?, 'COTIZACION_ENVIADA', 'Cotización enviada al manager para revisión.', ?, ?, NULL, NULL, NULL, NULL)`,
+            [pedido_id, id, req.user?.id || null, req.user?.nombre_completo || null]
+          );
+        } else if (estado === 'ENVIADA_AL_CLIENTE') {
+          await connection.execute(
+            `INSERT INTO historial_pedido (pedido_id, cotizacion_id, tipo_evento, descripcion, usuario_id, usuario_nombre, valor_anterior, valor_nuevo, atendidos, no_atendidos)
+             VALUES (?, ?, 'COTIZACION_ENVIADA', 'Cotización enviada al cliente para aprobación.', ?, ?, NULL, NULL, NULL, NULL)`,
+            [pedido_id, id, req.user?.id || null, req.user?.nombre_completo || null]
+          );
+        }
       } else if (estado === 'APROBADA_POR_MANAGER') {
         await connection.execute(
           "UPDATE pedidos SET estado = 'FALTA_APROBAR_COTIZACION' WHERE id = ?",
@@ -409,10 +480,23 @@ const updateEstadoCotizacion = async (req, res) => {
           "UPDATE pedidos SET estado = 'COTIZACION_APROBADA', cotizacion_principal_id = ? WHERE id = ?",
           [id, pedido_id]
         );
+        await connection.execute(
+          `INSERT INTO historial_pedido (pedido_id, cotizacion_id, tipo_evento, descripcion, usuario_id, usuario_nombre, valor_anterior, valor_nuevo, atendidos, no_atendidos)
+           VALUES (?, ?, 'COTIZACION_APROBADA', 'El cliente aprobó la cotización.', ?, ?, NULL, NULL, NULL, NULL)`,
+          [pedido_id, id, req.user?.id || null, req.user?.nombre_completo || null]
+        );
       } else if (estado === 'RECHAZADA' && !es_complementaria) {
         await connection.execute(
           "UPDATE pedidos SET estado = 'COTIZACION_RECHAZADA' WHERE id = ?",
           [pedido_id]
+        );
+        const descRechazo = mensaje_rechazo && String(mensaje_rechazo).trim()
+          ? `El cliente rechazó la cotización. Motivo: ${String(mensaje_rechazo).trim()}`
+          : 'El cliente rechazó la cotización.';
+        await connection.execute(
+          `INSERT INTO historial_pedido (pedido_id, cotizacion_id, tipo_evento, descripcion, usuario_id, usuario_nombre, valor_anterior, valor_nuevo, atendidos, no_atendidos)
+           VALUES (?, ?, 'COTIZACION_RECHAZADA', ?, ?, ?, NULL, NULL, NULL, NULL)`,
+          [pedido_id, id, descRechazo, req.user?.id || null, req.user?.nombre_completo || null]
         );
       }
       await connection.commit();
