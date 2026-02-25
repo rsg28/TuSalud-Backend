@@ -10,20 +10,15 @@ const { verificarToken, verificarRol } = require('../middleware/auth');
 // Obtener matriz de artículos (exámenes con precios por sede)
 router.get('/matriz', verificarToken, preciosController.obtenerMatrizArticulos);
 
+// Listar categorías con exámenes con precio en la sede (query: sede_id)
+router.get('/categorias/:categoria/examenes', verificarToken, preciosController.listarExamenesPorCategoria);
+router.get('/categorias', verificarToken, preciosController.listarCategorias);
+
 // Buscar exámenes por texto (query: q, sede_id)
 router.get('/buscar', verificarToken, preciosController.buscarExamenes);
 
 // Listar precios por sede
 router.get('/sede/:sede_id', verificarToken, preciosController.listarPreciosSede);
-
-// Listar solicitudes pendientes (stub: vacío en nuevo esquema)
-router.get('/pendientes', verificarToken, verificarRol(['manager']), preciosController.listarPendientes);
-
-// Listar precios de una empresa (stub: vacío en nuevo esquema)
-router.get('/empresa/:empresa_id', verificarToken, preciosController.listarPreciosEmpresa);
-
-// Solicitar precio personalizado (vendedor)
-router.post('/solicitar', verificarToken, verificarRol(['vendedor', 'manager']), preciosController.solicitarPrecio);
 
 // Aprobar/rechazar precio (manager)
 router.post('/:solicitud_id/aprobar', verificarToken, verificarRol(['manager']), preciosController.aprobarPrecio);

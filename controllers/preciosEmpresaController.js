@@ -90,6 +90,63 @@ exports.buscarExamenes = async (req, res) => {
   }
 };
 
+// Listar categorías que tienen exámenes con precio en la sede (para mostrar como cards)
+exports.listarCategorias = async (req, res) => {
+  try {
+    const { sede_id } = req.query;
+    if (!sede_id) {
+      return res.status(400).json({ error: 'sede_id es requerido' });
+    }
+    const [rows] = await pool.query(
+      `SELECT COALESCE(e.categoria, 'Otros') AS nombre, COUNT(*) AS cantidad
+       FROM examenes e
+       LEFT JOIN examen_precio ep ON e.id = ep.examen_id AND ep.sede_id = ?
+       LEFT JOIN examen_precio ep_general ON e.id = ep_general.examen_id AND ep_general.sede_id IS NULL
+       WHERE e.activo = 1
+         AND (ep.id IS NOT NULL OR ep_general.id IS NOT NULL)
+       GROUP BY COALESCE(e.categoria, 'Otros')
+       ORDER BY nombre`,
+      [sede_id]
+    );
+    res.json({ categorias: rows });
+  } catch (error) {
+    console.error('Error al listar categorías:', error);
+    res.status(500).json({ error: 'Error al listar categorías' });
+  }
+};
+
+// Listar exámenes de una categoría con precio para la sede
+exports.listarExamenesPorCategoria = async (req, res) => {
+  try {
+    const { categoria } = req.params;
+    const { sede_id } = req.query;
+    if (!sede_id) {
+      return res.status(400).json({ error: 'sede_id es requerido' });
+    }
+    const categoriaDecoded = decodeURIComponent(categoria || '');
+    const [examenes] = await pool.query(
+      `SELECT
+        e.id AS examen_id,
+        e.nombre AS nombre_examen,
+        e.categoria AS examen_principal,
+        e.codigo,
+        COALESCE(ep.precio, ep_general.precio) AS precio
+       FROM examenes e
+       LEFT JOIN examen_precio ep ON e.id = ep.examen_id AND ep.sede_id = ?
+       LEFT JOIN examen_precio ep_general ON e.id = ep_general.examen_id AND ep_general.sede_id IS NULL
+       WHERE e.activo = 1
+         AND (COALESCE(e.categoria, 'Otros') = ?)
+         AND (ep.id IS NOT NULL OR ep_general.id IS NOT NULL)
+       ORDER BY e.nombre`,
+      [sede_id, categoriaDecoded]
+    );
+    res.json({ examenes });
+  } catch (error) {
+    console.error('Error al listar exámenes por categoría:', error);
+    res.status(500).json({ error: 'Error al listar exámenes por categoría' });
+  }
+};
+
 // Listar precios por sede (examen_precio)
 exports.listarPreciosSede = async (req, res) => {
   try {

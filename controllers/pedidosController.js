@@ -703,13 +703,13 @@ const cancelarPedido = async (req, res) => {
 
     await connection.beginTransaction();
 
-    // Quitar referencias del pedido a cotización principal y factura para poder borrarlas
+    // 1. Quitar referencias del pedido para poder borrar facturas y cotizaciones
     await connection.execute(
       'UPDATE pedidos SET cotizacion_principal_id = NULL, factura_id = NULL WHERE id = ?',
       [pedido_id]
     );
 
-    // Facturas tienen FK pedido_id ON DELETE RESTRICT: borrar antes que el pedido
+    // 2. Borrar todas las facturas del pedido (FK pedido_id es RESTRICT: hay que borrar antes que el pedido)
     const [facturas] = await connection.execute('SELECT id FROM facturas WHERE pedido_id = ?', [pedido_id]);
     const facturaIds = facturas.map((f) => f.id);
     if (facturaIds.length > 0) {
@@ -719,15 +719,14 @@ const cancelarPedido = async (req, res) => {
       await connection.execute('DELETE FROM facturas WHERE pedido_id = ?', [pedido_id]);
     }
 
-    // Borrar historial del pedido (opcional: también se borra por CASCADE al borrar pedido)
+    // 3. Borrar historial del pedido
     await connection.execute('DELETE FROM historial_pedido WHERE pedido_id = ?', [pedido_id]);
 
-    // Cotizaciones complementarias referencian a otra cotización del mismo pedido: quitar FK primero
+    // 4. Borrar todas las cotizaciones del pedido (cotizacion_items se borran por CASCADE)
     await connection.execute('UPDATE cotizaciones SET cotizacion_base_id = NULL WHERE pedido_id = ?', [pedido_id]);
-    // Borrar cotizaciones del pedido (y cotizacion_items por CASCADE)
     await connection.execute('DELETE FROM cotizaciones WHERE pedido_id = ?', [pedido_id]);
 
-    // Borrar pedido (CASCADE: pedido_examenes, pedido_pacientes, paciente_examen_*)
+    // 5. Borrar el pedido (CASCADE: pedido_examenes, pedido_pacientes, paciente_examen_*)
     await connection.execute('DELETE FROM pedidos WHERE id = ?', [pedido_id]);
 
     await connection.commit();
