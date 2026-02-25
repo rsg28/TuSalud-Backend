@@ -431,20 +431,36 @@ const updateEstadoCotizacion = async (req, res) => {
 };
 
 const deleteCotizacion = async (req, res) => {
+  const connection = await pool.getConnection();
   try {
     const { id } = req.params;
-    const [existing] = await pool.execute('SELECT id, estado FROM cotizaciones WHERE id = ?', [id]);
+    const [existing] = await connection.execute('SELECT id, estado FROM cotizaciones WHERE id = ?', [id]);
     if (existing.length === 0) {
+      connection.release();
       return res.status(404).json({ error: 'Cotización no encontrada' });
     }
-    if (existing[0].estado !== 'BORRADOR') {
-      return res.status(400).json({ error: 'Solo se pueden eliminar cotizaciones en estado BORRADOR' });
-    }
-    await pool.execute('DELETE FROM cotizaciones WHERE id = ?', [id]);
+
+    await connection.beginTransaction();
+
+    // Quitar referencias: pedidos.cotizacion_principal_id se pone NULL al borrar (ON DELETE SET NULL)
+    // Cotizaciones complementarias que usan esta como base
+    await connection.execute('UPDATE cotizaciones SET cotizacion_base_id = NULL WHERE cotizacion_base_id = ?', [id]);
+    // Enlaces factura-cotización (FK RESTRICT)
+    await connection.execute('DELETE FROM factura_cotizacion WHERE cotizacion_id = ?', [id]);
+    // Referencia del pedido a esta cotización como principal
+    await connection.execute('UPDATE pedidos SET cotizacion_principal_id = NULL WHERE cotizacion_principal_id = ?', [id]);
+
+    // Borrar ítems y luego la cotización (cotizacion_items tiene ON DELETE CASCADE)
+    await connection.execute('DELETE FROM cotizaciones WHERE id = ?', [id]);
+
+    await connection.commit();
     res.json({ message: 'Cotización eliminada exitosamente' });
   } catch (error) {
+    await connection.rollback();
     console.error('Error al eliminar cotización:', error);
     res.status(500).json({ error: 'Error al eliminar cotización' });
+  } finally {
+    connection.release();
   }
 };
 
