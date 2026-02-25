@@ -167,12 +167,6 @@ const createFactura = async (req, res) => {
         [factura_id, pedido_id]
       );
 
-      await connection.execute(
-        `INSERT INTO historial_pedido (pedido_id, cotizacion_id, tipo_evento, descripcion, usuario_id, usuario_nombre, valor_anterior, valor_nuevo, atendidos, no_atendidos)
-         VALUES (?, NULL, 'FACTURA_EMITIDA', 'Factura emitida.', ?, ?, NULL, NULL, NULL, NULL)`,
-        [pedido_id, req.user?.id || null, req.user?.nombre_completo || null]
-      );
-
       await connection.commit();
 
       const [newFactura] = await pool.execute('SELECT * FROM facturas WHERE id = ?', [factura_id]);
@@ -197,16 +191,27 @@ const updateFactura = async (req, res) => {
     const { id } = req.params;
     const { estado, fecha_pago } = req.body;
 
-    const [existing] = await pool.execute('SELECT id, estado FROM facturas WHERE id = ?', [id]);
+    const [existing] = await pool.execute('SELECT id, estado, pedido_id FROM facturas WHERE id = ?', [id]);
     if (existing.length === 0) {
       return res.status(404).json({ error: 'Factura no encontrada' });
     }
 
     if (estado !== undefined) {
+      if (estado === 'PAGADA' && req.user?.rol !== 'vendedor') {
+        return res.status(403).json({ error: 'Solo el vendedor puede marcar la factura como pagada' });
+      }
       await pool.execute(
         'UPDATE facturas SET estado = ?, fecha_pago = COALESCE(?, fecha_pago) WHERE id = ?',
         [estado, fecha_pago || null, id]
       );
+      if (estado === 'PAGADA') {
+        const pedido_id = existing[0].pedido_id;
+        await pool.execute(
+          `INSERT INTO historial_pedido (pedido_id, cotizacion_id, tipo_evento, descripcion, usuario_id, usuario_nombre, valor_anterior, valor_nuevo, atendidos, no_atendidos)
+           VALUES (?, NULL, 'PAGO_RECIBIDO', 'Factura marcada como pagada.', ?, ?, NULL, NULL, NULL, NULL)`,
+          [pedido_id, req.user?.id || null, req.user?.nombre_completo || null]
+        );
+      }
     }
 
     const [updated] = await pool.execute('SELECT * FROM facturas WHERE id = ?', [id]);
