@@ -105,8 +105,27 @@ const listarPedidos = async (req, res) => {
     query += ` ORDER BY p.created_at DESC LIMIT ${safeLimit} OFFSET ${safeOffset}`;
 
     const [pedidos] = await pool.execute(query, params);
+    // Incluir estados de cotizaciones por pedido para que el frontend muestre la etiqueta correcta (Enviada al cliente / Aprobada por manager / Enviada al manager)
+    const pedidoIds = pedidos.map((p) => p.id);
+    let cotizacionesPorPedido = {};
+    if (pedidoIds.length > 0) {
+      const placeholders = pedidoIds.map(() => '?').join(',');
+      const [cots] = await pool.execute(
+        `SELECT pedido_id, estado FROM cotizaciones WHERE pedido_id IN (${placeholders}) ORDER BY es_complementaria ASC, id ASC`,
+        pedidoIds
+      );
+      for (const row of cots) {
+        const pid = row.pedido_id;
+        if (!cotizacionesPorPedido[pid]) cotizacionesPorPedido[pid] = [];
+        cotizacionesPorPedido[pid].push({ estado: row.estado });
+      }
+    }
+    const pedidosConCotizaciones = pedidos.map((p) => ({
+      ...p,
+      cotizaciones: cotizacionesPorPedido[p.id] || [],
+    }));
     res.json({
-      pedidos: sanitizeForJson(pedidos),
+      pedidos: sanitizeForJson(pedidosConCotizaciones),
       page: pageNum,
       limit: limitNum,
     });
