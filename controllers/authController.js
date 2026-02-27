@@ -34,11 +34,10 @@ const register = async (req, res) => {
       [nombre_usuario, email, password_hash, nombre_completo, telefono || null, ruc || null, tipo_ruc || 'NINGUNO']
     );
 
-    // Generar token JWT
+    // Generar token JWT (sin expiración)
     const token = jwt.sign(
       { userId: result.insertId, email, rol: 'cliente' },
-      process.env.JWT_SECRET,
-      { expiresIn: process.env.JWT_EXPIRES_IN || '7d' }
+      process.env.JWT_SECRET
     );
 
     res.status(201).json({
@@ -94,11 +93,10 @@ const login = async (req, res) => {
       return res.status(401).json({ error: 'Credenciales inválidas' });
     }
 
-    // Generar token JWT
+    // Generar token JWT (sin expiración)
     const token = jwt.sign(
       { userId: user.id, email: user.email, rol: user.rol },
-      process.env.JWT_SECRET,
-      { expiresIn: process.env.JWT_EXPIRES_IN || '7d' }
+      process.env.JWT_SECRET
     );
 
     res.json({
