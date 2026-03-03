@@ -20,7 +20,8 @@ const empresaValidation = [
 
 router.get('/', authenticateToken, getAllEmpresas);
 router.get('/mias', authenticateToken, getMisEmpresas);
-router.delete('/mias/:id', authenticateToken, quitarEmpresaDeUsuario);
+// Quitar empresa de "mis empresas" del usuario (ruta explícita para evitar conflicto con /:id)
+router.delete('/mias/:empresaId', authenticateToken, quitarEmpresaDeUsuario);
 router.get('/:id', authenticateToken, getEmpresaById);
 router.post('/', authenticateToken, requireRole('manager', 'vendedor', 'cliente'), empresaValidation, createEmpresa);
 router.put('/:id', authenticateToken, requireRole('manager', 'vendedor'), empresaValidation, updateEmpresa);

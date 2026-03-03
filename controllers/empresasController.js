@@ -209,7 +209,7 @@ const quitarEmpresaDeUsuario = async (req, res) => {
     if (!req.user || !req.user.id) {
       return res.status(401).json({ error: 'Usuario no autenticado' });
     }
-    const empresaId = parseInt(req.params.id, 10);
+    const empresaId = parseInt(req.params.empresaId || req.params.id, 10);
     if (!Number.isInteger(empresaId) || empresaId <= 0) {
       return res.status(400).json({ error: 'ID de empresa no válido' });
     }
