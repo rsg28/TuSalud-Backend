@@ -800,7 +800,9 @@ const cancelarPedido = async (req, res) => {
       await connection.execute('DELETE FROM solicitudes_agregar WHERE pedido_id = ?', [pedido_id]);
     }
 
-    // 5. Borrar todas las cotizaciones del pedido (cotizacion_items se borran por CASCADE)
+    // 5. Borrar cotizaciones del pedido (el CHECK exige: si es_complementaria=1 entonces cotizacion_base_id no puede ser NULL)
+    // Primero borrar complementarias; luego anular base en las restantes y borrarlas.
+    await connection.execute('DELETE FROM cotizaciones WHERE pedido_id = ? AND es_complementaria = 1', [pedido_id]);
     await connection.execute('UPDATE cotizaciones SET cotizacion_base_id = NULL WHERE pedido_id = ?', [pedido_id]);
     await connection.execute('DELETE FROM cotizaciones WHERE pedido_id = ?', [pedido_id]);
 
