@@ -304,7 +304,7 @@ const updateCotizacion = async (req, res) => {
     }
 
     const { id } = req.params;
-    const { estado, solicitud_manager_pendiente, mensaje_rechazo, items } = req.body;
+    const { estado, solicitud_manager_pendiente, mensaje_rechazo, notas_manager, items } = req.body;
 
     const [existing] = await pool.execute('SELECT id, estado, pedido_id, es_complementaria FROM cotizaciones WHERE id = ?', [id]);
     if (existing.length === 0) {
@@ -321,17 +321,32 @@ const updateCotizacion = async (req, res) => {
         }
         const esEnviada = ['ENVIADA', 'ENVIADA_AL_CLIENTE', 'ENVIADA_AL_MANAGER'].includes(estado);
         const esAprobada = estado === 'APROBADA' || estado === 'APROBADA_POR_MANAGER';
-        await connection.execute(
-          'UPDATE cotizaciones SET estado = ?, fecha_envio = IF(?, NOW(), fecha_envio), fecha_aprobacion = IF(?, NOW(), fecha_aprobacion), solicitud_manager_pendiente = COALESCE(?, solicitud_manager_pendiente), mensaje_rechazo = COALESCE(?, mensaje_rechazo) WHERE id = ?',
-          [
-            estado,
-            esEnviada,
-            esAprobada,
-            solicitud_manager_pendiente !== undefined ? (solicitud_manager_pendiente ? 1 : 0) : null,
-            mensaje_rechazo !== undefined ? mensaje_rechazo : null,
-            id
-          ]
-        );
+        if (notas_manager !== undefined && (estado === 'APROBADA_POR_MANAGER' || estado === 'APROBADA')) {
+          await connection.execute(
+            'UPDATE cotizaciones SET estado = ?, fecha_envio = IF(?, NOW(), fecha_envio), fecha_aprobacion = IF(?, NOW(), fecha_aprobacion), solicitud_manager_pendiente = COALESCE(?, solicitud_manager_pendiente), mensaje_rechazo = COALESCE(?, mensaje_rechazo), notas_manager = COALESCE(?, notas_manager) WHERE id = ?',
+            [
+              estado,
+              esEnviada,
+              esAprobada,
+              solicitud_manager_pendiente !== undefined ? (solicitud_manager_pendiente ? 1 : 0) : null,
+              mensaje_rechazo !== undefined ? mensaje_rechazo : null,
+              typeof notas_manager === 'string' ? notas_manager : null,
+              id
+            ]
+          );
+        } else {
+          await connection.execute(
+            'UPDATE cotizaciones SET estado = ?, fecha_envio = IF(?, NOW(), fecha_envio), fecha_aprobacion = IF(?, NOW(), fecha_aprobacion), solicitud_manager_pendiente = COALESCE(?, solicitud_manager_pendiente), mensaje_rechazo = COALESCE(?, mensaje_rechazo) WHERE id = ?',
+            [
+              estado,
+              esEnviada,
+              esAprobada,
+              solicitud_manager_pendiente !== undefined ? (solicitud_manager_pendiente ? 1 : 0) : null,
+              mensaje_rechazo !== undefined ? mensaje_rechazo : null,
+              id
+            ]
+          );
+        }
         const pedido_id = existing[0].pedido_id;
         const es_complementaria = existing[0].es_complementaria;
         const estadosEnviada = ['ENVIADA', 'ENVIADA_AL_CLIENTE', 'ENVIADA_AL_MANAGER'];
@@ -421,11 +436,11 @@ const updateCotizacion = async (req, res) => {
   }
 };
 
-/** PATCH /api/cotizaciones/:id/estado — Actualiza solo el estado (y opcionalmente mensaje_rechazo). */
+/** PATCH /api/cotizaciones/:id/estado — Actualiza solo el estado (y opcionalmente mensaje_rechazo, notas_manager). */
 const updateEstadoCotizacion = async (req, res) => {
   try {
     const { id } = req.params;
-    const { estado, mensaje_rechazo } = req.body;
+    const { estado, mensaje_rechazo, notas_manager } = req.body;
     if (!estado || typeof estado !== 'string') {
       return res.status(400).json({ error: 'estado es requerido' });
     }
@@ -440,10 +455,17 @@ const updateEstadoCotizacion = async (req, res) => {
     await connection.beginTransaction();
     try {
       const esAprobada = estado === 'APROBADA' || estado === 'APROBADA_POR_MANAGER';
-      await connection.execute(
-        'UPDATE cotizaciones SET estado = ?, mensaje_rechazo = COALESCE(?, mensaje_rechazo), fecha_aprobacion = IF(?, NOW(), fecha_aprobacion) WHERE id = ?',
-        [estado, mensaje_rechazo !== undefined ? mensaje_rechazo : null, esAprobada, id]
-      );
+      if (notas_manager !== undefined && (estado === 'APROBADA_POR_MANAGER' || estado === 'APROBADA')) {
+        await connection.execute(
+          'UPDATE cotizaciones SET estado = ?, mensaje_rechazo = COALESCE(?, mensaje_rechazo), notas_manager = COALESCE(?, notas_manager), fecha_aprobacion = IF(?, NOW(), fecha_aprobacion) WHERE id = ?',
+          [estado, mensaje_rechazo !== undefined ? mensaje_rechazo : null, typeof notas_manager === 'string' ? notas_manager : null, esAprobada, id]
+        );
+      } else {
+        await connection.execute(
+          'UPDATE cotizaciones SET estado = ?, mensaje_rechazo = COALESCE(?, mensaje_rechazo), fecha_aprobacion = IF(?, NOW(), fecha_aprobacion) WHERE id = ?',
+          [estado, mensaje_rechazo !== undefined ? mensaje_rechazo : null, esAprobada, id]
+        );
+      }
       const pedido_id = existing[0].pedido_id;
       const es_complementaria = existing[0].es_complementaria;
       const estadosEnviada = ['ENVIADA', 'ENVIADA_AL_CLIENTE', 'ENVIADA_AL_MANAGER'];

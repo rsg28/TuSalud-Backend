@@ -31,6 +31,7 @@ app.use('/api/usuarios', require('./routes/usuariosRoutes'));
 app.use('/api/cotizaciones', require('./routes/cotizacionesRoutes'));
 app.use('/api/facturas', require('./routes/facturasRoutes'));
 app.use('/api/pedidos', require('./routes/pedidosRoutes'));
+app.use('/api/solicitudes-agregar-examenes', require('./routes/solicitudesAgregarRoutes'));
 app.use('/api/precios', require('./routes/preciosEmpresaRoutes'));
 
 // 404 handler
