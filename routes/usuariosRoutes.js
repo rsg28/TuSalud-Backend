@@ -79,6 +79,133 @@ const updateUsuarioRol = async (req, res) => {
   }
 };
 
+// Obtener la empresa de un usuario (usuarios.empresa_id). Solo cliente tiene empresa.
+const getEmpresaByUsuarioId = async (req, res) => {
+  try {
+    const userId = parseInt(req.params.id, 10);
+    if (!Number.isInteger(userId) || userId <= 0) {
+      return res.status(400).json({ error: 'ID de usuario no válido' });
+    }
+
+    // Solo el propio usuario o un manager puede ver la empresa del usuario
+    if (req.user.id !== userId && req.user.rol !== 'manager') {
+      return res.status(403).json({ error: 'No puedes consultar la empresa de otro usuario' });
+    }
+
+    const [users] = await pool.execute(
+      'SELECT id, empresa_id FROM usuarios WHERE id = ?',
+      [userId]
+    );
+    if (users.length === 0) {
+      return res.status(404).json({ error: 'Usuario no encontrado' });
+    }
+
+    const empresaId = users[0].empresa_id;
+    if (empresaId == null) {
+      return res.json({ empresa: null });
+    }
+
+    const [empresas] = await pool.execute('SELECT * FROM empresas WHERE id = ?', [empresaId]);
+    if (empresas.length === 0) {
+      return res.json({ empresa: null });
+    }
+
+    res.json({ empresa: empresas[0] });
+  } catch (error) {
+    console.error('Error al obtener empresa del usuario:', error);
+    res.status(500).json({ error: 'Error al obtener empresa del usuario' });
+  }
+};
+
+// Quitar la empresa asignada al usuario (usuarios.empresa_id = NULL).
+const deleteEmpresaByUsuarioId = async (req, res) => {
+  try {
+    const userId = parseInt(req.params.id, 10);
+    if (!Number.isInteger(userId) || userId <= 0) {
+      return res.status(400).json({ error: 'ID de usuario no válido' });
+    }
+    if (req.user.id !== userId && req.user.rol !== 'manager') {
+      return res.status(403).json({ error: 'No puedes modificar la empresa de otro usuario' });
+    }
+
+    const [users] = await pool.execute('SELECT id FROM usuarios WHERE id = ?', [userId]);
+    if (users.length === 0) {
+      return res.status(404).json({ error: 'Usuario no encontrado' });
+    }
+
+    await pool.execute('UPDATE usuarios SET empresa_id = NULL WHERE id = ?', [userId]);
+    res.json({ message: 'Empresa quitada del usuario', empresa: null });
+  } catch (error) {
+    console.error('Error al quitar empresa del usuario:', error);
+    res.status(500).json({ error: 'Error al quitar empresa del usuario' });
+  }
+};
+
+// Asignar o crear y asignar empresa al usuario.
+// Body: { empresa_id: number } para asignar existente, o { razon_social, ruc?, direccion?, contacto? } para crear nueva y asignar.
+const setEmpresaByUsuarioId = async (req, res) => {
+  try {
+    const userId = parseInt(req.params.id, 10);
+    if (!Number.isInteger(userId) || userId <= 0) {
+      return res.status(400).json({ error: 'ID de usuario no válido' });
+    }
+    if (req.user.id !== userId && req.user.rol !== 'manager') {
+      return res.status(403).json({ error: 'No puedes modificar la empresa de otro usuario' });
+    }
+
+    const [users] = await pool.execute('SELECT id FROM usuarios WHERE id = ?', [userId]);
+    if (users.length === 0) {
+      return res.status(404).json({ error: 'Usuario no encontrado' });
+    }
+
+    const { empresa_id, razon_social, ruc, direccion, contacto } = req.body || {};
+    let empresaIdToSet = null;
+
+    if (empresa_id != null && Number.isInteger(Number(empresa_id))) {
+      // Asignar empresa existente
+      const [emp] = await pool.execute('SELECT id FROM empresas WHERE id = ?', [Number(empresa_id)]);
+      if (emp.length === 0) {
+        return res.status(404).json({ error: 'Empresa no encontrada' });
+      }
+      empresaIdToSet = emp[0].id;
+    } else if (razon_social && typeof razon_social === 'string' && razon_social.trim()) {
+      // Crear nueva empresa y asignar
+      const razon = razon_social.trim();
+      if (ruc && String(ruc).trim().length !== 0 && String(ruc).trim().length !== 11) {
+        return res.status(400).json({ error: 'El RUC debe tener 11 dígitos' });
+      }
+      const [existingNombre] = await pool.execute(
+        'SELECT id FROM empresas WHERE LOWER(TRIM(razon_social)) = LOWER(?)',
+        [razon]
+      );
+      if (existingNombre.length > 0) {
+        return res.status(400).json({ error: 'Ya existe una empresa con esa razón social' });
+      }
+      const rucVal = ruc && String(ruc).trim() ? String(ruc).trim() : null;
+      if (rucVal) {
+        const [existingRuc] = await pool.execute('SELECT id FROM empresas WHERE ruc = ?', [rucVal]);
+        if (existingRuc.length > 0) {
+          return res.status(400).json({ error: 'El RUC ya está registrado' });
+        }
+      }
+      const [result] = await pool.execute(
+        `INSERT INTO empresas (razon_social, ruc, direccion, contacto) VALUES (?, ?, ?, ?)`,
+        [razon, rucVal, (direccion && String(direccion).trim()) || null, (contacto && String(contacto).trim()) || null]
+      );
+      empresaIdToSet = result.insertId;
+    } else {
+      return res.status(400).json({ error: 'Indica empresa_id (para asignar existente) o razon_social (para crear nueva)' });
+    }
+
+    await pool.execute('UPDATE usuarios SET empresa_id = ? WHERE id = ?', [empresaIdToSet, userId]);
+    const [empresas] = await pool.execute('SELECT * FROM empresas WHERE id = ?', [empresaIdToSet]);
+    res.status(200).json({ message: 'Empresa asignada', empresa: empresas[0] });
+  } catch (error) {
+    console.error('Error al asignar empresa al usuario:', error);
+    res.status(500).json({ error: 'Error al asignar empresa al usuario' });
+  }
+};
+
 // Activar/desactivar usuario
 const toggleUsuarioActivo = async (req, res) => {
   try {
@@ -110,6 +237,9 @@ const toggleUsuarioActivo = async (req, res) => {
 };
 
 router.get('/', authenticateToken, requireRole('manager'), getAllUsuarios);
+router.get('/:id/empresa', authenticateToken, getEmpresaByUsuarioId);
+router.delete('/:id/empresa', authenticateToken, deleteEmpresaByUsuarioId);
+router.post('/:id/empresa', authenticateToken, setEmpresaByUsuarioId);
 router.put('/:id/rol', authenticateToken, requireRole('manager'), [
   body('rol').isIn(['manager', 'vendedor', 'cliente']).withMessage('Rol inválido')
 ], updateUsuarioRol);

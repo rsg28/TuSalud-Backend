@@ -34,19 +34,17 @@ const getAllEmpresas = async (req, res) => {
   }
 };
 
-// Empresas asociadas al usuario actual (usuario_empresa)
+// Empresas del usuario: usa usuarios.empresa_id (un cliente = una empresa). Si no tiene, devuelve [].
 const getMisEmpresas = async (req, res) => {
   try {
     if (!req.user || !req.user.id) {
       return res.status(401).json({ error: 'Usuario no autenticado' });
     }
-    const [empresas] = await pool.execute(
-      `SELECT e.* FROM empresas e
-       INNER JOIN usuario_empresa ue ON ue.empresa_id = e.id
-       WHERE ue.usuario_id = ?
-       ORDER BY ue.es_principal DESC, e.razon_social ASC`,
-      [req.user.id]
-    );
+    const [users] = await pool.execute('SELECT empresa_id FROM usuarios WHERE id = ?', [req.user.id]);
+    if (users.length === 0 || users[0].empresa_id == null) {
+      return res.json({ empresas: [] });
+    }
+    const [empresas] = await pool.execute('SELECT * FROM empresas WHERE id = ?', [users[0].empresa_id]);
     res.json({ empresas });
   } catch (error) {
     console.error('Error al obtener mis empresas:', error);
@@ -125,12 +123,9 @@ const createEmpresa = async (req, res) => {
     );
 
     const empresaId = result.insertId;
-    // Si quien crea es un cliente, asociar la empresa al usuario (uno puede tener varias)
+    // Si quien crea es un cliente, asignar como su empresa (usuarios.empresa_id)
     if (req.user && req.user.rol === 'cliente') {
-      await pool.execute(
-        'INSERT INTO usuario_empresa (usuario_id, empresa_id, es_principal) VALUES (?, ?, 1)',
-        [req.user.id, empresaId]
-      );
+      await pool.execute('UPDATE usuarios SET empresa_id = ? WHERE id = ?', [empresaId, req.user.id]);
     }
     const [newEmpresa] = await pool.execute('SELECT * FROM empresas WHERE id = ?', [empresaId]);
     res.status(201).json({ message: 'Empresa creada exitosamente', empresa: newEmpresa[0] });

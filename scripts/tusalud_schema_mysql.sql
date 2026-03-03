@@ -1,6 +1,6 @@
 -- =============================================================================
 -- TuSalud - Esquema de base de datos (MySQL 8+)
--- Versión adaptada de tusalud_schema.sql para MySQL
+-- Solo estructura (DDL). Sin datos. Para recrear la base desde cero.
 -- =============================================================================
 
 SET FOREIGN_KEY_CHECKS = 0;
@@ -39,6 +39,7 @@ CREATE TABLE usuarios (
   tipo_ruc          VARCHAR(20) CHECK (tipo_ruc IN ('NINGUNO', 'RUC10', 'RUC20')),
   rol               ENUM('vendedor', 'cliente', 'manager') NOT NULL,
   activo            TINYINT(1) DEFAULT 1,
+  empresa_id        INT NULL COMMENT 'Empresa del cliente (1:1). NULL para vendedor/manager.',
   created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 );
@@ -78,6 +79,11 @@ CREATE TABLE empresas (
   updated_at                TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 );
 
+-- FK usuario -> empresa (una empresa por cliente; vendedor/manager tienen NULL)
+ALTER TABLE usuarios ADD CONSTRAINT fk_usuarios_empresa
+  FOREIGN KEY (empresa_id) REFERENCES empresas(id) ON DELETE SET NULL;
+
+-- Opcional: tabla extra para vincular más empresas a un usuario en el futuro
 CREATE TABLE usuario_empresa (
   id          INT AUTO_INCREMENT PRIMARY KEY,
   usuario_id  INT NOT NULL,
@@ -87,6 +93,8 @@ CREATE TABLE usuario_empresa (
   FOREIGN KEY (usuario_id) REFERENCES usuarios(id) ON DELETE CASCADE,
   FOREIGN KEY (empresa_id) REFERENCES empresas(id) ON DELETE CASCADE
 );
+-- usuario_empresa se mantiene como extra (ej. si en el futuro se permite más de una empresa).
+-- La empresa principal del cliente es usuarios.empresa_id.
 
 -- =============================================================================
 -- 3. SEDES
@@ -312,9 +320,13 @@ CREATE TABLE historial_pedido (
   FOREIGN KEY (usuario_id) REFERENCES usuarios(id) ON DELETE SET NULL
 );
 
+-- Índices
 CREATE INDEX idx_historial_pedido ON historial_pedido(pedido_id);
 CREATE INDEX idx_historial_cotizacion ON historial_pedido(cotizacion_id);
 CREATE INDEX idx_historial_fecha ON historial_pedido(created_at);
 CREATE INDEX idx_pedidos_empresa ON pedidos(empresa_id);
 CREATE INDEX idx_pedidos_estado ON pedidos(estado);
 CREATE INDEX idx_cotizaciones_pedido ON cotizaciones(pedido_id);
+CREATE INDEX idx_usuarios_empresa ON usuarios(empresa_id);
+
+SET FOREIGN_KEY_CHECKS = 1;

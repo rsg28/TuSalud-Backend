@@ -36,7 +36,7 @@ const getAllCotizaciones = async (req, res) => {
       query += " AND c.estado = 'ENVIADA_AL_MANAGER'";
     } else if (rol === 'cliente' && userId) {
       query += ` AND (
-        p.cliente_usuario_id = ? OR p.empresa_id IN (SELECT empresa_id FROM usuario_empresa WHERE usuario_id = ?)
+        p.cliente_usuario_id = ? OR p.empresa_id = (SELECT empresa_id FROM usuarios WHERE id = ?)
       ) AND (
         (c.creador_tipo = 'CLIENTE' AND c.creador_id = ?) OR (c.creador_tipo = 'VENDEDOR' AND c.estado != 'BORRADOR')
       )`;
@@ -169,7 +169,7 @@ const getCotizacionItems = async (req, res) => {
         `SELECT 1 FROM pedidos p
          WHERE p.id = ? AND (
            p.cliente_usuario_id = ? OR
-           p.empresa_id IN (SELECT empresa_id FROM usuario_empresa WHERE usuario_id = ?)
+           p.empresa_id = (SELECT empresa_id FROM usuarios WHERE id = ?)
          )`,
         [existe[0].pedido_id, userId, userId]
       );

@@ -87,16 +87,16 @@ const listarPedidos = async (req, res) => {
       params.push(req.user.id);
     }
     if (rol === 'cliente') {
-      const [empresas] = await pool.execute(
-        'SELECT empresa_id FROM usuario_empresa WHERE usuario_id = ?',
-        [req.user.id]
-      );
-      const ids = empresas.map((e) => e.empresa_id);
+      const [users] = await pool.execute('SELECT empresa_id FROM usuarios WHERE id = ?', [req.user.id]);
+      let ids = [];
+      if (users.length > 0 && users[0].empresa_id != null) {
+        ids = [users[0].empresa_id];
+      }
       if (ids.length === 0) {
         return res.json({ pedidos: [], page: pageNum, limit: limitNum });
       }
-      query += ` AND p.empresa_id IN (${ids.map(() => '?').join(',')})`;
-      params.push(...ids);
+      query += ' AND p.empresa_id = ?';
+      params.push(ids[0]);
     }
 
     // LIMIT/OFFSET como valores enteros en la query (evita ER_WRONG_ARGUMENTS con prepared statements)
@@ -192,16 +192,16 @@ const listarPedidosConCotizacionAprobada = async (req, res) => {
       params.push(req.user.id);
     }
     if (rol === 'cliente') {
-      const [empresas] = await pool.execute(
-        'SELECT empresa_id FROM usuario_empresa WHERE usuario_id = ?',
-        [req.user.id]
-      );
-      const ids = empresas.map((e) => e.empresa_id);
+      const [users] = await pool.execute('SELECT empresa_id FROM usuarios WHERE id = ?', [req.user.id]);
+      let ids = [];
+      if (users.length > 0 && users[0].empresa_id != null) {
+        ids = [users[0].empresa_id];
+      }
       if (ids.length === 0) {
         return res.json({ pedidos: [], page: pageNum, limit: limitNum });
       }
-      query += ` AND p.empresa_id IN (${ids.map(() => '?').join(',')})`;
-      params.push(...ids);
+      query += ' AND p.empresa_id = ?';
+      params.push(ids[0]);
     }
 
     const safeLimit = Math.max(1, Math.min(100, Number(limitNum) || 20));
@@ -783,12 +783,9 @@ const cancelarPedido = async (req, res) => {
       return res.status(404).json({ error: 'Pedido no encontrado' });
     }
     if (req.user.rol === 'cliente') {
-      const [empresas] = await connection.execute(
-        'SELECT empresa_id FROM usuario_empresa WHERE usuario_id = ?',
-        [req.user.id]
-      );
-      const ids = empresas.map((e) => e.empresa_id);
-      if (!ids.includes(pedido[0].empresa_id)) {
+      const [users] = await connection.execute('SELECT empresa_id FROM usuarios WHERE id = ?', [req.user.id]);
+      const miEmpresaId = users.length > 0 ? users[0].empresa_id : null;
+      if (miEmpresaId == null || pedido[0].empresa_id !== miEmpresaId) {
         connection.release();
         return res.status(403).json({ error: 'No puede cancelar este pedido' });
       }
