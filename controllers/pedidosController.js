@@ -790,11 +790,21 @@ const cancelarPedido = async (req, res) => {
     // 3. Borrar historial del pedido
     await connection.execute('DELETE FROM historial_pedido WHERE pedido_id = ?', [pedido_id]);
 
-    // 4. Borrar todas las cotizaciones del pedido (cotizacion_items se borran por CASCADE)
+    // 4. Borrar solicitudes de agregar exámenes (y sus tablas hijas) para este pedido
+    const [solicitudes] = await connection.execute('SELECT id FROM solicitudes_agregar WHERE pedido_id = ?', [pedido_id]);
+    const solicitudIds = solicitudes.map((s) => s.id);
+    if (solicitudIds.length > 0) {
+      const placeholdersSol = solicitudIds.map(() => '?').join(',');
+      await connection.execute(`DELETE FROM solicitud_agregar_examenes WHERE solicitud_id IN (${placeholdersSol})`, solicitudIds);
+      await connection.execute(`DELETE FROM solicitud_agregar_paciente WHERE solicitud_id IN (${placeholdersSol})`, solicitudIds);
+      await connection.execute('DELETE FROM solicitudes_agregar WHERE pedido_id = ?', [pedido_id]);
+    }
+
+    // 5. Borrar todas las cotizaciones del pedido (cotizacion_items se borran por CASCADE)
     await connection.execute('UPDATE cotizaciones SET cotizacion_base_id = NULL WHERE pedido_id = ?', [pedido_id]);
     await connection.execute('DELETE FROM cotizaciones WHERE pedido_id = ?', [pedido_id]);
 
-    // 5. Borrar el pedido (CASCADE: pedido_examenes, pedido_pacientes, paciente_examen_*)
+    // 6. Borrar el pedido (CASCADE: pedido_examenes, pedido_pacientes, paciente_examen_*)
     await connection.execute('DELETE FROM pedidos WHERE id = ?', [pedido_id]);
 
     await connection.commit();
