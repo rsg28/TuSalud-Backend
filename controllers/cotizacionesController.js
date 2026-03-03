@@ -12,6 +12,56 @@ const generarNumeroCotizacion = async () => {
   return `COT-${year}-${String(rows[0].nextId).padStart(6, '0')}`;
 };
 
+const generarNumeroCotizacionComplementaria = async () => {
+  const [rows] = await pool.query('SELECT COALESCE(MAX(id), 0) + 1 AS nextId FROM cotizaciones');
+  const year = new Date().getFullYear();
+  return `COT-COMP-${year}-${String(rows[0].nextId).padStart(6, '0')}`;
+};
+
+/** Crea una cotización complementaria usando la conexión dada (sin commit). Usado por solicitudes aprobadas o por POST /complementarias. */
+const crearCotizacionComplementariaConConnection = async (connection, opts) => {
+  const { pedido_id, cotizacion_base_id, items, creador_id, creador_tipo } = opts;
+  if (!pedido_id || !cotizacion_base_id || !items || !Array.isArray(items) || items.length === 0) {
+    throw new Error('pedido_id, cotizacion_base_id e items (array no vacío) son requeridos');
+  }
+  const tipo = (creador_tipo === 'CLIENTE' ? 'CLIENTE' : 'VENDEDOR');
+  const numero_cotizacion = await generarNumeroCotizacionComplementaria();
+  let total = 0;
+  for (const it of items) {
+    total += (it.precio_final ?? it.precio_base ?? 0) * (it.cantidad || 0);
+  }
+  const [result] = await connection.execute(
+    `INSERT INTO cotizaciones (
+      numero_cotizacion, pedido_id, cotizacion_base_id, es_complementaria,
+      estado, creador_tipo, creador_id, total
+    ) VALUES (?, ?, ?, 1, 'BORRADOR', ?, ?, ?)`,
+    [numero_cotizacion, pedido_id, cotizacion_base_id, tipo, creador_id ?? null, total]
+  );
+  const cotizacionId = result.insertId;
+  for (const it of items) {
+    const precio_base = it.precio_base ?? it.precio_final ?? 0;
+    const precio_final = it.precio_final ?? precio_base;
+    const variacion_pct = precio_base !== 0 ? ((precio_final - precio_base) / precio_base) * 100 : 0;
+    const subtotal = precio_final * (it.cantidad || 0);
+    await connection.execute(
+      `INSERT INTO cotizacion_items (
+        cotizacion_id, examen_id, nombre, cantidad, precio_base, precio_final, variacion_pct, subtotal
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        cotizacionId,
+        it.examen_id,
+        it.nombre || 'Examen',
+        it.cantidad || 1,
+        precio_base,
+        precio_final,
+        variacion_pct,
+        subtotal
+      ]
+    );
+  }
+  return { cotizacionId, numero_cotizacion };
+};
+
 const getAllCotizaciones = async (req, res) => {
   try {
     const { pedido_id, user_id, estado, empresa_id } = req.query;
@@ -296,6 +346,73 @@ const createCotizacion = async (req, res) => {
   }
 };
 
+/** POST /api/cotizaciones/complementarias — Crea una cotización complementaria (vendedor/manager). Body: { pedido_id, cotizacion_base_id?, items }. */
+const createCotizacionComplementaria = async (req, res) => {
+  try {
+    const { pedido_id, cotizacion_base_id, items } = req.body;
+    if (!pedido_id || !items || !Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ error: 'pedido_id e items (array no vacío) son requeridos' });
+    }
+    const [pedidoRows] = await pool.execute(
+      'SELECT id, cotizacion_principal_id, empresa_id, cliente_usuario_id, vendedor_id FROM pedidos WHERE id = ?',
+      [pedido_id]
+    );
+    if (pedidoRows.length === 0) {
+      return res.status(404).json({ error: 'Pedido no encontrado' });
+    }
+    const pedido = pedidoRows[0];
+    const baseId = cotizacion_base_id != null ? Number(cotizacion_base_id) : (pedido.cotizacion_principal_id != null ? Number(pedido.cotizacion_principal_id) : null);
+    if (baseId == null) {
+      return res.status(400).json({ error: 'El pedido no tiene cotización principal. Indique cotizacion_base_id o use un pedido con cotización aprobada.' });
+    }
+    const [baseCot] = await pool.execute('SELECT id, pedido_id FROM cotizaciones WHERE id = ? AND pedido_id = ?', [baseId, pedido_id]);
+    if (baseCot.length === 0) {
+      return res.status(400).json({ error: 'Cotización base no encontrada o no pertenece al pedido' });
+    }
+    const rol = req.user?.rol;
+    const userId = req.user?.id;
+    if (rol !== 'vendedor' && rol !== 'manager' && rol !== 'cliente') {
+      return res.status(403).json({ error: 'Solo vendedor, manager o cliente pueden crear cotizaciones complementarias' });
+    }
+    if (rol === 'cliente' && Number(pedido.cliente_usuario_id) !== Number(userId)) {
+      return res.status(403).json({ error: 'Solo puede crear cotizaciones complementarias para sus propios pedidos' });
+    }
+    const creadorTipo = rol === 'cliente' ? 'CLIENTE' : 'VENDEDOR';
+    const connection = await pool.getConnection();
+    await connection.beginTransaction();
+    try {
+      const { cotizacionId, numero_cotizacion } = await crearCotizacionComplementariaConConnection(connection, {
+        pedido_id,
+        cotizacion_base_id: baseId,
+        items: items.map((it) => ({
+          examen_id: it.examen_id,
+          nombre: it.nombre || 'Examen',
+          cantidad: it.cantidad ?? 1,
+          precio_base: it.precio_base ?? it.precio_final ?? 0,
+          precio_final: it.precio_final ?? it.precio_base ?? 0,
+        })),
+        creador_id: userId,
+        creador_tipo: creadorTipo,
+      });
+      await connection.commit();
+      const [newCot] = await pool.execute('SELECT * FROM cotizaciones WHERE id = ?', [cotizacionId]);
+      res.status(201).json({
+        message: 'Cotización complementaria creada',
+        cotizacion: newCot[0],
+        numero_cotizacion,
+      });
+    } catch (err) {
+      await connection.rollback();
+      throw err;
+    } finally {
+      connection.release();
+    }
+  } catch (error) {
+    console.error('Error al crear cotización complementaria:', error);
+    res.status(500).json({ error: error.message || 'Error al crear cotización complementaria' });
+  }
+};
+
 const updateCotizacion = async (req, res) => {
   try {
     const errors = validationResult(req);
@@ -576,6 +693,8 @@ module.exports = {
   getCotizacionById,
   getCotizacionItems,
   createCotizacion,
+  createCotizacionComplementaria,
+  crearCotizacionComplementariaConConnection,
   updateCotizacion,
   updateEstadoCotizacion,
   deleteCotizacion

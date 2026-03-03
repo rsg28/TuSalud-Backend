@@ -7,6 +7,7 @@ const {
   getCotizacionById,
   getCotizacionItems,
   createCotizacion,
+  createCotizacionComplementaria,
   updateCotizacion,
   updateEstadoCotizacion,
   deleteCotizacion
@@ -20,6 +21,7 @@ const cotizacionValidation = [
 
 router.get('/', authenticateToken, getAllCotizaciones);
 router.get('/enviadas-al-manager', authenticateToken, requireRole('manager'), getCotizacionesEnviadasAlManager);
+router.post('/complementarias', authenticateToken, requireRole('vendedor', 'manager', 'cliente'), createCotizacionComplementaria);
 router.get('/:id/items', authenticateToken, getCotizacionItems);
 router.get('/:id', authenticateToken, getCotizacionById);
 router.post('/', authenticateToken, requireRole('manager', 'vendedor', 'cliente'), cotizacionValidation, createCotizacion);

@@ -1,4 +1,5 @@
 const pool = require('../config/database');
+const { crearCotizacionComplementariaConConnection } = require('./cotizacionesController');
 
 function sanitizeForJson(obj) {
   if (obj === null || obj === undefined) return obj;
@@ -240,17 +241,21 @@ const actualizarEstado = async (req, res) => {
       );
       const [pacientesPedido] = await connection.execute('SELECT id FROM pedido_pacientes WHERE pedido_id = ?', [pedido_id]);
       const todosPacienteIds = pacientesPedido.map((p) => p.id);
-      const examenesAgregados = new Set();
+      const itemsComplementaria = new Map();
 
       for (const row of examenesRows) {
         const examen_id = row.examen_id;
         const cantidad = Math.max(1, row.cantidad || 1);
-        examenesAgregados.add(examen_id);
         const [precio] = await connection.execute(
           `SELECT precio FROM examen_precio WHERE examen_id = ? AND (sede_id = ? OR sede_id IS NULL) AND (vigente_hasta IS NULL OR vigente_hasta >= CURDATE()) ORDER BY sede_id IS NOT NULL DESC LIMIT 1`,
           [examen_id, sede_id]
         );
         const precio_base = precio.length > 0 ? Number(precio[0].precio) : 0;
+        if (!itemsComplementaria.has(examen_id)) {
+          itemsComplementaria.set(examen_id, { cantidad: 0, precio_base });
+        }
+        itemsComplementaria.get(examen_id).cantidad += cantidad;
+
         await connection.execute(
           'INSERT INTO pedido_examenes (pedido_id, examen_id, cantidad, precio_base) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE cantidad = cantidad + ?, precio_base = ?',
           [pedido_id, examen_id, cantidad, precio_base, cantidad, precio_base]
@@ -273,6 +278,31 @@ const actualizarEstado = async (req, res) => {
 
       const [count] = await connection.execute('SELECT COUNT(*) AS c FROM pedido_pacientes WHERE pedido_id = ?', [pedido_id]);
       await connection.execute('UPDATE pedidos SET total_empleados = ? WHERE id = ?', [count[0].c, pedido_id]);
+
+      const [pedidoConCot] = await connection.execute('SELECT cotizacion_principal_id FROM pedidos WHERE id = ?', [pedido_id]);
+      const cotizacionPrincipalId = pedidoConCot[0]?.cotizacion_principal_id;
+      if (cotizacionPrincipalId != null && itemsComplementaria.size > 0) {
+        const examenIds = Array.from(itemsComplementaria.keys());
+        const placeholders = examenIds.map(() => '?').join(',');
+        const [nombresRows] = await connection.execute(
+          `SELECT id, nombre FROM examenes WHERE id IN (${placeholders})`,
+          examenIds
+        );
+        const nombresMap = new Map(nombresRows.map((r) => [r.id, r.nombre || 'Examen']));
+        const items = Array.from(itemsComplementaria.entries()).map(([examen_id, { cantidad, precio_base }]) => ({
+          examen_id,
+          nombre: nombresMap.get(examen_id) || 'Examen',
+          cantidad,
+          precio_final: precio_base,
+        }));
+        await crearCotizacionComplementariaConConnection(connection, {
+          pedido_id,
+          cotizacion_base_id: cotizacionPrincipalId,
+          items,
+          creador_id: req.user.id,
+          creador_tipo: 'VENDEDOR',
+        });
+      }
 
       await connection.execute(
         `INSERT INTO historial_pedido (pedido_id, tipo_evento, descripcion, usuario_id, usuario_nombre)
