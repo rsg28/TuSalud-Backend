@@ -86,18 +86,7 @@ const listarPedidos = async (req, res) => {
       query += ' AND (p.vendedor_id = ? OR p.vendedor_id IS NULL)';
       params.push(req.user.id);
     }
-    if (rol === 'cliente') {
-      const [users] = await pool.execute('SELECT empresa_id FROM usuarios WHERE id = ?', [req.user.id]);
-      let ids = [];
-      if (users.length > 0 && users[0].empresa_id != null) {
-        ids = [users[0].empresa_id];
-      }
-      if (ids.length === 0) {
-        return res.json({ pedidos: [], page: pageNum, limit: limitNum });
-      }
-      query += ' AND p.empresa_id = ?';
-      params.push(ids[0]);
-    }
+    // Cliente: ya filtrado por p.cliente_usuario_id = user_id (no por empresa)
 
     // LIMIT/OFFSET como valores enteros en la query (evita ER_WRONG_ARGUMENTS con prepared statements)
     const safeLimit = Math.max(1, Math.min(100, Number(limitNum) || 20));
@@ -191,18 +180,7 @@ const listarPedidosConCotizacionAprobada = async (req, res) => {
       query += ' AND (p.vendedor_id = ? OR p.vendedor_id IS NULL)';
       params.push(req.user.id);
     }
-    if (rol === 'cliente') {
-      const [users] = await pool.execute('SELECT empresa_id FROM usuarios WHERE id = ?', [req.user.id]);
-      let ids = [];
-      if (users.length > 0 && users[0].empresa_id != null) {
-        ids = [users[0].empresa_id];
-      }
-      if (ids.length === 0) {
-        return res.json({ pedidos: [], page: pageNum, limit: limitNum });
-      }
-      query += ' AND p.empresa_id = ?';
-      params.push(ids[0]);
-    }
+    // Cliente: ya filtrado por p.cliente_usuario_id = user_id (no por empresa)
 
     const safeLimit = Math.max(1, Math.min(100, Number(limitNum) || 20));
     const safeOffset = Math.max(0, Number(offset) || 0);
