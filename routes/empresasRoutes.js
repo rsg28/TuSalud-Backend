@@ -7,7 +7,8 @@ const {
   getEmpresaById,
   createEmpresa,
   updateEmpresa,
-  deleteEmpresa
+  deleteEmpresa,
+  quitarEmpresaDeUsuario
 } = require('../controllers/empresasController');
 const { authenticateToken, requireRole } = require('../middleware/auth');
 
@@ -19,6 +20,7 @@ const empresaValidation = [
 
 router.get('/', authenticateToken, getAllEmpresas);
 router.get('/mias', authenticateToken, getMisEmpresas);
+router.delete('/mias/:id', authenticateToken, quitarEmpresaDeUsuario);
 router.get('/:id', authenticateToken, getEmpresaById);
 router.post('/', authenticateToken, requireRole('manager', 'vendedor', 'cliente'), empresaValidation, createEmpresa);
 router.put('/:id', authenticateToken, requireRole('manager', 'vendedor'), empresaValidation, updateEmpresa);
