@@ -427,6 +427,9 @@ const updateCotizacion = async (req, res) => {
     if (existing.length === 0) {
       return res.status(404).json({ error: 'Cotización no encontrada' });
     }
+    if (existing[0].estado === 'APROBADA') {
+      return res.status(403).json({ error: 'No se pueden modificar cotizaciones ya aprobadas.' });
+    }
 
     const connection = await pool.getConnection();
     await connection.beginTransaction();
@@ -517,6 +520,14 @@ const updateCotizacion = async (req, res) => {
         );
       }
 
+      // Guardar notas del manager cuando se envían sin cambiar estado (ej. "Guardar cambios")
+      if (notas_manager !== undefined && estado === undefined) {
+        await connection.execute(
+          'UPDATE cotizaciones SET notas_manager = ? WHERE id = ?',
+          [typeof notas_manager === 'string' ? notas_manager : null, id]
+        );
+      }
+
       // Actualizar ítems en BORRADOR o ENVIADA_AL_MANAGER (cuando el manager edita y aprueba)
       const puedeActualizarItems = existing[0].estado === 'BORRADOR' || existing[0].estado === 'ENVIADA_AL_MANAGER';
       if (items && Array.isArray(items) && puedeActualizarItems) {
@@ -567,6 +578,9 @@ const updateEstadoCotizacion = async (req, res) => {
     const [existing] = await pool.execute('SELECT id, estado, pedido_id, es_complementaria FROM cotizaciones WHERE id = ?', [id]);
     if (existing.length === 0) {
       return res.status(404).json({ error: 'Cotización no encontrada' });
+    }
+    if (existing[0].estado === 'APROBADA') {
+      return res.status(403).json({ error: 'No se pueden modificar cotizaciones ya aprobadas.' });
     }
     const connection = await pool.getConnection();
     await connection.beginTransaction();
