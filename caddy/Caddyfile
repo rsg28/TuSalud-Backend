@@ -1,0 +1,6 @@
+# api.tu-salud.xyz → backend Node en puerto 3000
+# Caddy obtiene y renueva el certificado HTTPS automáticamente (Let's Encrypt).
+
+api.tu-salud.xyz {
+    reverse_proxy localhost:3000
+}
