@@ -59,6 +59,8 @@ Usa este endpoint para comprobar que el servidor está activo y puedes conectart
 |--------|----------|------------|
 | POST | `http://54.235.48.67:3000/api/auth/register` | **Público** |
 | POST | `http://54.235.48.67:3000/api/auth/login` | **Público** |
+| POST | `http://54.235.48.67:3000/api/auth/forgot-password` | **Público** — body: `{ "email": "..." }`. Envía correo con enlace para restablecer contraseña (Resend). |
+| POST | `http://54.235.48.67:3000/api/auth/reset-password` | **Público** — body: `{ "token": "...", "newPassword": "..." }`. Token = el recibido por correo. |
 | GET | `http://54.235.48.67:3000/api/auth/me` | **JWT** |
 
 ---
