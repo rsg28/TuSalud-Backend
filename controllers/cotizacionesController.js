@@ -605,7 +605,13 @@ const updateEstadoCotizacion = async (req, res) => {
           "UPDATE pedidos SET estado = 'FALTA_APROBAR_COTIZACION' WHERE id = ?",
           [pedido_id]
         );
-        if (estado === 'ENVIADA_AL_MANAGER') {
+        if (estado === 'ENVIADA') {
+          await connection.execute(
+            `INSERT INTO historial_pedido (pedido_id, cotizacion_id, tipo_evento, descripcion, usuario_id, usuario_nombre, valor_anterior, valor_nuevo, atendidos, no_atendidos)
+             VALUES (?, ?, 'COTIZACION_ENVIADA', 'Cotización enviada por el cliente para revisión del vendedor.', ?, ?, NULL, NULL, NULL, NULL)`,
+            [pedido_id, id, req.user?.id || null, req.user?.nombre_completo || null]
+          );
+        } else if (estado === 'ENVIADA_AL_MANAGER') {
           await connection.execute(
             `INSERT INTO historial_pedido (pedido_id, cotizacion_id, tipo_evento, descripcion, usuario_id, usuario_nombre, valor_anterior, valor_nuevo, atendidos, no_atendidos)
              VALUES (?, ?, 'COTIZACION_ENVIADA', 'Cotización enviada al manager para revisión.', ?, ?, NULL, NULL, NULL, NULL)`,
