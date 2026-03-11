@@ -164,13 +164,6 @@ const forgotPassword = async (req, res) => {
     }
 
     const user = users[0];
-    const resetToken = jwt.sign(
-      { userId: user.id, purpose: 'password_reset' },
-      process.env.JWT_SECRET,
-      { expiresIn: '1h' }
-    );
-
-    const resetLink = `${FRONTEND_URL}/resetear-contrasena?token=${encodeURIComponent(resetToken)}`;
     const fromEmail = process.env.RESEND_FROM_EMAIL || 'TuSalud <onboarding@resend.dev>';
 
     // Código OTP (10 min). Se guarda hasheado en DB (tabla password_reset_codes).
@@ -198,9 +191,7 @@ const forgotPassword = async (req, res) => {
         <p><strong>Tu código de verificación es:</strong></p>
         <p style="font-size:24px;letter-spacing:4px;font-weight:700;margin:8px 0;">${codigo}</p>
         <p>Este código expira en ${PASSWORD_RESET_CODE_TTL_MINUTES} minutos.</p>
-        <hr style="border:none;border-top:1px solid #eee;margin:16px 0;" />
-        <p><a href="${resetLink}" style="display:inline-block;background:#2563eb;color:#fff;padding:12px 24px;text-decoration:none;border-radius:8px;">Restablecer contraseña</a></p>
-        <p>Este enlace expira en 1 hora. Si no solicitaste este cambio, ignora este correo.</p>
+        <p>Si no solicitaste este cambio, ignora este correo.</p>
         <p>— TuSalud</p>
       `,
     });
