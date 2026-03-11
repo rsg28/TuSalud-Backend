@@ -239,7 +239,10 @@ const actualizarEstado = async (req, res) => {
         'SELECT id, solicitud_agregar_paciente_id, examen_id, cantidad FROM solicitud_agregar_examenes WHERE solicitud_id = ?',
         [id]
       );
-      const [pacientesPedido] = await connection.execute('SELECT id FROM pedido_pacientes WHERE pedido_id = ?', [pedido_id]);
+      const [pacientesPedido] = await connection.execute(
+        'SELECT id FROM pedido_pacientes WHERE pedido_id = ?',
+        [pedido_id]
+      );
       const todosPacienteIds = pacientesPedido.map((p) => p.id);
       const itemsComplementaria = new Map();
 
@@ -251,14 +254,22 @@ const actualizarEstado = async (req, res) => {
           [examen_id, sede_id]
         );
         const precio_base = precio.length > 0 ? Number(precio[0].precio) : 0;
+
+        // Si la solicitud de examen es "para todos" (sin paciente específico),
+        // la cantidad total para el pedido y la cotización debe reflejar
+        // el número de pacientes afectados.
+        const multiplicador =
+          row.solicitud_agregar_paciente_id == null ? todosPacienteIds.length || 1 : 1;
+        const cantidadTotal = cantidad * multiplicador;
+
         if (!itemsComplementaria.has(examen_id)) {
           itemsComplementaria.set(examen_id, { cantidad: 0, precio_base });
         }
-        itemsComplementaria.get(examen_id).cantidad += cantidad;
+        itemsComplementaria.get(examen_id).cantidad += cantidadTotal;
 
         await connection.execute(
           'INSERT INTO pedido_examenes (pedido_id, examen_id, cantidad, precio_base) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE cantidad = cantidad + ?, precio_base = ?',
-          [pedido_id, examen_id, cantidad, precio_base, cantidad, precio_base]
+          [pedido_id, examen_id, cantidadTotal, precio_base, cantidadTotal, precio_base]
         );
 
         let targetPacienteIds = [];
