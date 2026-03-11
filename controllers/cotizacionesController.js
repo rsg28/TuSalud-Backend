@@ -423,7 +423,10 @@ const updateCotizacion = async (req, res) => {
     const { id } = req.params;
     const { estado, solicitud_manager_pendiente, mensaje_rechazo, notas_manager, items } = req.body;
 
-    const [existing] = await pool.execute('SELECT id, estado, pedido_id, es_complementaria FROM cotizaciones WHERE id = ?', [id]);
+    const [existing] = await pool.execute(
+      'SELECT id, estado, pedido_id, es_complementaria, creador_tipo FROM cotizaciones WHERE id = ?',
+      [id]
+    );
     if (existing.length === 0) {
       return res.status(404).json({ error: 'Cotización no encontrada' });
     }
@@ -606,10 +609,14 @@ const updateEstadoCotizacion = async (req, res) => {
           [pedido_id]
         );
         if (estado === 'ENVIADA') {
+          const esDelCliente = existing[0].creador_tipo === 'CLIENTE';
+          const descripcion = esDelCliente
+            ? 'El cliente añadió su cotización para revisión del vendedor.'
+            : 'Cotización enviada para revisión.';
           await connection.execute(
             `INSERT INTO historial_pedido (pedido_id, cotizacion_id, tipo_evento, descripcion, usuario_id, usuario_nombre, valor_anterior, valor_nuevo, atendidos, no_atendidos)
-             VALUES (?, ?, 'COTIZACION_ENVIADA', 'Cotización enviada por el cliente para revisión del vendedor.', ?, ?, NULL, NULL, NULL, NULL)`,
-            [pedido_id, id, req.user?.id || null, req.user?.nombre_completo || null]
+             VALUES (?, ?, 'COTIZACION_ENVIADA', ?, ?, ?, NULL, NULL, NULL, NULL)`,
+            [pedido_id, id, descripcion, req.user?.id || null, req.user?.nombre_completo || null]
           );
         } else if (estado === 'ENVIADA_AL_MANAGER') {
           await connection.execute(
