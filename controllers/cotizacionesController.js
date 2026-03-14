@@ -531,8 +531,8 @@ const updateCotizacion = async (req, res) => {
         );
       }
 
-      // Actualizar ítems en BORRADOR o ENVIADA_AL_MANAGER (cuando el manager edita y aprueba)
-      const puedeActualizarItems = existing[0].estado === 'BORRADOR' || existing[0].estado === 'ENVIADA_AL_MANAGER';
+      // Actualizar ítems en BORRADOR, ENVIADA (vendedor revisando) o ENVIADA_AL_MANAGER (manager edita y aprueba)
+      const puedeActualizarItems = ['BORRADOR', 'ENVIADA', 'ENVIADA_AL_MANAGER'].includes(existing[0].estado);
       if (items && Array.isArray(items) && puedeActualizarItems) {
         await connection.execute('DELETE FROM cotizacion_items WHERE cotizacion_id = ?', [id]);
         let total = 0;
