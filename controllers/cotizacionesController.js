@@ -458,17 +458,20 @@ const updateCotizacion = async (req, res) => {
             ]
           );
         } else {
-          await connection.execute(
-            'UPDATE cotizaciones SET estado = ?, fecha_envio = IF(?, NOW(), fecha_envio), fecha_aprobacion = IF(?, NOW(), fecha_aprobacion), solicitud_manager_pendiente = COALESCE(?, solicitud_manager_pendiente), mensaje_rechazo = COALESCE(?, mensaje_rechazo) WHERE id = ?',
-            [
-              estado,
-              esEnviada,
-              esAprobada,
-              solicitud_manager_pendiente !== undefined ? (solicitud_manager_pendiente ? 1 : 0) : null,
-              mensaje_rechazo !== undefined ? mensaje_rechazo : null,
-              id
-            ]
-          );
+          const incluirNotasManager = estado === 'ENVIADA_AL_MANAGER' && notas_manager !== undefined;
+          const sql = incluirNotasManager
+            ? 'UPDATE cotizaciones SET estado = ?, fecha_envio = IF(?, NOW(), fecha_envio), fecha_aprobacion = IF(?, NOW(), fecha_aprobacion), solicitud_manager_pendiente = COALESCE(?, solicitud_manager_pendiente), mensaje_rechazo = COALESCE(?, mensaje_rechazo), notas_manager = COALESCE(?, notas_manager) WHERE id = ?'
+            : 'UPDATE cotizaciones SET estado = ?, fecha_envio = IF(?, NOW(), fecha_envio), fecha_aprobacion = IF(?, NOW(), fecha_aprobacion), solicitud_manager_pendiente = COALESCE(?, solicitud_manager_pendiente), mensaje_rechazo = COALESCE(?, mensaje_rechazo) WHERE id = ?';
+          const args = [
+            estado,
+            esEnviada,
+            esAprobada,
+            solicitud_manager_pendiente !== undefined ? (solicitud_manager_pendiente ? 1 : 0) : null,
+            mensaje_rechazo !== undefined ? mensaje_rechazo : null,
+            ...(incluirNotasManager ? [typeof notas_manager === 'string' ? notas_manager : null] : []),
+            id
+          ];
+          await connection.execute(sql, args);
         }
         const pedido_id = existing[0].pedido_id;
         const es_complementaria = existing[0].es_complementaria;
@@ -589,15 +592,16 @@ const updateEstadoCotizacion = async (req, res) => {
     await connection.beginTransaction();
     try {
       const esAprobada = estado === 'APROBADA' || estado === 'APROBADA_POR_MANAGER';
-      if (notas_manager !== undefined && (estado === 'APROBADA_POR_MANAGER' || estado === 'APROBADA')) {
+      const incluirNotasManager = notas_manager !== undefined && (estado === 'APROBADA_POR_MANAGER' || estado === 'APROBADA' || estado === 'ENVIADA_AL_MANAGER');
+      if (incluirNotasManager) {
         await connection.execute(
-          'UPDATE cotizaciones SET estado = ?, mensaje_rechazo = COALESCE(?, mensaje_rechazo), notas_manager = COALESCE(?, notas_manager), fecha_aprobacion = IF(?, NOW(), fecha_aprobacion) WHERE id = ?',
-          [estado, mensaje_rechazo !== undefined ? mensaje_rechazo : null, typeof notas_manager === 'string' ? notas_manager : null, esAprobada, id]
+          'UPDATE cotizaciones SET estado = ?, mensaje_rechazo = COALESCE(?, mensaje_rechazo), notas_manager = COALESCE(?, notas_manager), fecha_envio = IF(?, NOW(), fecha_envio), fecha_aprobacion = IF(?, NOW(), fecha_aprobacion) WHERE id = ?',
+          [estado, mensaje_rechazo !== undefined ? mensaje_rechazo : null, typeof notas_manager === 'string' ? notas_manager : null, estado === 'ENVIADA_AL_MANAGER', esAprobada, id]
         );
       } else {
         await connection.execute(
-          'UPDATE cotizaciones SET estado = ?, mensaje_rechazo = COALESCE(?, mensaje_rechazo), fecha_aprobacion = IF(?, NOW(), fecha_aprobacion) WHERE id = ?',
-          [estado, mensaje_rechazo !== undefined ? mensaje_rechazo : null, esAprobada, id]
+          'UPDATE cotizaciones SET estado = ?, mensaje_rechazo = COALESCE(?, mensaje_rechazo), fecha_envio = IF(?, NOW(), fecha_envio), fecha_aprobacion = IF(?, NOW(), fecha_aprobacion) WHERE id = ?',
+          [estado, mensaje_rechazo !== undefined ? mensaje_rechazo : null, estado === 'ENVIADA_AL_MANAGER' || estado === 'ENVIADA_AL_CLIENTE', esAprobada, id]
         );
       }
       const pedido_id = existing[0].pedido_id;
