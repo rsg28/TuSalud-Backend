@@ -688,24 +688,58 @@ const deleteCotizacion = async (req, res) => {
   const connection = await pool.getConnection();
   try {
     const { id } = req.params;
-    const [existing] = await connection.execute('SELECT id, estado FROM cotizaciones WHERE id = ?', [id]);
+    const idNum = parseInt(id, 10);
+    const [existing] = await connection.execute(
+      'SELECT id, pedido_id, es_complementaria, numero_cotizacion FROM cotizaciones WHERE id = ?',
+      [idNum]
+    );
     if (existing.length === 0) {
       connection.release();
       return res.status(404).json({ error: 'Cotización no encontrada' });
     }
 
+    const pedido_id = existing[0].pedido_id;
+    const es_complementaria = existing[0].es_complementaria;
+    const numero_cotizacion = existing[0].numero_cotizacion || `#${idNum}`;
+    const usuario_id = req.user?.id ?? null;
+    const usuario_nombre = req.user?.nombre_completo ?? null;
+
     await connection.beginTransaction();
 
-    // Quitar referencias: pedidos.cotizacion_principal_id se pone NULL al borrar (ON DELETE SET NULL)
-    // Cotizaciones complementarias que usan esta como base
-    await connection.execute('UPDATE cotizaciones SET cotizacion_base_id = NULL WHERE cotizacion_base_id = ?', [id]);
-    // Enlaces factura-cotización (FK RESTRICT)
-    await connection.execute('DELETE FROM factura_cotizacion WHERE cotizacion_id = ?', [id]);
-    // Referencia del pedido a esta cotización como principal
-    await connection.execute('UPDATE pedidos SET cotizacion_principal_id = NULL WHERE cotizacion_principal_id = ?', [id]);
+    // Si es cotización principal (no complementaria), borrar primero todas las subsidiarias
+    if (!es_complementaria) {
+      const [subsidiarias] = await connection.execute(
+        'SELECT id, numero_cotizacion FROM cotizaciones WHERE cotizacion_base_id = ?',
+        [idNum]
+      );
+      for (const sub of subsidiarias) {
+        await connection.execute('DELETE FROM factura_cotizacion WHERE cotizacion_id = ?', [sub.id]);
+        await connection.execute(
+          `INSERT INTO historial_pedido (pedido_id, cotizacion_id, tipo_evento, descripcion, usuario_id, usuario_nombre, valor_anterior, valor_nuevo, atendidos, no_atendidos)
+           VALUES (?, ?, 'COTIZACION_ELIMINADA', ?, ?, ?, NULL, NULL, NULL, NULL)`,
+          [pedido_id, sub.id, `Cotización complementaria ${sub.numero_cotizacion || sub.id} eliminada.`, usuario_id, usuario_nombre]
+        );
+        await connection.execute('DELETE FROM cotizacion_items WHERE cotizacion_id = ?', [sub.id]);
+        await connection.execute('DELETE FROM cotizaciones WHERE id = ?', [sub.id]);
+      }
+    }
 
-    // Borrar ítems y luego la cotización (cotizacion_items tiene ON DELETE CASCADE)
-    await connection.execute('DELETE FROM cotizaciones WHERE id = ?', [id]);
+    // Desvincular y borrar la cotización actual
+    await connection.execute('DELETE FROM factura_cotizacion WHERE cotizacion_id = ?', [idNum]);
+    await connection.execute('UPDATE pedidos SET cotizacion_principal_id = NULL WHERE cotizacion_principal_id = ?', [idNum]);
+    await connection.execute(
+      `INSERT INTO historial_pedido (pedido_id, cotizacion_id, tipo_evento, descripcion, usuario_id, usuario_nombre, valor_anterior, valor_nuevo, atendidos, no_atendidos)
+       VALUES (?, ?, 'COTIZACION_ELIMINADA', ?, ?, ?, NULL, NULL, NULL, NULL)`,
+      [pedido_id, idNum, `Cotización ${numero_cotizacion} eliminada.`, usuario_id, usuario_nombre]
+    );
+    await connection.execute('DELETE FROM cotizacion_items WHERE cotizacion_id = ?', [idNum]);
+    await connection.execute('DELETE FROM cotizaciones WHERE id = ?', [idNum]);
+
+    // Si no queda ninguna cotización en el pedido, estado pasa a "A la espera de cotización"
+    const [restantes] = await connection.execute('SELECT COUNT(*) AS total FROM cotizaciones WHERE pedido_id = ?', [pedido_id]);
+    if (restantes[0].total === 0) {
+      await connection.execute("UPDATE pedidos SET estado = 'ESPERA_COTIZACION' WHERE id = ?", [pedido_id]);
+    }
 
     await connection.commit();
     res.json({ message: 'Cotización eliminada exitosamente' });
