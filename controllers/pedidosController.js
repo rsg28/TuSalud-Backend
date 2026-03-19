@@ -412,9 +412,17 @@ const crearPedido = async (req, res) => {
       const nombre_completo = String(emp.nombre_completo ?? 'Sin nombre').trim();
       if (!dni) continue;
       const [insPac] = await connection.execute(
-        `INSERT INTO pedido_pacientes (pedido_id, dni, nombre_completo, cargo, area)
-         VALUES (?, ?, ?, ?, ?)`,
-        [pedido_id, dni, nombre_completo, emp.cargo ?? null, emp.area ?? null]
+        `INSERT INTO pedido_pacientes (pedido_id, dni, nombre_completo, cargo, area, emo_tipo, emo_perfil_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [
+          pedido_id,
+          dni,
+          nombre_completo,
+          emp.cargo ?? null,
+          emp.area ?? null,
+          emp.emo_tipo ?? null,
+          emp.emo_perfil_id ?? null,
+        ]
       );
       const paciente_id = insPac.insertId;
       const examenesEmp = Array.isArray(emp.examenes) ? emp.examenes : [];
@@ -691,13 +699,19 @@ const cargarEmpleados = async (req, res) => {
 
     let agregados = 0;
     for (const emp of empleados || []) {
-      const { dni, nombre_completo, cargo, area, examenes } = emp;
+      const { dni, nombre_completo, cargo, area, examenes, emo_tipo, emo_perfil_id } = emp;
       if (!dni || !nombre_completo) continue;
 
       await connection.execute(
-        `INSERT INTO pedido_pacientes (pedido_id, dni, nombre_completo, cargo, area) VALUES (?, ?, ?, ?, ?)
-         ON DUPLICATE KEY UPDATE nombre_completo = VALUES(nombre_completo), cargo = VALUES(cargo), area = VALUES(area)`,
-        [pedido_id, dni, nombre_completo, cargo || null, area || null]
+        `INSERT INTO pedido_pacientes (pedido_id, dni, nombre_completo, cargo, area, emo_tipo, emo_perfil_id) 
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE 
+           nombre_completo = VALUES(nombre_completo),
+           cargo = VALUES(cargo),
+           area = VALUES(area),
+           emo_tipo = VALUES(emo_tipo),
+           emo_perfil_id = VALUES(emo_perfil_id)`,
+        [pedido_id, dni, nombre_completo, cargo || null, area || null, emo_tipo ?? null, emo_perfil_id ?? null]
       );
 
       const [ex] = await connection.execute('SELECT id FROM pedido_pacientes WHERE pedido_id = ? AND dni = ?', [pedido_id, dni]);

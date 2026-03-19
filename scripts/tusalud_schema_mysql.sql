@@ -267,6 +267,35 @@ ALTER TABLE pedidos ADD FOREIGN KEY (factura_id) REFERENCES facturas(id) ON DELE
 -- =============================================================================
 -- 10. PEDIDO_PACIENTES
 -- =============================================================================
+-- =============================================================================
+-- 9. EMO PERFILES (globales del manager)
+-- =============================================================================
+CREATE TABLE emo_perfiles (
+  id            INT AUTO_INCREMENT PRIMARY KEY,
+  nombre       VARCHAR(255) NOT NULL UNIQUE,
+  created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+);
+
+CREATE TABLE emo_tipos_evaluacion (
+  id      INT AUTO_INCREMENT PRIMARY KEY,
+  nombre  ENUM('PREOC','ANUAL','RETIRO','VISITA') NOT NULL UNIQUE
+);
+
+INSERT INTO emo_tipos_evaluacion (nombre)
+VALUES ('PREOC'), ('ANUAL'), ('RETIRO'), ('VISITA')
+ON DUPLICATE KEY UPDATE nombre = VALUES(nombre);
+
+CREATE TABLE emo_perfil_examenes (
+  id         INT AUTO_INCREMENT PRIMARY KEY,
+  perfil_id  INT NOT NULL,
+  tipo_emo   ENUM('PREOC','ANUAL','RETIRO','VISITA') NOT NULL,
+  examen_id  INT NOT NULL,
+  UNIQUE(perfil_id, tipo_emo, examen_id),
+  FOREIGN KEY (perfil_id) REFERENCES emo_perfiles(id) ON DELETE CASCADE,
+  FOREIGN KEY (examen_id) REFERENCES examenes(id) ON DELETE CASCADE
+);
+
 CREATE TABLE pedido_pacientes (
   id               INT AUTO_INCREMENT PRIMARY KEY,
   pedido_id        INT NOT NULL,
@@ -274,9 +303,12 @@ CREATE TABLE pedido_pacientes (
   nombre_completo  VARCHAR(200) NOT NULL,
   cargo            VARCHAR(150),
   area             VARCHAR(150),
+  emo_tipo        ENUM('PREOC','ANUAL','RETIRO','VISITA') NULL,
+  emo_perfil_id   INT NULL,
   created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   UNIQUE(pedido_id, dni),
-  FOREIGN KEY (pedido_id) REFERENCES pedidos(id) ON DELETE CASCADE
+  FOREIGN KEY (pedido_id) REFERENCES pedidos(id) ON DELETE CASCADE,
+  FOREIGN KEY (emo_perfil_id) REFERENCES emo_perfiles(id) ON DELETE SET NULL
 );
 
 CREATE TABLE paciente_examen_asignado (
