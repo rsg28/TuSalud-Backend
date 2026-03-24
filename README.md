@@ -34,6 +34,11 @@ NODE_ENV=development
 JWT_SECRET=your-secret-key-change-this-in-production
 JWT_EXPIRES_IN=7d
 
+# Solo desarrollo: desactivar JWT (no exige Authorization). Quitar o false en producción.
+# DISABLE_JWT_AUTH=true
+# AUTH_BYPASS_USER_ID=1
+# AUTH_BYPASS_ROL=manager
+
 # CORS Configuration
 CORS_ORIGIN=http://localhost:8081
 ```

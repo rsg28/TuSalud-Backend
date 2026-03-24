@@ -1,9 +1,56 @@
 const jwt = require('jsonwebtoken');
 const pool = require('../config/database');
 
+/**
+ * Desactivar JWT temporalmente (solo desarrollo / depuración).
+ * En .env: DISABLE_JWT_AUTH=true
+ * Opcional: AUTH_BYPASS_USER_ID=1  (usuario real en BD para req.user)
+ * Si no existe el usuario: AUTH_BYPASS_ROL=manager (rol del stub mínimo)
+ * ⚠️ NUNCA habilitar en producción expuesta a internet.
+ */
+const isJwtDisabled = () =>
+  String(process.env.DISABLE_JWT_AUTH || '').toLowerCase() === 'true' ||
+  process.env.DISABLE_JWT_AUTH === '1';
+
 // Middleware para verificar el token JWT
 const authenticateToken = async (req, res, next) => {
   try {
+    // --- Modo sin JWT (temporal): no exige Authorization ---
+    if (isJwtDisabled()) {
+      const bypassId = parseInt(String(process.env.AUTH_BYPASS_USER_ID || '1'), 10);
+      const fallbackRol = (process.env.AUTH_BYPASS_ROL || 'manager').toLowerCase();
+
+      try {
+        const [users] = await pool.execute(
+          'SELECT id, nombre_usuario, email, nombre_completo, rol, activo FROM usuarios WHERE id = ? AND activo = TRUE',
+          [Number.isInteger(bypassId) && bypassId > 0 ? bypassId : 1]
+        );
+        if (users.length > 0) {
+          req.user = users[0];
+        } else {
+          req.user = {
+            id: bypassId > 0 ? bypassId : 1,
+            nombre_usuario: 'dev_bypass',
+            email: 'dev@local',
+            nombre_completo: 'Dev (sin JWT)',
+            rol: fallbackRol,
+            activo: true,
+          };
+        }
+      } catch {
+        req.user = {
+          id: 1,
+          nombre_usuario: 'dev_bypass',
+          email: 'dev@local',
+          nombre_completo: 'Dev (sin JWT)',
+          rol: fallbackRol,
+          activo: true,
+        };
+      }
+      return next();
+    }
+    // --- Fin modo sin JWT ---
+
     const authHeader = req.headers['authorization'];
     const token = authHeader && authHeader.split(' ')[1]; // Bearer TOKEN
 

@@ -40,18 +40,49 @@ exports.crearPerfil = async (req, res) => {
 exports.listarPerfiles = async (req, res) => {
   try {
     const includeExamenes = String(req.query?.include_examenes ?? '').trim() === '1';
-    const [rows] = await pool.execute('SELECT id, nombre FROM emo_perfiles ORDER BY nombre ASC');
+
+    const qRaw = req.query?.q ?? req.query?.buscar ?? '';
+    const q = String(qRaw).trim();
+
+    const tipoEmoRaw = req.query?.tipo_emo ? String(req.query.tipo_emo).trim().toUpperCase() : null;
+    const filtrarPorTipo = tipoEmoRaw && EMO_TIPOS_VALIDOS.includes(tipoEmoRaw) ? true : false;
+
+    // Base de perfiles: si hay búsqueda y/o filtro por tipo, se reduce en BD.
+    let sql = 'SELECT id, nombre FROM emo_perfiles';
+    const params = [];
+    const wheres = [];
+    if (q) {
+      wheres.push('LOWER(nombre) LIKE LOWER(?)');
+      params.push(`%${q}%`);
+    }
+    if (filtrarPorTipo) {
+      wheres.push(`EXISTS (
+        SELECT 1 FROM emo_perfil_examenes mpe
+        WHERE mpe.perfil_id = emo_perfiles.id AND mpe.tipo_emo = ?
+      )`);
+      params.push(tipoEmoRaw);
+    }
+    if (wheres.length > 0) sql += ` WHERE ${wheres.join(' AND ')}`;
+    sql += ' ORDER BY nombre ASC';
+
+    const [rows] = await pool.execute(sql, params);
 
     if (!includeExamenes) {
       return res.json({ perfiles: rows });
     }
 
-    const [mapeos] = await pool.execute(
-      `SELECT mpe.perfil_id, mpe.tipo_emo, e.id AS examen_id, e.nombre AS nombre_examen
-       FROM emo_perfil_examenes mpe
-       JOIN examenes e ON e.id = mpe.examen_id
-       ORDER BY mpe.perfil_id ASC, mpe.tipo_emo ASC, e.nombre ASC`
-    );
+    // Incluye exámenes por tipo para que UI pueda mostrar/usar sin resolver uno a uno.
+    let mapSql = `SELECT mpe.perfil_id, mpe.tipo_emo, e.id AS examen_id, e.nombre AS nombre_examen
+                  FROM emo_perfil_examenes mpe
+                  JOIN examenes e ON e.id = mpe.examen_id`;
+    const mapParams = [];
+    if (filtrarPorTipo) {
+      mapSql += ' WHERE mpe.tipo_emo = ?';
+      mapParams.push(tipoEmoRaw);
+    }
+    mapSql += ' ORDER BY mpe.perfil_id ASC, mpe.tipo_emo ASC, e.nombre ASC';
+
+    const [mapeos] = await pool.execute(mapSql, mapParams);
 
     const perfilesMap = new Map();
     rows.forEach((p) => {
@@ -80,10 +111,10 @@ exports.guardarExamenesPorTipo = async (req, res) => {
 
     if (!Number.isInteger(perfilId) || perfilId <= 0) return res.status(400).json({ error: 'perfilId inválido' });
     if (!EMO_TIPOS_VALIDOS.includes(tipoEmoRaw)) return res.status(400).json({ error: 'tipo_emo inválido' });
-    if (!Array.isArray(examenes) || examenes.length === 0) return res.status(400).json({ error: 'Debe enviar examenes' });
 
-    const examenesIds = examenes.map((x) => parseInt(String(x), 10)).filter((n) => Number.isInteger(n) && n > 0);
-    if (examenesIds.length === 0) return res.status(400).json({ error: 'examenes inválidos' });
+    const examenesIds = (Array.isArray(examenes) ? examenes : [])
+      .map((x) => parseInt(String(x), 10))
+      .filter((n) => Number.isInteger(n) && n > 0);
 
     const connection = await pool.getConnection();
     try {
@@ -98,8 +129,10 @@ exports.guardarExamenesPorTipo = async (req, res) => {
       await connection.execute('DELETE FROM emo_perfil_examenes WHERE perfil_id = ? AND tipo_emo = ?', [perfilId, tipoEmoRaw]);
 
       const values = Array.from(new Set(examenesIds)).map((examen_id) => [perfilId, tipoEmoRaw, examen_id]);
-      // INSERT en lote
-      await connection.query('INSERT INTO emo_perfil_examenes (perfil_id, tipo_emo, examen_id) VALUES ?', [values]);
+      // INSERT en lote (solo si hay datos)
+      if (values.length > 0) {
+        await connection.query('INSERT INTO emo_perfil_examenes (perfil_id, tipo_emo, examen_id) VALUES ?', [values]);
+      }
 
       await connection.commit();
       return res.json({ message: 'Mapeo EMO guardado', perfil_id: perfilId, tipo_emo: tipoEmoRaw, total: values.length });
