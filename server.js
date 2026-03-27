@@ -34,6 +34,7 @@ app.use('/api/pedidos', require('./routes/pedidosRoutes'));
 app.use('/api/solicitudes-agregar-examenes', require('./routes/solicitudesAgregarRoutes'));
 app.use('/api/precios', require('./routes/preciosEmpresaRoutes'));
 app.use('/api/emo-perfiles', require('./routes/emoPerfilesRoutes'));
+app.use('/api/import', require('./routes/importEmpleadosPdfRoutes'));
 
 // 404 handler
 app.use((req, res) => {

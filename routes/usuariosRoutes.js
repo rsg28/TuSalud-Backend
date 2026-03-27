@@ -4,6 +4,11 @@ const pool = require('../config/database');
 const { authenticateToken, requireRole } = require('../middleware/auth');
 const { body, validationResult } = require('express-validator');
 
+/** Evita 403 por desajuste string/number/BigInt entre JWT/BD y el id de la URL. */
+function sameUsuarioId(reqUserId, targetUserId) {
+  return Number(reqUserId) === Number(targetUserId);
+}
+
 // Obtener todos los usuarios (con filtros)
 const getAllUsuarios = async (req, res) => {
   try {
@@ -88,7 +93,7 @@ const getEmpresaByUsuarioId = async (req, res) => {
     }
 
     // Solo el propio usuario o un manager puede ver la empresa del usuario
-    if (req.user.id !== userId && req.user.rol !== 'manager') {
+    if (!sameUsuarioId(req.user.id, userId) && req.user.rol !== 'manager') {
       return res.status(403).json({ error: 'No puedes consultar la empresa de otro usuario' });
     }
 
@@ -124,7 +129,7 @@ const deleteEmpresaByUsuarioId = async (req, res) => {
     if (!Number.isInteger(userId) || userId <= 0) {
       return res.status(400).json({ error: 'ID de usuario no válido' });
     }
-    if (req.user.id !== userId && req.user.rol !== 'manager') {
+    if (!sameUsuarioId(req.user.id, userId) && req.user.rol !== 'manager') {
       return res.status(403).json({ error: 'No puedes modificar la empresa de otro usuario' });
     }
 
@@ -149,7 +154,7 @@ const setEmpresaByUsuarioId = async (req, res) => {
     if (!Number.isInteger(userId) || userId <= 0) {
       return res.status(400).json({ error: 'ID de usuario no válido' });
     }
-    if (req.user.id !== userId && req.user.rol !== 'manager') {
+    if (!sameUsuarioId(req.user.id, userId) && req.user.rol !== 'manager') {
       return res.status(403).json({ error: 'No puedes modificar la empresa de otro usuario' });
     }
 
@@ -237,6 +242,16 @@ const toggleUsuarioActivo = async (req, res) => {
 };
 
 router.get('/', authenticateToken, requireRole('manager'), getAllUsuarios);
+
+// Empresa del usuario autenticado (evita desajuste entre token y id guardado en el cliente)
+const empresaMe = (handler) => (req, res, next) => {
+  req.params = { ...req.params, id: String(Number(req.user.id)) };
+  return handler(req, res, next);
+};
+router.get('/me/empresa', authenticateToken, empresaMe(getEmpresaByUsuarioId));
+router.delete('/me/empresa', authenticateToken, empresaMe(deleteEmpresaByUsuarioId));
+router.post('/me/empresa', authenticateToken, empresaMe(setEmpresaByUsuarioId));
+
 router.get('/:id/empresa', authenticateToken, getEmpresaByUsuarioId);
 router.delete('/:id/empresa', authenticateToken, deleteEmpresaByUsuarioId);
 router.post('/:id/empresa', authenticateToken, setEmpresaByUsuarioId);
