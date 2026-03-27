@@ -12,6 +12,17 @@ const isJwtDisabled = () =>
   String(process.env.DISABLE_JWT_AUTH || '').toLowerCase() === 'true' ||
   process.env.DISABLE_JWT_AUTH === '1';
 
+function normalizarRol(rol) {
+  const r = String(rol || '')
+    .trim()
+    .toLowerCase();
+  if (r === 'manager' || r === 'vendedor' || r === 'cliente') return r;
+  if (r === 'admin' || r === 'administrador' || r === 'administrador_general' || r === 'superadmin') return 'manager';
+  if (r === 'seller' || r === 'sales' || r === 'ventas') return 'vendedor';
+  if (r === 'client' || r === 'customer') return 'cliente';
+  return r;
+}
+
 // Middleware para verificar el token JWT
 const authenticateToken = async (req, res, next) => {
   try {
@@ -26,14 +37,14 @@ const authenticateToken = async (req, res, next) => {
           [Number.isInteger(bypassId) && bypassId > 0 ? bypassId : 1]
         );
         if (users.length > 0) {
-          req.user = users[0];
+          req.user = { ...users[0], rol: normalizarRol(users[0].rol) };
         } else {
           req.user = {
             id: bypassId > 0 ? bypassId : 1,
             nombre_usuario: 'dev_bypass',
             email: 'dev@local',
             nombre_completo: 'Dev (sin JWT)',
-            rol: fallbackRol,
+            rol: normalizarRol(fallbackRol),
             activo: true,
           };
         }
@@ -43,7 +54,7 @@ const authenticateToken = async (req, res, next) => {
           nombre_usuario: 'dev_bypass',
           email: 'dev@local',
           nombre_completo: 'Dev (sin JWT)',
-          rol: fallbackRol,
+          rol: normalizarRol(fallbackRol),
           activo: true,
         };
       }
@@ -70,7 +81,7 @@ const authenticateToken = async (req, res, next) => {
       return res.status(401).json({ error: 'Usuario no válido o inactivo' });
     }
 
-    req.user = users[0];
+    req.user = { ...users[0], rol: normalizarRol(users[0].rol) };
     next();
   } catch (error) {
     if (error.name === 'JsonWebTokenError') {
@@ -90,10 +101,8 @@ const requireRole = (...roles) => {
       return res.status(401).json({ error: 'Usuario no autenticado' });
     }
 
-    const rolUsuario = String(req.user.rol || '')
-      .trim()
-      .toLowerCase();
-    const rolesPermitidos = roles.map((r) => String(r).trim().toLowerCase());
+    const rolUsuario = normalizarRol(req.user.rol);
+    const rolesPermitidos = roles.map((r) => normalizarRol(r));
 
     if (!rolUsuario || !rolesPermitidos.includes(rolUsuario)) {
       return res.status(403).json({ error: 'No tienes permisos para esta acción' });
