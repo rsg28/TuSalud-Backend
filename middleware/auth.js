@@ -90,7 +90,12 @@ const requireRole = (...roles) => {
       return res.status(401).json({ error: 'Usuario no autenticado' });
     }
 
-    if (!roles.includes(req.user.rol)) {
+    const rolUsuario = String(req.user.rol || '')
+      .trim()
+      .toLowerCase();
+    const rolesPermitidos = roles.map((r) => String(r).trim().toLowerCase());
+
+    if (!rolUsuario || !rolesPermitidos.includes(rolUsuario)) {
       return res.status(403).json({ error: 'No tienes permisos para esta acción' });
     }
 
