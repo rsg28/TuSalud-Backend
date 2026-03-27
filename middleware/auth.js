@@ -28,23 +28,44 @@ const authenticateToken = async (req, res, next) => {
   try {
     // --- Modo sin JWT (temporal): no exige Authorization ---
     if (isJwtDisabled()) {
-      const bypassId = parseInt(String(process.env.AUTH_BYPASS_USER_ID || '1'), 10);
+      const bypassUserIdRaw = String(process.env.AUTH_BYPASS_USER_ID || '').trim();
+      const bypassId = bypassUserIdRaw ? parseInt(bypassUserIdRaw, 10) : null;
       const fallbackRol = (process.env.AUTH_BYPASS_ROL || 'manager').toLowerCase();
+      const forceBypassRole = String(process.env.AUTH_BYPASS_FORCE_ROLE || '')
+        .trim()
+        .toLowerCase();
+      const rolForzado = forceBypassRole ? normalizarRol(forceBypassRole) : null;
 
       try {
-        const [users] = await pool.execute(
-          'SELECT id, nombre_usuario, email, nombre_completo, rol, activo FROM usuarios WHERE id = ? AND activo = TRUE',
-          [Number.isInteger(bypassId) && bypassId > 0 ? bypassId : 1]
-        );
+        // Si AUTH_BYPASS_USER_ID está definido, se usa ese usuario.
+        // Si no está definido, elegimos automáticamente un manager activo.
+        let users = [];
+        if (Number.isInteger(bypassId) && bypassId > 0) {
+          const [byId] = await pool.execute(
+            'SELECT id, nombre_usuario, email, nombre_completo, rol, activo FROM usuarios WHERE id = ? AND activo = TRUE',
+            [bypassId]
+          );
+          users = byId;
+        } else {
+          const [firstManager] = await pool.execute(
+            "SELECT id, nombre_usuario, email, nombre_completo, rol, activo FROM usuarios WHERE activo = TRUE AND LOWER(TRIM(rol)) IN ('manager','admin','administrador','superadmin') ORDER BY id ASC LIMIT 1"
+          );
+          users = firstManager;
+        }
+
         if (users.length > 0) {
-          req.user = { ...users[0], rol: normalizarRol(users[0].rol) };
+          const u = users[0];
+          req.user = {
+            ...u,
+            rol: rolForzado || normalizarRol(u.rol),
+          };
         } else {
           req.user = {
-            id: bypassId > 0 ? bypassId : 1,
+            id: Number.isInteger(bypassId) && bypassId > 0 ? bypassId : 1,
             nombre_usuario: 'dev_bypass',
             email: 'dev@local',
             nombre_completo: 'Dev (sin JWT)',
-            rol: normalizarRol(fallbackRol),
+            rol: rolForzado || normalizarRol(fallbackRol),
             activo: true,
           };
         }
@@ -54,7 +75,7 @@ const authenticateToken = async (req, res, next) => {
           nombre_usuario: 'dev_bypass',
           email: 'dev@local',
           nombre_completo: 'Dev (sin JWT)',
-          rol: normalizarRol(fallbackRol),
+          rol: rolForzado || normalizarRol(fallbackRol),
           activo: true,
         };
       }
