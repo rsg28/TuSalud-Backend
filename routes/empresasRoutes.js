@@ -20,6 +20,8 @@ const empresaValidation = [
 
 router.get('/', authenticateToken, getAllEmpresas);
 router.get('/mias', authenticateToken, getMisEmpresas);
+// Lista completa (alias explícito; debe ir antes de /:id para no capturar "todas" como id)
+router.get('/todas', authenticateToken, getAllEmpresas);
 // Quitar empresa de "mis empresas" del usuario (ruta explícita para evitar conflicto con /:id)
 router.delete('/mias/:empresaId', authenticateToken, quitarEmpresaDeUsuario);
 router.get('/:id', authenticateToken, getEmpresaById);
