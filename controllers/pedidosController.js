@@ -1,4 +1,5 @@
 const pool = require('../config/database');
+const { normalizarRol } = require('../middleware/auth');
 
 // Asegura que ningún BigInt llegue a res.json() (mysql2 puede devolver BigInt y JSON.stringify falla)
 function sanitizeForJson(obj) {
@@ -45,10 +46,9 @@ const listarPedidos = async (req, res) => {
     const limitNum = Math.max(1, Math.min(100, parseInt(String(limit), 10) || 20));
     const offset = (pageNum - 1) * limitNum;
 
-    const rol = (req.user.rol || '').toLowerCase();
-    if (user_id && rol === 'cliente' && parseInt(String(user_id), 10) !== req.user.id) {
-      return res.status(403).json({ error: 'Solo puedes consultar tus propios pedidos' });
-    }
+    const rol = normalizarRol(req.user?.rol);
+    /** Id de sesión numérico (MySQL2 puede devolver BigInt/string). */
+    const uidSesion = parseInt(String(req.user.id), 10);
 
     let query = `
       SELECT p.*,
@@ -77,12 +77,26 @@ const listarPedidos = async (req, res) => {
       query += ' AND p.vendedor_id = ?';
       params.push(vendedor_id);
     }
-    if (user_id) {
+    /**
+     * GET /api/pedidos/mios: marca explícita; filtra solo por cliente_usuario_id = sesión.
+     * Evita depender de mutar req.query (objetos congelados) o de que rol coincida exactamente.
+     */
+    if (req.misPedidosClienteUid != null) {
       query += ' AND p.cliente_usuario_id = ?';
-      params.push(user_id);
+      params.push(req.misPedidosClienteUid);
+    } else if (rol === 'cliente') {
+      if (!Number.isFinite(uidSesion) || uidSesion <= 0) {
+        return res.status(401).json({ error: 'Usuario no válido' });
+      }
+      query += ' AND p.cliente_usuario_id = ?';
+      params.push(uidSesion);
+    } else if (user_id) {
+      query += ' AND p.cliente_usuario_id = ?';
+      params.push(parseInt(String(user_id), 10));
     }
 
-    if (rol === 'vendedor') {
+    /** No mezclar alcance vendedor con /mios (solo pedidos donde yo soy cliente). */
+    if (rol === 'vendedor' && req.misPedidosClienteUid == null) {
       query += ' AND (p.vendedor_id = ? OR p.vendedor_id IS NULL)';
       params.push(req.user.id);
     }
@@ -129,10 +143,21 @@ const listarPedidos = async (req, res) => {
   }
 };
 
-/** Lista los pedidos del usuario autenticado (cliente_usuario_id = req.user.id). Para que el cliente vea solo los suyos. */
+/** Lista los pedidos del usuario autenticado (cliente_usuario_id = req.user.id). */
 const listarMisPedidos = async (req, res) => {
-  req.query.user_id = String(req.user.id);
-  return listarPedidos(req, res);
+  if (!req.user?.id) {
+    return res.status(401).json({ error: 'Usuario no autenticado' });
+  }
+  const uid = parseInt(String(req.user.id), 10);
+  if (!Number.isFinite(uid) || uid <= 0) {
+    return res.status(401).json({ error: 'Usuario no válido' });
+  }
+  req.misPedidosClienteUid = uid;
+  try {
+    return await listarPedidos(req, res);
+  } finally {
+    delete req.misPedidosClienteUid;
+  }
 };
 
 /** GET /api/pedidos/con-cotizacion-aprobada — Lista pedidos que tienen al menos una cotización aprobada por el cliente (estado APROBADA). Útil para facturación. */
@@ -357,8 +382,17 @@ const crearPedido = async (req, res) => {
     await connection.beginTransaction();
 
     const { empresa_id, sede_id, cliente_usuario_id, observaciones, condiciones_pago, fecha_vencimiento, examenes, empleados, total_empleados: totalEmpleadosBody, totalEmpleados: totalEmpleadosCamel } = req.body;
-    const vendedor_id = (req.user && (req.user.rol === 'vendedor' || req.user.rol === 'manager')) ? req.user.id : null;
-    const cliente_id = (req.user && req.user.rol === 'cliente') ? req.user.id : (cliente_usuario_id || null);
+    const rolUsuario = normalizarRol(req.user?.rol);
+    const vendedor_id = (rolUsuario === 'vendedor' || rolUsuario === 'manager') ? req.user.id : null;
+    const toPositiveUserId = (v) => {
+      if (v == null || v === '') return null;
+      const n = parseInt(String(v), 10);
+      return Number.isFinite(n) && n > 0 ? n : null;
+    };
+    const cliente_idFinal =
+      rolUsuario === 'cliente'
+        ? toPositiveUserId(req.user.id)
+        : toPositiveUserId(cliente_usuario_id);
 
     if (!empresa_id || !sede_id) {
       return res.status(400).json({ error: 'empresa_id y sede_id son requeridos' });
@@ -383,7 +417,7 @@ const crearPedido = async (req, res) => {
     const [result] = await connection.execute(
       `INSERT INTO pedidos (numero_pedido, empresa_id, sede_id, vendedor_id, cliente_usuario_id, estado, total_empleados, observaciones, condiciones_pago, fecha_vencimiento)
        VALUES (?, ?, ?, ?, ?, 'ESPERA_COTIZACION', ?, ?, ?, ?)`,
-      [numero_pedido, empresa_id, sede_id, vendedor_id, cliente_id, totalEmpleadosInicial, observaciones || null, condiciones_pago || null, fecha_vencimiento || null]
+      [numero_pedido, empresa_id, sede_id, vendedor_id, cliente_idFinal, totalEmpleadosInicial, observaciones || null, condiciones_pago || null, fecha_vencimiento || null]
     );
     const pedido_id = result.insertId;
 
