@@ -68,9 +68,8 @@ const listarPedidos = async (req, res) => {
     const limitNum = Math.max(1, Math.min(100, parseInt(String(limit), 10) || 20));
     const offset = (pageNum - 1) * limitNum;
 
-    const rol = normalizarRol(req.user?.rol);
-    /** Id de sesión numérico (MySQL2 puede devolver BigInt/string). */
-    const uidSesion = parseInt(String(req.user.id), 10);
+    // GET /api/pedidos solo permite vendedor/manager (ruta). Listado = todos los pedidos
+    // (equivalente a SELECT p.* …) salvo filtros opcionales en query. Los clientes usan GET /mios.
 
     let query = `
       SELECT p.*,
@@ -88,8 +87,6 @@ const listarPedidos = async (req, res) => {
     if (estado) {
       query += ' AND p.estado = ?';
       params.push(estado);
-    } else {
-      query += " AND p.estado != 'CANCELADO'";
     }
     if (empresa_id) {
       query += ' AND p.empresa_id = ?';
@@ -99,22 +96,10 @@ const listarPedidos = async (req, res) => {
       query += ' AND p.vendedor_id = ?';
       params.push(vendedor_id);
     }
-    if (rol === 'cliente') {
-      if (!Number.isFinite(uidSesion) || uidSesion <= 0) {
-        return res.status(401).json({ error: 'Usuario no válido' });
-      }
-      query += ' AND p.cliente_usuario_id = ?';
-      params.push(uidSesion);
-    } else if (user_id) {
+    if (user_id) {
       query += ' AND p.cliente_usuario_id = ?';
       params.push(parseInt(String(user_id), 10));
     }
-
-    if (rol === 'vendedor') {
-      query += ' AND (p.vendedor_id = ? OR p.vendedor_id IS NULL)';
-      params.push(req.user.id);
-    }
-    // Cliente: ya filtrado por p.cliente_usuario_id = user_id (no por empresa)
 
     // LIMIT/OFFSET como valores enteros en la query (evita ER_WRONG_ARGUMENTS con prepared statements)
     const safeLimit = Math.max(1, Math.min(100, Number(limitNum) || 20));
@@ -209,8 +194,6 @@ const listarPedidosConCotizacionAprobada = async (req, res) => {
     const limitNum = Math.max(1, Math.min(100, parseInt(String(limit), 10) || 20));
     const offset = (pageNum - 1) * limitNum;
 
-    const rol = (req.user.rol || '').toLowerCase();
-
     let query = `
       SELECT p.*,
         e.razon_social AS empresa_nombre, e.ruc AS empresa_ruc,
@@ -237,12 +220,6 @@ const listarPedidosConCotizacionAprobada = async (req, res) => {
       query += ' AND p.vendedor_id = ?';
       params.push(vendedor_id);
     }
-
-    if (rol === 'vendedor') {
-      query += ' AND (p.vendedor_id = ? OR p.vendedor_id IS NULL)';
-      params.push(req.user.id);
-    }
-    // Cliente: ya filtrado por p.cliente_usuario_id = user_id (no por empresa)
 
     const safeLimit = Math.max(1, Math.min(100, Number(limitNum) || 20));
     const safeOffset = Math.max(0, Number(offset) || 0);
