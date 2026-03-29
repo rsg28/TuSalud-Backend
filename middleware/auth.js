@@ -2,23 +2,29 @@ const jwt = require('jsonwebtoken');
 const pool = require('../config/database');
 
 /**
- * Desactivar JWT temporalmente (solo desarrollo / depuración).
- * En .env: DISABLE_JWT_AUTH=true
+ * Sesión en TuSalud (resumen):
  *
- * Con JWT apagado, la sesión se resuelve así (en orden):
- * 1) Cabecera `X-TuSalud-Acting-User-Id` (número) → carga ese usuario activo en `usuarios`.
- *    El front debe enviarla con el id del usuario guardado tras login (mismo flujo que con JWT).
- * 2) Si no hay cabecera o el id no existe: AUTH_BYPASS_USER_ID en .env (opcional).
- * 3) Si no: primer manager activo.
- * 4) Si no: stub mínimo.
+ * 1) DISABLE_JWT_AUTH=true → no se exige Bearer. Orden: cabecera X-TuSalud-Acting-User-Id →
+ *    AUTH_BYPASS_USER_ID → primer manager → stub.
  *
- * Con JWT encendido, la cabecera se ignora (solo cuenta el token).
- * AUTH_BYPASS_FORCE_ROLE — opcional, fuerza rol.
- * ⚠️ JWT deshabilitado en internet = cualquiera puede mandar cualquier X-TuSalud-Acting-User-Id.
+ * 2) JWT activo + preproducción (NODE_ENV !== 'production', o TRUST_ACTING_USER_HEADER=1):
+ *    si la cabecera apunta a un usuario activo en `usuarios`, esa fila es req.user y se ignora el JWT.
+ *    Así el front puede alinear siempre el id guardado con la API sin depender de un token viejo.
+ *
+ * 3) JWT activo + NODE_ENV=production (y sin TRUST_ACTING_USER_HEADER): solo cuenta el Bearer;
+ *    la cabecera se ignora (evita suplantación).
+ *
+ * AUTH_BYPASS_FORCE_ROLE — solo aplica en modo DISABLE_JWT_AUTH.
  */
 const isJwtDisabled = () =>
   String(process.env.DISABLE_JWT_AUTH || '').toLowerCase() === 'true' ||
   process.env.DISABLE_JWT_AUTH === '1';
+
+/** En preproducción, la cabecera puede sustituir al JWT si resuelve a un usuario válido. */
+const preferActingHeaderOverJwt = () =>
+  String(process.env.TRUST_ACTING_USER_HEADER || '').toLowerCase() === 'true' ||
+  process.env.TRUST_ACTING_USER_HEADER === '1' ||
+  String(process.env.NODE_ENV || '').toLowerCase() !== 'production';
 
 function normalizarRol(rol) {
   const r = String(rol || '')
@@ -31,10 +37,30 @@ function normalizarRol(rol) {
   return r;
 }
 
-// Middleware para verificar el token JWT
+function parseActingUserId(req) {
+  const headerRaw = req.headers['x-tusalud-acting-user-id'];
+  if (headerRaw == null || String(headerRaw).trim() === '') return NaN;
+  return parseInt(String(headerRaw).trim(), 10);
+}
+
+async function fetchUsuarioActivoPorId(id) {
+  if (!Number.isInteger(id) || id <= 0) return null;
+  const [rows] = await pool.execute(
+    'SELECT id, nombre_usuario, email, nombre_completo, rol, activo FROM usuarios WHERE id = ? AND activo = TRUE',
+    [id]
+  );
+  return rows[0] || null;
+}
+
 const authenticateToken = async (req, res, next) => {
   try {
-    // --- Modo sin JWT (temporal): no exige Authorization ---
+    const headerId = parseActingUserId(req);
+    let headerUser = null;
+    if (Number.isInteger(headerId) && headerId > 0) {
+      headerUser = await fetchUsuarioActivoPorId(headerId);
+    }
+
+    // --- Modo sin JWT ---
     if (isJwtDisabled()) {
       const fallbackRol = (process.env.AUTH_BYPASS_ROL || 'manager').toLowerCase();
       const forceBypassRole = String(process.env.AUTH_BYPASS_FORCE_ROLE || '')
@@ -42,42 +68,22 @@ const authenticateToken = async (req, res, next) => {
         .toLowerCase();
       const rolForzado = forceBypassRole ? normalizarRol(forceBypassRole) : null;
 
-      const headerRaw = req.headers['x-tusalud-acting-user-id'];
-      const headerId =
-        headerRaw != null && String(headerRaw).trim() !== ''
-          ? parseInt(String(headerRaw).trim(), 10)
-          : NaN;
-
       const bypassUserIdRaw = String(process.env.AUTH_BYPASS_USER_ID || '').trim();
       const bypassId = bypassUserIdRaw ? parseInt(bypassUserIdRaw, 10) : null;
 
-      const loadUsuarioPorId = async (id) => {
-        if (!Number.isInteger(id) || id <= 0) return [];
-        const [rows] = await pool.execute(
-          'SELECT id, nombre_usuario, email, nombre_completo, rol, activo FROM usuarios WHERE id = ? AND activo = TRUE',
-          [id]
-        );
-        return rows;
-      };
-
       try {
-        let users = [];
-
-        if (Number.isInteger(headerId) && headerId > 0) {
-          users = await loadUsuarioPorId(headerId);
+        let u = headerUser;
+        if (!u && Number.isInteger(bypassId) && bypassId > 0) {
+          u = await fetchUsuarioActivoPorId(bypassId);
         }
-        if (users.length === 0 && Number.isInteger(bypassId) && bypassId > 0) {
-          users = await loadUsuarioPorId(bypassId);
-        }
-        if (users.length === 0) {
+        if (!u) {
           const [firstManager] = await pool.execute(
             "SELECT id, nombre_usuario, email, nombre_completo, rol, activo FROM usuarios WHERE activo = TRUE AND LOWER(TRIM(rol)) IN ('manager','admin','administrador','superadmin') ORDER BY id ASC LIMIT 1"
           );
-          users = firstManager;
+          u = firstManager[0] || null;
         }
 
-        if (users.length > 0) {
-          const u = users[0];
+        if (u) {
           req.user = {
             ...u,
             rol: rolForzado || normalizarRol(u.rol),
@@ -110,18 +116,22 @@ const authenticateToken = async (req, res, next) => {
       }
       return next();
     }
-    // --- Fin modo sin JWT ---
+
+    // --- JWT encendido: en preproducción, cabecera válida gana al token ---
+    if (headerUser && preferActingHeaderOverJwt()) {
+      req.user = { ...headerUser, rol: normalizarRol(headerUser.rol) };
+      return next();
+    }
 
     const authHeader = req.headers['authorization'];
-    const token = authHeader && authHeader.split(' ')[1]; // Bearer TOKEN
+    const token = authHeader && authHeader.split(' ')[1];
 
     if (!token) {
       return res.status(401).json({ error: 'Token de acceso requerido' });
     }
 
     const decoded = jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key-change-this-in-production');
-    
-    // Verificar que el usuario existe y está activo
+
     const [users] = await pool.execute(
       'SELECT id, nombre_usuario, email, nombre_completo, rol, activo FROM usuarios WHERE id = ? AND activo = TRUE',
       [decoded.userId]
@@ -144,7 +154,6 @@ const authenticateToken = async (req, res, next) => {
   }
 };
 
-// Middleware para verificar roles específicos
 const requireRole = (...roles) => {
   return (req, res, next) => {
     if (!req.user) {
@@ -166,7 +175,8 @@ module.exports = {
   authenticateToken,
   requireRole,
   normalizarRol,
-  // Aliases para compatibilidad
+  isJwtDisabled,
+  preferActingHeaderOverJwt,
   verificarToken: authenticateToken,
-  verificarRol: (roles) => requireRole(...roles)
+  verificarRol: (roles) => requireRole(...roles),
 };

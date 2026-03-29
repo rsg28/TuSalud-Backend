@@ -74,6 +74,12 @@ app.listen(PORT, async () => {
   const jwtOff =
     String(process.env.DISABLE_JWT_AUTH || '').toLowerCase() === 'true' ||
     process.env.DISABLE_JWT_AUTH === '1';
+  const nodeEnv = String(process.env.NODE_ENV || '').toLowerCase();
+  const trustHeader =
+    String(process.env.TRUST_ACTING_USER_HEADER || '').toLowerCase() === 'true' ||
+    process.env.TRUST_ACTING_USER_HEADER === '1' ||
+    nodeEnv !== 'production';
+
   if (jwtOff) {
     const bid = String(process.env.AUTH_BYPASS_USER_ID || '').trim();
     console.log('⚠️  JWT deshabilitado (DISABLE_JWT_AUTH). El Bearer no define la sesión.');
@@ -82,6 +88,13 @@ app.listen(PORT, async () => {
     );
     console.log(
       `   fallback: ${bid ? `AUTH_BYPASS_USER_ID=${bid}` : 'primer manager activo en BD'}`
+    );
+  } else if (trustHeader) {
+    console.log(
+      'ℹ️  Preproducción: si X-TuSalud-Acting-User-Id coincide con un usuario activo, define la sesión antes que el JWT.'
+    );
+    console.log(
+      '   En NODE_ENV=production (sin TRUST_ACTING_USER_HEADER) solo cuenta el Bearer.'
     );
   }
   console.log('═══════════════════════════════════════════════════════');
