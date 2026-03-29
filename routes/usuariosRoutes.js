@@ -174,32 +174,46 @@ const setEmpresaByUsuarioId = async (req, res) => {
       }
       empresaIdToSet = emp[0].id;
     } else if (razon_social && typeof razon_social === 'string' && razon_social.trim()) {
-      // Crear nueva empresa y asignar
       const razon = razon_social.trim();
       if (ruc && String(ruc).trim().length !== 0 && String(ruc).trim().length !== 11) {
         return res.status(400).json({ error: 'El RUC debe tener 11 dígitos' });
       }
-      const [existingNombre] = await pool.execute(
-        'SELECT id FROM empresas WHERE LOWER(TRIM(razon_social)) = LOWER(?)',
-        [razon]
-      );
-      if (existingNombre.length > 0) {
-        return res.status(400).json({ error: 'Ya existe una empresa con esa razón social' });
-      }
       const rucVal = ruc && String(ruc).trim() ? String(ruc).trim() : null;
+      // Buscar existente (misma lógica que “Modificar empresa”, sin duplicar filas)
       if (rucVal) {
-        const [existingRuc] = await pool.execute('SELECT id FROM empresas WHERE ruc = ?', [rucVal]);
-        if (existingRuc.length > 0) {
-          return res.status(400).json({ error: 'El RUC ya está registrado' });
+        const [byRuc] = await pool.execute('SELECT id FROM empresas WHERE ruc = ?', [rucVal]);
+        if (byRuc.length > 0) {
+          empresaIdToSet = byRuc[0].id;
         }
       }
-      const [result] = await pool.execute(
-        `INSERT INTO empresas (razon_social, ruc, direccion, contacto) VALUES (?, ?, ?, ?)`,
-        [razon, rucVal, (direccion && String(direccion).trim()) || null, (contacto && String(contacto).trim()) || null]
-      );
-      empresaIdToSet = result.insertId;
+      if (empresaIdToSet == null) {
+        const [byNombre] = await pool.execute(
+          'SELECT id FROM empresas WHERE LOWER(TRIM(razon_social)) = LOWER(?)',
+          [razon]
+        );
+        if (byNombre.length > 0) {
+          empresaIdToSet = byNombre[0].id;
+        }
+      }
+      if (empresaIdToSet == null) {
+        const [result] = await pool.execute(
+          `INSERT INTO empresas (razon_social, ruc, direccion, contacto) VALUES (?, ?, ?, ?)`,
+          [razon, rucVal, (direccion && String(direccion).trim()) || null, (contacto && String(contacto).trim()) || null]
+        );
+        empresaIdToSet = result.insertId;
+      }
+    } else if (ruc && String(ruc).trim().length === 11) {
+      // Solo RUC (p. ej. import): asignar empresa existente
+      const rucVal = String(ruc).trim();
+      const [byRuc] = await pool.execute('SELECT id FROM empresas WHERE ruc = ?', [rucVal]);
+      if (byRuc.length === 0) {
+        return res.status(404).json({ error: 'No hay empresa registrada con ese RUC' });
+      }
+      empresaIdToSet = byRuc[0].id;
     } else {
-      return res.status(400).json({ error: 'Indica empresa_id (para asignar existente) o razon_social (para crear nueva)' });
+      return res.status(400).json({
+        error: 'Indica empresa_id, razon_social (crear o enlazar por nombre/RUC), o ruc de 11 dígitos (empresa existente)',
+      });
     }
 
     await pool.execute('UPDATE usuarios SET empresa_id = ? WHERE id = ?', [empresaIdToSet, userId]);
