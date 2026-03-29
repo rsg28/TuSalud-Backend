@@ -7,7 +7,14 @@ const app = express();
 // Middleware
 app.use(cors({
   origin: true, // Permite requests de cualquier origen
-  credentials: true
+  credentials: true,
+  allowedHeaders: [
+    'Content-Type',
+    'Authorization',
+    'X-TuSalud-Acting-User-Id',
+    'Accept',
+    'Accept-Language',
+  ],
 }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -64,6 +71,19 @@ app.listen(PORT, async () => {
   console.log(`📡 Environment: ${process.env.NODE_ENV || 'development'}`);
   console.log(`🌐 Server running on: http://localhost:${PORT}`);
   console.log(`📊 Database: ${process.env.DB_NAME || 'tusalud'}@${process.env.DB_HOST || 'localhost'}:${process.env.DB_PORT || '3306'}`);
+  const jwtOff =
+    String(process.env.DISABLE_JWT_AUTH || '').toLowerCase() === 'true' ||
+    process.env.DISABLE_JWT_AUTH === '1';
+  if (jwtOff) {
+    const bid = String(process.env.AUTH_BYPASS_USER_ID || '').trim();
+    console.log('⚠️  JWT deshabilitado (DISABLE_JWT_AUTH). El Bearer no define la sesión.');
+    console.log(
+      '   Sesión: cabecera X-TuSalud-Acting-User-Id (id del usuario en el front) → si falta o no existe en BD,'
+    );
+    console.log(
+      `   fallback: ${bid ? `AUTH_BYPASS_USER_ID=${bid}` : 'primer manager activo en BD'}`
+    );
+  }
   console.log('═══════════════════════════════════════════════════════');
   console.log('');
   

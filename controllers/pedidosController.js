@@ -14,6 +14,28 @@ function sanitizeForJson(obj) {
   return obj;
 }
 
+/** Anexa `cotizaciones: [{ estado }]` por pedido_id (mismo criterio que listado general). */
+async function adjuntarCotizacionesALista(pedidos) {
+  const pedidoIds = pedidos.map((p) => p.id);
+  let cotizacionesPorPedido = {};
+  if (pedidoIds.length > 0) {
+    const placeholders = pedidoIds.map(() => '?').join(',');
+    const [cots] = await pool.execute(
+      `SELECT pedido_id, estado FROM cotizaciones WHERE pedido_id IN (${placeholders}) ORDER BY es_complementaria ASC, id ASC`,
+      pedidoIds
+    );
+    for (const row of cots) {
+      const pid = row.pedido_id;
+      if (!cotizacionesPorPedido[pid]) cotizacionesPorPedido[pid] = [];
+      cotizacionesPorPedido[pid].push({ estado: row.estado });
+    }
+  }
+  return pedidos.map((p) => ({
+    ...p,
+    cotizaciones: cotizacionesPorPedido[p.id] || [],
+  }));
+}
+
 // Nuevo esquema: pedidos, pedido_examenes, historial_pedido, pedido_pacientes, etc.
 
 const generarNumeroPedido = async () => {
@@ -56,8 +78,8 @@ const listarPedidos = async (req, res) => {
         s.nombre AS sede_nombre,
         u.nombre_completo AS vendedor_nombre
       FROM pedidos p
-      JOIN empresas e ON p.empresa_id = e.id
-      JOIN sedes s ON p.sede_id = s.id
+      LEFT JOIN empresas e ON p.empresa_id = e.id
+      LEFT JOIN sedes s ON p.sede_id = s.id
       LEFT JOIN usuarios u ON p.vendedor_id = u.id
       WHERE 1=1
     `;
@@ -77,14 +99,7 @@ const listarPedidos = async (req, res) => {
       query += ' AND p.vendedor_id = ?';
       params.push(vendedor_id);
     }
-    /**
-     * GET /api/pedidos/mios: marca explícita; filtra solo por cliente_usuario_id = sesión.
-     * Evita depender de mutar req.query (objetos congelados) o de que rol coincida exactamente.
-     */
-    if (req.misPedidosClienteUid != null) {
-      query += ' AND p.cliente_usuario_id = ?';
-      params.push(req.misPedidosClienteUid);
-    } else if (rol === 'cliente') {
+    if (rol === 'cliente') {
       if (!Number.isFinite(uidSesion) || uidSesion <= 0) {
         return res.status(401).json({ error: 'Usuario no válido' });
       }
@@ -95,8 +110,7 @@ const listarPedidos = async (req, res) => {
       params.push(parseInt(String(user_id), 10));
     }
 
-    /** No mezclar alcance vendedor con /mios (solo pedidos donde yo soy cliente). */
-    if (rol === 'vendedor' && req.misPedidosClienteUid == null) {
+    if (rol === 'vendedor') {
       query += ' AND (p.vendedor_id = ? OR p.vendedor_id IS NULL)';
       params.push(req.user.id);
     }
@@ -108,25 +122,8 @@ const listarPedidos = async (req, res) => {
     query += ` ORDER BY p.created_at DESC LIMIT ${safeLimit} OFFSET ${safeOffset}`;
 
     const [pedidos] = await pool.execute(query, params);
-    // Incluir estados de cotizaciones por pedido para que el frontend muestre la etiqueta correcta (Enviada al cliente / Aprobada por manager / Enviada al manager)
-    const pedidoIds = pedidos.map((p) => p.id);
-    let cotizacionesPorPedido = {};
-    if (pedidoIds.length > 0) {
-      const placeholders = pedidoIds.map(() => '?').join(',');
-      const [cots] = await pool.execute(
-        `SELECT pedido_id, estado FROM cotizaciones WHERE pedido_id IN (${placeholders}) ORDER BY es_complementaria ASC, id ASC`,
-        pedidoIds
-      );
-      for (const row of cots) {
-        const pid = row.pedido_id;
-        if (!cotizacionesPorPedido[pid]) cotizacionesPorPedido[pid] = [];
-        cotizacionesPorPedido[pid].push({ estado: row.estado });
-      }
-    }
-    const pedidosConCotizaciones = pedidos.map((p) => ({
-      ...p,
-      cotizaciones: cotizacionesPorPedido[p.id] || [],
-    }));
+
+    const pedidosConCotizaciones = await adjuntarCotizacionesALista(pedidos);
     res.json({
       pedidos: sanitizeForJson(pedidosConCotizaciones),
       page: pageNum,
@@ -143,20 +140,60 @@ const listarPedidos = async (req, res) => {
   }
 };
 
-/** Lista los pedidos del usuario autenticado (cliente_usuario_id = req.user.id). */
+/**
+ * GET /api/pedidos/mios — Solo pedidos donde el token es el cliente (cliente_usuario_id).
+ * Implementación aislada: no reutiliza listarPedidos (evita filtros por rol/vendedor/query raros).
+ */
 const listarMisPedidos = async (req, res) => {
-  if (!req.user?.id) {
-    return res.status(401).json({ error: 'Usuario no autenticado' });
-  }
-  const uid = parseInt(String(req.user.id), 10);
-  if (!Number.isFinite(uid) || uid <= 0) {
-    return res.status(401).json({ error: 'Usuario no válido' });
-  }
-  req.misPedidosClienteUid = uid;
   try {
-    return await listarPedidos(req, res);
-  } finally {
-    delete req.misPedidosClienteUid;
+    if (!req.user?.id) {
+      return res.status(401).json({ error: 'Usuario no autenticado' });
+    }
+    const uid = parseInt(String(req.user.id), 10);
+    if (!Number.isFinite(uid) || uid <= 0) {
+      return res.status(401).json({ error: 'Usuario no válido' });
+    }
+
+    const { page = 1, limit = 20 } = req.query;
+    const pageNum = Math.max(1, parseInt(String(page), 10) || 1);
+    const limitNum = Math.max(1, Math.min(100, parseInt(String(limit), 10) || 20));
+    const offset = (pageNum - 1) * limitNum;
+    const safeLimit = Math.max(1, Math.min(100, Number(limitNum) || 20));
+    const safeOffset = Math.max(0, Number(offset) || 0);
+
+    const sql = `
+      SELECT p.*,
+        e.razon_social AS empresa_nombre, e.ruc AS empresa_ruc,
+        s.nombre AS sede_nombre,
+        u.nombre_completo AS vendedor_nombre
+      FROM pedidos p
+      LEFT JOIN empresas e ON p.empresa_id = e.id
+      LEFT JOIN sedes s ON p.sede_id = s.id
+      LEFT JOIN usuarios u ON p.vendedor_id = u.id
+      WHERE p.cliente_usuario_id = ?
+        AND p.estado <> 'CANCELADO'
+      ORDER BY p.id DESC
+      LIMIT ${safeLimit} OFFSET ${safeOffset}
+    `;
+    const [pedidos] = await pool.execute(sql, [uid]);
+
+    if (pedidos.length === 0) {
+      const [diag] = await pool.execute(
+        `SELECT id, numero_pedido, cliente_usuario_id, estado FROM pedidos WHERE cliente_usuario_id = ? ORDER BY id DESC LIMIT 6`,
+        [uid]
+      );
+      console.warn('[TuSalud API] listarMisPedidos: 0 filas no cancelados para cliente_usuario_id=', uid, 'pedidos de ese cliente (todos estados):', diag);
+    }
+
+    const pedidosConCotizaciones = await adjuntarCotizacionesALista(pedidos);
+    res.json({
+      pedidos: sanitizeForJson(pedidosConCotizaciones),
+      page: pageNum,
+      limit: limitNum,
+    });
+  } catch (error) {
+    console.error('Error al listar mis pedidos:', error);
+    res.status(500).json({ error: 'Error al listar pedidos', message: error.message || 'Error desconocido' });
   }
 };
 
@@ -419,7 +456,23 @@ const crearPedido = async (req, res) => {
        VALUES (?, ?, ?, ?, ?, 'ESPERA_COTIZACION', ?, ?, ?, ?)`,
       [numero_pedido, empresa_id, sede_id, vendedor_id, cliente_idFinal, totalEmpleadosInicial, observaciones || null, condiciones_pago || null, fecha_vencimiento || null]
     );
-    const pedido_id = result.insertId;
+    const pedido_id = Number(result.insertId);
+    if (!Number.isFinite(pedido_id) || pedido_id <= 0) {
+      throw new Error('No se obtuvo id válido al crear el pedido');
+    }
+
+    /** Asegurar enlace cliente ↔ pedido (corrige NULL si el INSERT no guardó bien el id de sesión). */
+    if (rolUsuario === 'cliente') {
+      const cidSesion = toPositiveUserId(req.user.id);
+      if (cidSesion) {
+        await connection.execute('UPDATE pedidos SET cliente_usuario_id = ? WHERE id = ?', [cidSesion, pedido_id]);
+      }
+    } else if (cliente_idFinal) {
+      await connection.execute(
+        'UPDATE pedidos SET cliente_usuario_id = COALESCE(cliente_usuario_id, ?) WHERE id = ?',
+        [cliente_idFinal, pedido_id]
+      );
+    }
 
     const pedidoExamenIds = new Set();
     if (examenes && Array.isArray(examenes) && examenes.length > 0) {
