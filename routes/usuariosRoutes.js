@@ -166,6 +166,12 @@ const setEmpresaByUsuarioId = async (req, res) => {
     const { empresa_id, razon_social, ruc, direccion, contacto } = req.body || {};
     let empresaIdToSet = null;
 
+    const rucSoloDigitos = (v) => String(v ?? '').replace(/\D/g, '');
+    const rucValidoLongitud = (v) => {
+      const d = rucSoloDigitos(v);
+      return d.length >= 9 && d.length <= 11;
+    };
+
     if (empresa_id != null && Number.isInteger(Number(empresa_id))) {
       // Asignar empresa existente
       const [emp] = await pool.execute('SELECT id FROM empresas WHERE id = ?', [Number(empresa_id)]);
@@ -175,10 +181,10 @@ const setEmpresaByUsuarioId = async (req, res) => {
       empresaIdToSet = emp[0].id;
     } else if (razon_social && typeof razon_social === 'string' && razon_social.trim()) {
       const razon = razon_social.trim();
-      if (ruc && String(ruc).trim().length !== 0 && String(ruc).trim().length !== 11) {
-        return res.status(400).json({ error: 'El RUC debe tener 11 dígitos' });
+      if (ruc && String(ruc).trim().length !== 0 && !rucValidoLongitud(ruc)) {
+        return res.status(400).json({ error: 'El RUC debe tener entre 9 y 11 dígitos' });
       }
-      const rucVal = ruc && String(ruc).trim() ? String(ruc).trim() : null;
+      const rucVal = ruc && String(ruc).trim() ? rucSoloDigitos(ruc) : null;
       // Buscar existente (misma lógica que “Modificar empresa”, sin duplicar filas)
       if (rucVal) {
         const [byRuc] = await pool.execute('SELECT id FROM empresas WHERE ruc = ?', [rucVal]);
@@ -202,9 +208,9 @@ const setEmpresaByUsuarioId = async (req, res) => {
         );
         empresaIdToSet = result.insertId;
       }
-    } else if (ruc && String(ruc).trim().length === 11) {
+    } else if (ruc && rucValidoLongitud(ruc)) {
       // Solo RUC (p. ej. import): asignar empresa existente
-      const rucVal = String(ruc).trim();
+      const rucVal = rucSoloDigitos(ruc);
       const [byRuc] = await pool.execute('SELECT id FROM empresas WHERE ruc = ?', [rucVal]);
       if (byRuc.length === 0) {
         return res.status(404).json({ error: 'No hay empresa registrada con ese RUC' });
@@ -212,7 +218,8 @@ const setEmpresaByUsuarioId = async (req, res) => {
       empresaIdToSet = byRuc[0].id;
     } else {
       return res.status(400).json({
-        error: 'Indica empresa_id, razon_social (crear o enlazar por nombre/RUC), o ruc de 11 dígitos (empresa existente)',
+        error:
+          'Indica empresa_id, razon_social (crear o enlazar por nombre/RUC), o RUC de 9 a 11 dígitos (empresa existente)',
       });
     }
 
