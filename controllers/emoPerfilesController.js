@@ -9,6 +9,7 @@ const NORMALIZE_MAP = {
 
 function normalizarNombrePerfil(s) {
   let t = String(s || '').trim();
+  t = t.replace(/\u00a0/g, ' ').replace(/[\u200b-\u200d\ufeff]/g, '');
   // colapsar espacios (tolerar "  Perfil   A ")
   t = t.replace(/\s+/g, ' ');
   // quitar tildes básicas
@@ -16,6 +17,10 @@ function normalizarNombrePerfil(s) {
     t = t.split(k).join(v);
   });
   return t.toLowerCase();
+}
+
+function normalizarNombrePerfilCompacto(s) {
+  return normalizarNombrePerfil(s).replace(/\s/g, '');
 }
 
 exports.crearPerfil = async (req, res) => {
@@ -223,10 +228,14 @@ exports.resolve = async (req, res) => {
     if (!emoTipoRaw || !EMO_TIPOS_VALIDOS.includes(emoTipoRaw)) return res.status(400).json({ error: 'emoTipo inválido' });
     if (!Number.isInteger(sede_id) || sede_id <= 0) return res.status(400).json({ error: 'sede_id es requerido' });
 
-    // Match tolerante a mayúsculas/minúsculas y espacios raros (y tildes básicas)
+    // Match tolerante a mayúsculas/minúsculas, espacios raros, NBSP y segunda pasada sin espacios.
     const perfilNombreNorm = normalizarNombrePerfil(perfilNombreRaw);
+    const perfilNombreCompact = normalizarNombrePerfilCompacto(perfilNombreRaw);
     const [perfiles] = await pool.execute('SELECT id, nombre FROM emo_perfiles');
-    const match = perfiles.find((p) => normalizarNombrePerfil(p.nombre) === perfilNombreNorm);
+    let match = perfiles.find((p) => normalizarNombrePerfil(p.nombre) === perfilNombreNorm);
+    if (!match && perfilNombreCompact.length >= 2) {
+      match = perfiles.find((p) => normalizarNombrePerfilCompacto(p.nombre) === perfilNombreCompact);
+    }
     if (!match) return res.status(404).json({ error: 'Perfil EMO no encontrado' });
     const perfil_id = match.id;
 
