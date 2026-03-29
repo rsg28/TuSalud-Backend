@@ -230,12 +230,13 @@ exports.resolve = async (req, res) => {
     if (!match) return res.status(404).json({ error: 'Perfil EMO no encontrado' });
     const perfil_id = match.id;
 
+    // Incluir exámenes del perfil aunque aún no tengan fila en examen_precio (precio 0 hasta que exista tarifa).
     const [rows] = await pool.execute(
       `SELECT 
           e.id AS examen_id,
           e.nombre AS nombre_examen,
           e.categoria AS examen_principal,
-          COALESCE(MIN(ep.precio), MIN(ep_general.precio)) AS precio
+          COALESCE(MIN(ep.precio), MIN(ep_general.precio), 0) AS precio
        FROM emo_perfil_examenes mpe
        JOIN examenes e ON e.id = mpe.examen_id
        LEFT JOIN examen_precio ep 
@@ -249,7 +250,6 @@ exports.resolve = async (req, res) => {
        WHERE mpe.perfil_id = ?
          AND mpe.tipo_emo = ?
          AND e.activo = 1
-         AND (ep.id IS NOT NULL OR ep_general.id IS NOT NULL)
        GROUP BY e.id, e.nombre, e.categoria
        ORDER BY e.nombre ASC`,
       [sede_id, perfil_id, emoTipoRaw]
