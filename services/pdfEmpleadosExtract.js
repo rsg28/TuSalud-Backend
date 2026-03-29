@@ -15,7 +15,7 @@ const { promisify } = require('util');
 
 const execFileAsync = promisify(execFile);
 
-const DEFAULT_MAX_PAGES = parseInt(process.env.PDF_IMPORT_MAX_PAGES || '40', 10);
+const DEFAULT_MAX_PAGES = parseInt(process.env.PDF_IMPORT_MAX_PAGES || '150', 10);
 const OCR_DPI = parseInt(process.env.PDF_IMPORT_OCR_DPI || '200', 10);
 
 function isPdfBuffer(buf) {
