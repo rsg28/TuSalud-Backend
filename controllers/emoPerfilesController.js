@@ -233,11 +233,18 @@ exports.resolve = async (req, res) => {
     const perfilNombreCompact = normalizarNombrePerfilCompacto(perfilNombreRaw);
     const [perfiles] = await pool.execute('SELECT id, nombre FROM emo_perfiles');
     let match = perfiles.find((p) => normalizarNombrePerfil(p.nombre) === perfilNombreNorm);
+    let coincidenciaLaxa = false;
     if (!match && perfilNombreCompact.length >= 2) {
       match = perfiles.find((p) => normalizarNombrePerfilCompacto(p.nombre) === perfilNombreCompact);
+      if (match) coincidenciaLaxa = true;
     }
     if (!match) return res.status(404).json({ error: 'Perfil EMO no encontrado' });
     const perfil_id = match.id;
+    const nombrePerfilBd = String(match.nombre || '').trim();
+    /** Texto del archivo distinto al nombre en BD (misma resolución lógica). */
+    const textoDistintoDeBd =
+      perfilNombreRaw.replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim() !==
+      nombrePerfilBd.replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim();
 
     // Incluir exámenes del perfil aunque aún no tengan fila en examen_precio (precio 0 hasta que exista tarifa).
     const [rows] = await pool.execute(
@@ -267,6 +274,11 @@ exports.resolve = async (req, res) => {
     res.json({
       perfil_id,
       tipo_emo: emoTipoRaw,
+      nombre_perfil_bd: nombrePerfilBd,
+      /** true si solo coincidió la forma compacta (sin espacios), no el nombre normalizado completo. */
+      coincidencia_laxa: coincidenciaLaxa,
+      /** true si el texto enviado no es idéntico al nombre del perfil en base de datos (espacios ya unificados). */
+      texto_distinto_de_bd: textoDistintoDeBd,
       examenes: rows.map((r) => ({
         examen_id: r.examen_id,
         nombre_examen: r.nombre_examen,
