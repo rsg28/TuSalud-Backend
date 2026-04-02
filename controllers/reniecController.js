@@ -112,7 +112,8 @@ async function validarDni(req, res) {
         : null;
 
     const ok =
-      Boolean(reniec?.nombres) && Boolean(reniec?.apellido_paterno) && Boolean(reniec?.apellido_materno);
+      Boolean(reniec?.nombre_completo) ||
+      (Boolean(reniec?.nombres) && Boolean(reniec?.apellido_paterno) && Boolean(reniec?.apellido_materno));
 
     return res.status(200).json({ ok, reniec });
   } catch (err) {
