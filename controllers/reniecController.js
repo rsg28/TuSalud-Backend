@@ -3,13 +3,6 @@ const https = require('https');
 const RENIEC_BASE_URL =
   'https://atheneasoftadepia.com/ajax/admision/java.complet.data.php?javadata=';
 
-function safeGetVarDumpString(text, key) {
-  // Esperado (ejemplo): ["nombres"]=> string(14) "RAUL SEBASTIAN"
-  const re = new RegExp(String.raw`\\["${key}"\\]=>\\s*string\\(\\d+\\)\\s*"([^"]*)"`);
-  const m = text.match(re);
-  return m ? m[1] : null;
-}
-
 function parseReniecResponseText(text) {
   const t = String(text || '').trim();
   if (!t) return null;
@@ -25,15 +18,29 @@ function parseReniecResponseText(text) {
   }
 
   // Fallback: var_dump / array(8) { ... }
-  const id = safeGetVarDumpString(t, 'id');
-  const nombres = safeGetVarDumpString(t, 'nombres');
-  const apellido_paterno = safeGetVarDumpString(t, 'apellido_paterno');
-  const apellido_materno = safeGetVarDumpString(t, 'apellido_materno');
-  const codigo_verificacion = safeGetVarDumpString(t, 'codigo_verificacion');
+  // Toleramos escapes tipo: \["id"\]=> string(8) "72880344" (como a veces se ve en la UI)
+  // y también el formato sin escapes: ["id"]=> string(8) "72880344".
+  const pairs = {};
+  const pairRe =
+    /\\?\["([^"]+)"\\?\]\s*=>\s*string\(\d+\)\s*"([^"]*)"/g;
+  let m = null;
+  // eslint-disable-next-line no-cond-assign
+  while ((m = pairRe.exec(t)) !== null) {
+    const key = m[1];
+    const val = m[2];
+    pairs[key] = val;
+  }
 
-  if (!nombres && !apellido_paterno && !apellido_materno) return null;
+  const id = pairs.id ?? null;
+  const nombres = pairs.nombres ?? null;
+  const apellido_paterno = pairs.apellido_paterno ?? null;
+  const apellido_materno = pairs.apellido_materno ?? null;
+  const codigo_verificacion = pairs.codigo_verificacion ?? null;
+  const nombre_completo = pairs.nombre_completo ?? null;
 
-  return { id, nombres, apellido_paterno, apellido_materno, codigo_verificacion };
+  if (!nombres && !apellido_paterno && !apellido_materno && !nombre_completo) return null;
+
+  return { id, nombres, apellido_paterno, apellido_materno, codigo_verificacion, nombre_completo };
 }
 
 function httpsGetText(url) {
