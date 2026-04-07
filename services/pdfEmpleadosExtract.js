@@ -22,6 +22,66 @@ function isPdfBuffer(buf) {
   return Buffer.isBuffer(buf) && buf.length >= 5 && buf.slice(0, 5).toString('ascii') === '%PDF-';
 }
 
+function splitNombreYMarcasEmoDerecha(right) {
+  const toks = right.split(/\s+/).filter(Boolean);
+  if (toks.length === 0) return [''];
+  const emoTok = (s) => /^[xX]$|^-+$/.test(s);
+  let splitAt = toks.length;
+  for (let j = toks.length - 1; j >= 0; j--) {
+    if (emoTok(toks[j])) splitAt = j;
+    else break;
+  }
+  if (splitAt === toks.length) {
+    return [right.trim()];
+  }
+  const nombre = toks.slice(0, splitAt).join(' ').trim();
+  const marks = toks.slice(splitAt);
+  return [nombre, ...marks];
+}
+
+function intentarFilaEncabezadoPlantillaTuSaludEmo(line) {
+  const t = line.trim();
+  if (!t || /\b\d{8}\b/.test(t)) return null;
+  if (!/\bDNI\b/i.test(t)) return null;
+  const parts = t.split(/\s+DNI\s+/i);
+  if (parts.length !== 2) return null;
+  const left = parts[0].trim();
+  const right = parts[1].trim();
+  const lt = left.split(/\s+/).filter(Boolean);
+  if (lt.length < 3) return null;
+  const n = lt[0];
+  const perfil = lt[lt.length - 1];
+  const puesto = lt.slice(1, -1).join(' ');
+  const tokens = right.split(/\s+/).filter(Boolean);
+  const kws = ['preoc', 'anual', 'retiro', 'visita', 'evaluaciones', 'condicionales', 'adicional'];
+  let iEmo = tokens.findIndex((tok) => {
+    const u = tok.toLowerCase();
+    return kws.some((k) => u.startsWith(k));
+  });
+  if (iEmo < 0) iEmo = tokens.length;
+  const nombreHeader = tokens.slice(0, iEmo).join(' ');
+  const emoHeaders = tokens.slice(iEmo);
+  return [n, puesto, perfil, 'DNI', nombreHeader, ...emoHeaders].join('\t');
+}
+
+function intentarFilaDatosPlantillaTuSaludEmo(line) {
+  const t = line.trim();
+  if (!t || /\bDNI\b/i.test(t)) return null;
+  const dniM = t.match(/\b(\d{8})\b/);
+  if (!dniM || dniM.index === undefined) return null;
+  const dni = dniM[1];
+  const idx8 = dniM.index;
+  const left = t.slice(0, idx8).trim();
+  const right = t.slice(idx8 + 8).trim();
+  const leftTokens = left.split(/\s+/).filter(Boolean);
+  if (leftTokens.length < 3) return null;
+  const n = leftTokens[0];
+  const perfil = leftTokens[leftTokens.length - 1];
+  const puesto = leftTokens.slice(1, -1).join(' ');
+  const partsRight = splitNombreYMarcasEmoDerecha(right);
+  return [n, puesto, perfil, dni, ...partsRight].join('\t');
+}
+
 /**
  * Convierte líneas con columnas separadas por espacios múltiples (típico OCR/PDF) a tabs
  * para que parseEmpleadosFile detecte columnas igual que en Excel/CSV.
@@ -35,6 +95,10 @@ function normalizeExtractedTableText(text) {
     .map((line) => {
       const t = line.trim();
       if (!t) return '';
+      const tuSaludH = intentarFilaEncabezadoPlantillaTuSaludEmo(t);
+      if (tuSaludH) return tuSaludH;
+      const tuSaludD = intentarFilaDatosPlantillaTuSaludEmo(t);
+      if (tuSaludD) return tuSaludD;
       if (t.includes('\t')) return t;
       const commaCols = t.split(',').length;
       const semiCols = t.split(';').length;
