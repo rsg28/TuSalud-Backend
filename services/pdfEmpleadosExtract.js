@@ -23,8 +23,9 @@ function isPdfBuffer(buf) {
 }
 
 /**
- * Convierte líneas con columnas separadas por espacios múltiples (típico OCR) a tabs
- * para que parseEmpleadosFile detecte columnas.
+ * Convierte líneas con columnas separadas por espacios múltiples (típico OCR/PDF) a tabs
+ * para que parseEmpleadosFile detecte columnas igual que en Excel/CSV.
+ * Los PDF de plantilla EMO suelen tener DNI de 8 dígitos rodeado de espacios simples.
  */
 function normalizeExtractedTableText(text) {
   return text
@@ -38,7 +39,16 @@ function normalizeExtractedTableText(text) {
       const commaCols = t.split(',').length;
       const semiCols = t.split(';').length;
       if (commaCols >= 4 || semiCols >= 4) return t;
-      return t.replace(/\s{2,}/g, '\t');
+      let spaced = t.replace(/\s{2,}/g, '\t');
+      if (!spaced.includes('\t') && /\b\d{8}\b/.test(spaced)) {
+        spaced = spaced
+          .replace(/\s+(\d{8})\s+/g, '\t$1\t')
+          .replace(/\s{2,}/g, '\t');
+      }
+      if (!spaced.includes('\t')) {
+        spaced = spaced.replace(/\s{2,}/g, '\t');
+      }
+      return spaced;
     })
     .join('\n');
 }
