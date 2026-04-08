@@ -147,11 +147,6 @@ function buildTextoTablaDesdeCampos(campos) {
   return `${header}\n${row}`;
 }
 
-function contarLineasConDni8(text) {
-  const lines = (text || '').split(/\n/).map((l) => l.trim()).filter(Boolean);
-  return lines.filter((l) => /\b\d{8}\b/.test(l)).length;
-}
-
 function pareceTablaMultiplesFilas(text) {
   const lines = (text || '')
     .split(/\n/)
@@ -164,20 +159,7 @@ function pareceTablaMultiplesFilas(text) {
     if (l.includes('\t')) tabs++;
     if (l.split(',').length >= 4) comas++;
   }
-  if (tabs >= 2 || comas >= 2) return true;
-
-  // PDF (pdf-parse): columnas a menudo separadas por un solo espacio → pocas tabulaciones.
-  const lineasDni = lines.filter((l) => /\b\d{8}\b/.test(l));
-  if (lineasDni.length >= 3) return true;
-
-  const blob = (text || '').toLowerCase();
-  const tieneEncabezadosPlantillaEmo =
-    /(dni|documento|n°)/.test(blob) &&
-    /(nombre|apellidos|nombres completos)/.test(blob) &&
-    (/(puesto|cargo|perfil)/.test(blob) || /preoc|anual|retiro|visita/.test(blob));
-  if (tieneEncabezadosPlantillaEmo && lines.length >= 5) return true;
-
-  return false;
+  return tabs >= 2 || comas >= 2;
 }
 
 /**
@@ -190,11 +172,6 @@ function pareceTablaMultiplesFilas(text) {
 function elegirTextoParaImportacion(campos, fallbackText) {
   const fb = (fallbackText || '').trim();
   if (pareceTablaMultiplesFilas(fb)) {
-    return fb;
-  }
-
-  // No sustituir una tabla real (p. ej. PDF idéntico al Excel) por una fila sintética de OCR.
-  if (fb.length >= 200 && contarLineasConDni8(fb) >= 2) {
     return fb;
   }
 

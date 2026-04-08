@@ -36,11 +36,17 @@ async function procesarDocumentoParaImport(buffer, opts = {}) {
   let mode = 'unknown';
 
   if (isPdfBuffer(buffer)) {
-    const r = await extractEmpleadosTextFromPdfBuffer(buffer, { maxPages: opts.maxPages ?? DEFAULT_MAX_PAGES });
+    const r = await extractEmpleadosTextFromPdfBuffer(buffer, {
+      maxPages: opts.maxPages ?? DEFAULT_MAX_PAGES,
+      originalname: orig,
+    });
     text = r.text || '';
     mode = r.mode || 'pdf';
   } else if (isImageMime(mime) || isImageFilename(orig)) {
-    const r = await extractTextFromImageBuffer(buffer, { mimeType: mime || 'image/png' });
+    const r = await extractTextFromImageBuffer(buffer, {
+      mimeType: mime || 'image/png',
+      originalname: orig,
+    });
     text = r || '';
     mode = 'ocr-image';
   } else {

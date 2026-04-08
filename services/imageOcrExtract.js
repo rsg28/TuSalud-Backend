@@ -7,6 +7,7 @@ const path = require('path');
 const os = require('os');
 const { execFile } = require('child_process');
 const { promisify } = require('util');
+const { pythonOcrEnabled, extractImageTextWithPython } = require('./pythonOcrClient');
 
 const execFileAsync = promisify(execFile);
 
@@ -43,6 +44,20 @@ function extFromMime(mimeType) {
  * @returns {Promise<string>}
  */
 async function extractTextFromImageBuffer(buffer, opts = {}) {
+  if (pythonOcrEnabled()) {
+    try {
+      const py = await extractImageTextWithPython(buffer, {
+        mimeType: opts.mimeType,
+        originalname: opts.originalname,
+      });
+      const pyText = String(py?.text || '').trim();
+      if (pyText) return pyText;
+    } catch (e) {
+      // fallback OCR local
+      console.warn('[image OCR] Python OCR no disponible, usando OCR local:', e.message);
+    }
+  }
+
   const hasTess = await commandExists(tesseractCmd());
   if (!hasTess) {
     throw new Error(

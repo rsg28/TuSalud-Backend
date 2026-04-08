@@ -1,0 +1,7 @@
+Flask
+pytesseract
+Pillow
+pdf2image
+PyPDF2
+pdfminer.six
+camelot-py

@@ -11,7 +11,10 @@ async function procesarPdfEmpleados(req, res) {
     }
 
     const maxPages = DEFAULT_MAX_PAGES;
-    const { text, mode } = await extractEmpleadosTextFromPdfBuffer(req.file.buffer, { maxPages });
+    const { text, mode } = await extractEmpleadosTextFromPdfBuffer(req.file.buffer, {
+      maxPages,
+      originalname: req.file.originalname || '',
+    });
 
     if (!text || text.trim().length === 0) {
       return res.status(422).json({ error: 'No se extrajo texto del PDF.' });
