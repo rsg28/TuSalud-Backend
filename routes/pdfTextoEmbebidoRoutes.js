@@ -1,7 +1,7 @@
 const express = require('express');
 const multer = require('multer');
 const { authenticateToken } = require('../middleware/auth');
-const { procesarPdfEmpleados } = require('../controllers/importEmpleadosPdfController');
+const { extraerPdfTextoEmbebido } = require('../controllers/pdfTextoEmbebidoController');
 
 const router = express.Router();
 
@@ -31,16 +31,26 @@ function multerErrorHandler(err, req, res, next) {
   next();
 }
 
-router.post(
-  '/empleados-pdf',
-  authenticateToken,
-  (req, res, next) => {
-    upload.single('file')(req, res, (e) => {
+/**
+ * JSON: body ya viene parseado por express.json (límite 30mb en server.js).
+ * Multipart: solo si Content-Type es multipart.
+ */
+function parsePdfBody(req, res, next) {
+  const ct = (req.headers['content-type'] || '').toLowerCase();
+  if (ct.includes('multipart/form-data')) {
+    return upload.single('file')(req, res, (e) => {
       if (e) return multerErrorHandler(e, req, res, next);
       next();
     });
-  },
-  procesarPdfEmpleados
-);
+  }
+  if (ct.includes('application/json')) {
+    return next();
+  }
+  return res.status(415).json({
+    error: 'Use Content-Type application/json con { "file_base64": "..." } o multipart/form-data con campo file.',
+  });
+}
+
+router.post('/pdf-texto-embebido', authenticateToken, parsePdfBody, extraerPdfTextoEmbebido);
 
 module.exports = router;

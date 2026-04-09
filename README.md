@@ -41,11 +41,6 @@ JWT_EXPIRES_IN=7d
 
 # CORS Configuration
 CORS_ORIGIN=http://localhost:8081
-
-# OCR Python microservice (opcional; si no se define, usa OCR local actual)
-# OCR_PY_SERVICE_URL=http://localhost:8001
-# OCR_PY_API_KEY=tu_clave_segura
-# OCR_PY_TIMEOUT_MS=180000
 ```
 
 **Nota:** Si tu MySQL no tiene contraseña, deja `DB_PASSWORD` vacío. Si tiene contraseña, escríbela sin comillas.

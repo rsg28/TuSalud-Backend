@@ -16,8 +16,8 @@ app.use(cors({
     'Accept-Language',
   ],
 }));
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.use(express.json({ limit: '30mb' }));
+app.use(express.urlencoded({ extended: true, limit: '30mb' }));
 
 // Test route
 app.get('/', (req, res) => {
@@ -42,8 +42,7 @@ app.use('/api/solicitudes-agregar-examenes', require('./routes/solicitudesAgrega
 app.use('/api/precios', require('./routes/preciosEmpresaRoutes'));
 app.use('/api/emo-perfiles', require('./routes/emoPerfilesRoutes'));
 app.use('/api/reniec', require('./routes/reniecRoutes'));
-app.use('/api/import', require('./routes/importEmpleadosPdfRoutes'));
-app.use('/api/import', require('./routes/importDocumentoEmpleadosRoutes'));
+app.use('/api/import', require('./routes/pdfTextoEmbebidoRoutes'));
 
 // 404 handler
 app.use((req, res) => {
