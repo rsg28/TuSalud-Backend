@@ -24,12 +24,35 @@ function sniffRasterImage(buf) {
   return null;
 }
 
-let tesseractModulePromise = null;
-function loadTesseract() {
-  if (!tesseractModulePromise) {
-    tesseractModulePromise = Promise.resolve().then(() => require('tesseract.js'));
+let tesseractJs = null;
+/** @type {Error|null} */
+let tesseractLoadError = null;
+
+/**
+ * Carga tesseract.js una vez. Si falta en el servidor (npm install no ejecutado), error explícito.
+ */
+function getTesseractJs() {
+  if (tesseractLoadError) throw tesseractLoadError;
+  if (tesseractJs) return tesseractJs;
+  try {
+    tesseractJs = require('tesseract.js');
+    return tesseractJs;
+  } catch (e) {
+    const msg = String(e?.message || e);
+    const missing =
+      e?.code === 'MODULE_NOT_FOUND' && (msg.includes('tesseract.js') || msg.includes("Cannot find module 'tesseract"));
+    if (missing) {
+      tesseractLoadError = Object.assign(
+        new Error(
+          'En el servidor falta el paquete tesseract.js. En la carpeta del backend (p. ej. TuSalud-Backend): git pull, luego npm ci o npm install, y reinicie Node. El PDF con texto embebido sigue funcionando sin esto.'
+        ),
+        { code: 'OCR_NOT_INSTALLED', statusCode: 503 }
+      );
+    } else {
+      tesseractLoadError = e;
+    }
+    throw tesseractLoadError;
   }
-  return tesseractModulePromise;
 }
 
 /**
@@ -38,7 +61,7 @@ function loadTesseract() {
  * @param {Buffer} buffer
  */
 async function extraerTextoOcrImagen(buffer) {
-  const { createWorker } = await loadTesseract();
+  const { createWorker } = getTesseractJs();
   const worker = await createWorker('spa+eng');
   try {
     const {
@@ -102,6 +125,9 @@ async function extraerPdfTextoEmbebido(req, res) {
     });
   } catch (err) {
     console.error('[import documento texto]', err);
+    if (err && (err.code === 'OCR_NOT_INSTALLED' || err.statusCode === 503)) {
+      return res.status(503).json({ error: err.message || 'OCR no disponible en el servidor.' });
+    }
     const message = err.message || 'Error al leer el archivo';
     return res.status(500).json({ error: message });
   }
