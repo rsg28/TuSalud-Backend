@@ -10,18 +10,21 @@ const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: maxMb * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
-    const okMime = (file.mimetype || '').toLowerCase() === 'application/pdf';
+    const mime = (file.mimetype || '').toLowerCase();
     const name = (file.originalname || '').toLowerCase();
-    const okExt = name.endsWith('.pdf');
-    if (okMime || okExt) return cb(null, true);
-    cb(new Error('Solo se aceptan archivos PDF.'));
+    const okPdf = mime === 'application/pdf' || name.endsWith('.pdf');
+    const okImg =
+      /^image\/(jpeg|jpg|png|webp|gif)$/i.test(mime) ||
+      /\.(jpe?g|png|webp|gif)$/i.test(name);
+    if (okPdf || okImg) return cb(null, true);
+    cb(new Error('Solo se aceptan PDF o imagen (JPEG, PNG, WebP, GIF).'));
   },
 });
 
 function multerErrorHandler(err, req, res, next) {
   if (err instanceof multer.MulterError) {
     if (err.code === 'LIMIT_FILE_SIZE') {
-      return res.status(400).json({ error: `El PDF supera el tamaño máximo (${maxMb} MB).` });
+      return res.status(400).json({ error: `El archivo supera el tamaño máximo (${maxMb} MB).` });
     }
     return res.status(400).json({ error: err.message || 'Error al subir el archivo' });
   }
