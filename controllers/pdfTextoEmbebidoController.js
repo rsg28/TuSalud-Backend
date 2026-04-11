@@ -55,14 +55,46 @@ function getTesseractJs() {
   }
 }
 
+/** @type {typeof import('jimp') | null | undefined} undefined = aún no probado; null = no instalado */
+let jimpConstructorCache = undefined;
+
+/**
+ * jimp es dependencia en package.json; si falta en node_modules (deploy sin npm ci), se omite preprocesado.
+ * Un solo aviso por proceso para no llenar PM2.
+ */
+function getJimpConstructor() {
+  if (jimpConstructorCache !== undefined) {
+    return jimpConstructorCache;
+  }
+  try {
+    jimpConstructorCache = require('jimp');
+    return jimpConstructorCache;
+  } catch (e) {
+    const msg = String(e?.message || e);
+    const missing =
+      e?.code === 'MODULE_NOT_FOUND' && (/['"]jimp['"]/i.test(msg) || msg.includes("Cannot find module 'jimp"));
+    if (missing) {
+      console.warn(
+        '[ocr] Falta el paquete npm "jimp" (OCR sigue sin preprocesar imagen). En el servidor: cd TuSalud-Backend && git pull && npm ci && pm2 restart TuSalud-Backend'
+      );
+      jimpConstructorCache = null;
+      return null;
+    }
+    throw e;
+  }
+}
+
 /**
  * Escala de grises + contraste + ampliación para tablas escaneadas (mejora Tesseract en formularios).
  * @param {Buffer} buffer
  * @returns {Promise<Buffer>}
  */
 async function preprocessImagenParaOcr(buffer) {
+  const Jimp = getJimpConstructor();
+  if (!Jimp) {
+    return buffer;
+  }
   try {
-    const Jimp = require('jimp');
     const image = await Jimp.read(buffer);
     image.greyscale().contrast(0.2);
     const w = image.bitmap.width;
