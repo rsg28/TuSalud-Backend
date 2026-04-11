@@ -56,18 +56,42 @@ function getTesseractJs() {
 }
 
 /**
+ * Escala de grises + contraste + ampliación para tablas escaneadas (mejora Tesseract en formularios).
+ * @param {Buffer} buffer
+ * @returns {Promise<Buffer>}
+ */
+async function preprocessImagenParaOcr(buffer) {
+  try {
+    const Jimp = require('jimp');
+    const image = await Jimp.read(buffer);
+    image.greyscale().contrast(0.2);
+    const w = image.bitmap.width;
+    const target = 2400;
+    if (w > 0 && w < target) {
+      const factor = Math.min(3, Math.ceil(target / w));
+      if (factor > 1) image.scale(factor);
+    }
+    return image.getBufferAsync(Jimp.MIME_PNG);
+  } catch (e) {
+    console.warn('[ocr] preprocesado jimp omitido:', e?.message || e);
+    return buffer;
+  }
+}
+
+/**
  * OCR para JPG/PNG/WebP/GIF. Idiomas spa+eng.
- * PSM 6 = bloque uniforme (listas/tablas).
+ * PSM 4 = columna única / texto variable (tablas en imagen tras preprocesado).
  * @param {Buffer} buffer
  */
 async function extraerTextoOcrImagen(buffer) {
+  const proc = await preprocessImagenParaOcr(buffer);
   const { createWorker } = getTesseractJs();
   const worker = await createWorker('spa+eng');
   try {
     const {
       data: { text },
-    } = await worker.recognize(buffer, {
-      tessedit_pageseg_mode: 6,
+    } = await worker.recognize(proc, {
+      tessedit_pageseg_mode: 4,
     });
     return String(text || '').trim();
   } finally {
