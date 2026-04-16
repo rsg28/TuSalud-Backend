@@ -309,6 +309,39 @@ function stabilizeLeftColumns(tableCells) {
   return out;
 }
 
+/**
+ * Expande celdas fusionadas verticales (rowspan implícito) en columnas izquierdas:
+ * si una celda izquierda viene vacía pero la fila tiene subcategoría/datos, se rellena
+ * con el último valor visto en esa misma columna.
+ */
+function forwardFillLeftColumns(tableCells, leftCols = LEFT_COLS) {
+  if (!tableCells.length) return tableCells;
+  const out = tableCells.map((r) => r.slice());
+  const carry = Array.from({ length: leftCols }, () => '');
+
+  for (let r = 0; r < out.length; r++) {
+    const row = out[r];
+    for (let c = 0; c < leftCols; c++) {
+      const cur = normalizeCell(row[c]);
+      if (cur) {
+        carry[c] = cur;
+        // Cuando aparece un valor en un nivel, los niveles más profundos se reinician.
+        for (let k = c + 1; k < leftCols; k++) carry[k] = '';
+        continue;
+      }
+
+      const hasMeaningfulContext = row
+        .slice(c + 1)
+        .some((v) => normalizeCell(v).length > 0);
+
+      if (hasMeaningfulContext && carry[c]) {
+        row[c] = carry[c];
+      }
+    }
+  }
+  return out;
+}
+
 function clusterEdges(values, gap = EDGE_CLUSTER_GAP) {
   if (!values.length) return [];
   const s = [...values].sort((a, b) => a - b);
@@ -544,7 +577,8 @@ async function extractPerfilPdfTablesFromBuffer(buffer, options = {}) {
       const textBlocks = splitRowBlocksByVerticalGaps(textRows);
       const blocks = groupBorderRowsByTextBlocks(matrixByBorders, yLinesRefined, textBlocks);
       tables = blocks.map((celdas, i) => {
-        const cleaned = stabilizeLeftColumns(removeCompletelyEmptyRows(trimTrailingEmptyRows(celdas)));
+        const cleanedBase = stabilizeLeftColumns(removeCompletelyEmptyRows(trimTrailingEmptyRows(celdas)));
+        const cleaned = forwardFillLeftColumns(cleanedBase, LEFT_COLS);
         const hierarchy = buildLeftHierarchy(cleaned, LEFT_COLS);
         return {
           id: i + 1,
@@ -575,7 +609,8 @@ async function extractPerfilPdfTablesFromBuffer(buffer, options = {}) {
       const gridRows = gridifyRows(rows, rightCenters);
       const blocks = splitRowBlocksByVerticalGaps(gridRows);
       tables = blocks.map((b, i) => {
-        const celdas = stabilizeLeftColumns(removeCompletelyEmptyRows(trimTrailingEmptyRows(b.map((r) => r.cells))));
+        const base = stabilizeLeftColumns(removeCompletelyEmptyRows(trimTrailingEmptyRows(b.map((r) => r.cells))));
+        const celdas = forwardFillLeftColumns(base, LEFT_COLS);
         const hierarchy = buildLeftHierarchy(celdas, LEFT_COLS);
         return {
           id: i + 1,
