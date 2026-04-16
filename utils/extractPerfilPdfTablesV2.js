@@ -488,143 +488,12 @@ function alignLeftColumnsByStructure(tableCells, leftCols = LEFT_COLS) {
   return out;
 }
 
-function fillGroupByVerticalContinuity(tableCells, leftCols = LEFT_COLS) {
-  if (!tableCells.length) return tableCells;
-  const out = tableCells.map((r) => r.slice());
-  const groupCol = Math.max(0, leftCols - 2);
-  const detailCol = Math.max(0, leftCols - 1);
-  const isSectionLabel = (text) => {
-    const t = normalizeCell(text);
-    if (!t || t.length < 6) return false;
-    const letters = t.replace(/[^A-Za-zÁÉÍÓÚÑÜáéíóúñü]/g, '');
-    if (!letters) return false;
-    const upper = letters.replace(/[^A-ZÁÉÍÓÚÑÜ]/g, '').length;
-    return upper / letters.length >= 0.6;
-  };
-
-  let carry = '';
-  for (let r = 0; r < out.length; r++) {
-    const row = out[r];
-    const group = normalizeCell(row[groupCol]);
-    const detail = normalizeCell(row[detailCol]);
-    const hasRight = hasAnyRightMark(row, leftCols);
-
-    // Tras el último subítem numerado del bloque oftalmológico (4) … campimetría),
-    // no heredar "Oftalmológico Básico" a filas que en el PDF son hermanas, no hijas.
-    if (r > 0) {
-      const prevDet = normalizeCell(out[r - 1][detailCol]);
-      if (/^\s*4\)\s/i.test(prevDet) && /campimetr/i.test(prevDet) && /oftalmológico/i.test(carry)) {
-        carry = '';
-      }
-    }
-
-    if (group) {
-      carry = group;
-      continue;
-    }
-    if (!carry) continue;
-    if (!detail || !hasRight) continue;
-
-    // No cruzar hacia encabezados de sección en mayúsculas.
-    if (isSectionLabel(detail)) continue;
-    row[groupCol] = carry;
-  }
-
-  // Refuerzo: si el detalle es claramente otro examen de primer nivel, no dejar grupo oftalmológico heredado.
-  for (let r = 0; r < out.length; r++) {
-    const det = normalizeCell(out[r][detailCol]);
-    const g = normalizeCell(out[r][groupCol]);
-    if (!g || !/oftalmológico/i.test(g)) continue;
-    if (/musculoesqueletico/i.test(det) && !/oftalmológico/i.test(det)) {
-      out[r][groupCol] = '';
-    }
-  }
-
-  return out;
-}
-
 /**
- * Celda fusionada vertical muy ancha (ej. texto rotado "EXÁMENES GENERALES" en el PDF):
- * repetir la etiqueta en la columna más izquierda (col 0) en todo el rango de filas que cubre,
- * no solo donde cayó el texto. El rango se infiere por continuidad con filas de datos y
- * cortes antes de Anexo / después de PRECIO.
+ * La agrupación por filas debe salir de las celdas delimitadas por bordes, no de texto fijo.
+ * forwardFillLeftColumns ya cubre rowspan vertical cuando la celda viene vacía en el PDF.
  */
-function applyMajorVerticalSectionLabel(tableCells, leftCols = LEFT_COLS) {
-  if (!tableCells.length || leftCols < 2) return tableCells;
-  const out = tableCells.map((r) => r.slice());
-  const majorCol = 0;
-  const groupCol = Math.max(0, leftCols - 2);
-  const detailCol = Math.max(0, leftCols - 1);
-
-  const MAJOR_RE = /EXÁMENES\s+GENERALES/i;
-  let firstWithText = -1;
-  for (let r = 0; r < out.length; r++) {
-    const leftJoined = out[r]
-      .slice(0, leftCols)
-      .map(normalizeCell)
-      .join(' ');
-    if (MAJOR_RE.test(leftJoined)) {
-      firstWithText = r;
-      break;
-    }
-  }
-  if (firstWithText < 0) return out;
-
-  const label = 'EXÁMENES GENERALES';
-
-  // Inicio del rowspan: primera fila de datos del bloque principal (Anexo 16 Evaluación clínica en el PDF).
-  let start = -1;
-  for (let r = 0; r < out.length; r++) {
-    const det = normalizeCell(out[r][detailCol]);
-    if (/anexo\s+16/i.test(det) && /evaluación\s+clínica/i.test(det)) {
-      start = r;
-      break;
-    }
-  }
-  if (start < 0) {
-    start = firstWithText;
-    while (start > 0) {
-      const prev = out[start - 1];
-      if (!hasAnyRightMark(prev, leftCols)) break;
-      const det = normalizeCell(prev[detailCol]);
-      if (/^anexo\s+16/i.test(det)) start -= 1;
-      else break;
-    }
-  }
-
-  // Extender hacia abajo hasta la fila anterior a PRECIO SIN IGV (no incluye precios).
-  let end = out.length - 1;
-  for (let r = 0; r < out.length; r++) {
-    const det = normalizeCell(out[r][detailCol]);
-    if (/^precio\s+sin\s+igv$/i.test(det)) {
-      end = r - 1;
-      break;
-    }
-  }
-  if (end < start) end = start;
-
-  for (let r = start; r <= end; r++) {
-    out[r][majorCol] = label;
-  }
-
-  // Evitar duplicar la misma etiqueta en col de grupo cuando ya está en col 0.
-  for (let r = start; r <= end; r++) {
-    const g = normalizeCell(out[r][groupCol]);
-    if (MAJOR_RE.test(g) && normalizeCell(out[r][detailCol])) {
-      out[r][groupCol] = '';
-    }
-  }
-
-  // Fila de precio: no forma parte del rowspan de EXÁMENES GENERALES.
-  for (let r = 0; r < out.length; r++) {
-    const det = normalizeCell(out[r][detailCol]);
-    if (!/^precio\s+sin\s+igv$/i.test(det)) continue;
-    out[r][majorCol] = '';
-    const g = normalizeCell(out[r][groupCol]);
-    if (MAJOR_RE.test(g)) out[r][groupCol] = '';
-  }
-
-  return out;
+function fillGroupByVerticalContinuity(tableCells, leftCols = LEFT_COLS) {
+  return tableCells.map((r) => r.slice());
 }
 
 function countNonEmpty(arr) {
@@ -838,6 +707,16 @@ function tryBuildGridFromRectangles(rects) {
     xEdges.push(r.x1, r.x2);
     yEdges.push(r.y1, r.y2);
   }
+  // Bordes dibujados como rectángulos muy delgados (líneas horizontales/verticales)
+  for (const r of rects) {
+    if (r.w < 4 && r.h < 4) continue;
+    const horiz = r.w >= 18 && r.h <= 7;
+    const vert = r.h >= 18 && r.w <= 7;
+    if (horiz || vert) {
+      xEdges.push(r.x1, r.x2);
+      yEdges.push(r.y1, r.y2);
+    }
+  }
   const xClusters = clusterEdges(xEdges).filter((c) => c.hits >= EDGE_MIN_HITS_X).sort((a, b) => a.value - b.value);
   const yClusters = clusterEdges(yEdges).filter((c) => c.hits >= EDGE_MIN_HITS_Y).sort((a, b) => b.value - a.value);
   if (xClusters.length < 4) return null;
@@ -887,19 +766,52 @@ function assignRowBucketsToXGrid(rowBuckets, xLines) {
   });
 }
 
+/**
+ * Fila = banda horizontal delimitada por yLines (bordes); columna = máximo solape en X con esa banda.
+ * Si el baseline no cae en ninguna banda, se usa la fila con mayor solape vertical token–celda.
+ */
 function assignItemsToGridCells(items, xLines, yLines) {
-  const rows = Array.from({ length: yLines.length - 1 }, () =>
-    Array.from({ length: xLines.length - 1 }, () => [])
-  );
+  const sortedX = [...xLines].sort((a, b) => a - b);
+  const sortedY = [...yLines].sort((a, b) => b - a);
+  const nr = sortedY.length - 1;
+  const rows = Array.from({ length: nr }, () => Array.from({ length: sortedX.length - 1 }, () => []));
+
+  const rowByVerticalOverlap = (it) => {
+    const tokenYTop = it.y;
+    const tokenYBottom = it.y - Math.max(3, it.h || 0);
+    let bestR = -1;
+    let bestH = 0;
+    for (let j = 0; j < nr; j++) {
+      const yTop = sortedY[j];
+      const yBottom = sortedY[j + 1];
+      const interH = Math.max(0, Math.min(tokenYTop, yTop) - Math.max(tokenYBottom, yBottom));
+      if (interH > bestH) {
+        bestH = interH;
+        bestR = j;
+      }
+    }
+    return bestR;
+  };
+
   for (const it of items) {
     const t = normalizeCell(it.str);
     if (!t) continue;
-    // Columna por máximo solape horizontal con celdas delimitadas por bordes.
+
+    let r = -1;
+    for (let j = 0; j < sortedY.length - 1; j++) {
+      if (it.y <= sortedY[j] && it.y > sortedY[j + 1]) {
+        r = j;
+        break;
+      }
+    }
+    if (r < 0) r = rowByVerticalOverlap(it);
+    if (r < 0) continue;
+
     let c = -1;
     let bestW = 0;
-    for (let i = 0; i < xLines.length - 1; i++) {
-      const x1 = xLines[i];
-      const x2 = xLines[i + 1];
+    for (let i = 0; i < sortedX.length - 1; i++) {
+      const x1 = sortedX[i];
+      const x2 = sortedX[i + 1];
       const interW = Math.max(0, Math.min(it.x2, x2) - Math.max(it.x, x1));
       if (interW > bestW) {
         bestW = interW;
@@ -907,26 +819,17 @@ function assignItemsToGridCells(items, xLines, yLines) {
       }
     }
     if (c < 0 || bestW <= 0) {
-      // fallback por centro dentro de borde de celda
-      c = -1;
-      for (let i = 0; i < xLines.length - 1; i++) {
-        if (it.xmid >= xLines[i] && it.xmid < xLines[i + 1]) {
+      for (let i = 0; i < sortedX.length - 1; i++) {
+        if (it.xmid >= sortedX[i] && it.xmid < sortedX[i + 1]) {
           c = i;
           break;
         }
       }
     }
     if (c < 0) continue;
-    let r = -1;
-    for (let j = 0; j < yLines.length - 1; j++) {
-      if (it.y <= yLines[j] && it.y > yLines[j + 1]) {
-        r = j;
-        break;
-      }
-    }
-    if (r < 0) continue;
     rows[r][c].push(it);
   }
+
   return rows.map((row) =>
     row.map((cellItems) => {
       if (!cellItems.length) return '';
@@ -1034,8 +937,7 @@ async function extractPerfilPdfTablesFromBuffer(buffer, options = {}) {
         const collapsed = collapseStandaloneLargeRows(normalizedSubrows, LEFT_COLS);
         const sectioned = propagateSectionHeaders(collapsed, LEFT_COLS);
         const aligned = alignLeftColumnsByStructure(sectioned, LEFT_COLS);
-        const filledGroup = fillGroupByVerticalContinuity(aligned, LEFT_COLS);
-        const cleaned = applyMajorVerticalSectionLabel(filledGroup, LEFT_COLS);
+        const cleaned = fillGroupByVerticalContinuity(aligned, LEFT_COLS);
         const hierarchy = buildLeftHierarchy(cleaned, LEFT_COLS);
         return {
           id: i + 1,
@@ -1073,8 +975,7 @@ async function extractPerfilPdfTablesFromBuffer(buffer, options = {}) {
         const collapsed = collapseStandaloneLargeRows(normalizedSubrows, LEFT_COLS);
         const sectioned = propagateSectionHeaders(collapsed, LEFT_COLS);
         const aligned = alignLeftColumnsByStructure(sectioned, LEFT_COLS);
-        const filledGroup = fillGroupByVerticalContinuity(aligned, LEFT_COLS);
-        const celdas = applyMajorVerticalSectionLabel(filledGroup, LEFT_COLS);
+        const celdas = fillGroupByVerticalContinuity(aligned, LEFT_COLS);
         const hierarchy = buildLeftHierarchy(celdas, LEFT_COLS);
         return {
           id: i + 1,
