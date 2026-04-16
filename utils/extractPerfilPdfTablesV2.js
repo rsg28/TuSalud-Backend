@@ -253,6 +253,11 @@ function hasAnyRightMark(row, leftCols = LEFT_COLS) {
   return rightMarksVector(row, leftCols).some((v) => v.length > 0);
 }
 
+function rowHasSelectionData(row, leftCols = LEFT_COLS) {
+  const right = row.slice(leftCols).map((v) => normalizeCell(v));
+  return right.some((v) => /^x$/i.test(v) || /^s\/\s*\d/i.test(v));
+}
+
 function mergeMarksVectors(vectors) {
   if (!vectors.length) return [];
   const cols = vectors[0].length;
@@ -438,6 +443,82 @@ function forwardFillLeftColumns(tableCells, leftCols = LEFT_COLS) {
       }
     }
   }
+  return out;
+}
+
+function expandMergedHeadersAndSpans(tableCells, leftCols = LEFT_COLS) {
+  if (!tableCells.length) return tableCells;
+  const colCount = Math.max(...tableCells.map((r) => r.length));
+  const out = tableCells.map((r) => {
+    const row = r.slice();
+    while (row.length < colCount) row.push('');
+    return row;
+  });
+
+  const firstDataRow = out.findIndex((row) => rowHasSelectionData(row, leftCols));
+  const headerEnd = firstDataRow > 0 ? firstDataRow : 0;
+  if (headerEnd <= 0) return out;
+
+  // 1) Rowspan en cabeceras: solo en bloque descriptivo izquierdo para no contaminar columnas de grupos.
+  const rowspanCols = Math.min(colCount, Math.max(3, leftCols));
+  for (let c = 0; c < rowspanCols; c++) {
+    let carry = '';
+    for (let r = 0; r < headerEnd; r++) {
+      const cur = normalizeCell(out[r][c]);
+      if (cur) {
+        carry = cur;
+        continue;
+      }
+      if (carry) out[r][c] = carry;
+    }
+  }
+
+  // 2) Colspan en cabeceras: repetir a la derecha hasta próximo valor explícito.
+  for (let r = 0; r < headerEnd; r++) {
+    let c = 0;
+    while (c < colCount) {
+      const val = normalizeCell(out[r][c]);
+      if (!val) {
+        c += 1;
+        continue;
+      }
+      let next = c + 1;
+      while (next < colCount && !normalizeCell(out[r][next])) next += 1;
+      for (let k = c + 1; k < next; k++) out[r][k] = val;
+      c = next;
+    }
+  }
+
+  // 3) Si una cabecera tiene un solo bloque grande, expandir al rango estructural
+  // detectado por la fila más completa (normalmente GRUPO OCUPACIONAL).
+  const densestRow = out.reduce(
+    (best, row, idx) => {
+      const score = countNonEmpty(row);
+      return score > best.score ? { idx, score } : best;
+    },
+    { idx: 0, score: -1 }
+  ).idx;
+  const structureCols = [];
+  for (let c = 0; c < colCount; c++) {
+    if (normalizeCell(out[densestRow][c])) structureCols.push(c);
+  }
+  if (structureCols.length >= 2) {
+    const from = structureCols[0];
+    const to = structureCols[structureCols.length - 1];
+    for (let r = 0; r < headerEnd; r++) {
+      const filled = [];
+      for (let c = 0; c < colCount; c++) if (normalizeCell(out[r][c])) filled.push(c);
+      if (filled.length !== 1) continue;
+      const only = filled[0];
+      const val = normalizeCell(out[r][only]);
+      if (!val) continue;
+      if (only < from || only > to) continue;
+      for (let c = from; c <= to; c++) {
+        if (!normalizeCell(out[r][c])) out[r][c] = val;
+      }
+    }
+  }
+
   return out;
 }
 
@@ -663,7 +744,8 @@ async function extractPerfilPdfTablesFromBuffer(buffer, options = {}) {
       tables = blocks.map((celdas, i) => {
         const cleanedBase = stabilizeLeftColumns(removeCompletelyEmptyRows(trimTrailingEmptyRows(celdas)));
         const cleanedFilled = forwardFillLeftColumns(cleanedBase, LEFT_COLS);
-        const cleaned = normalizeMergedSubrows(cleanedFilled, LEFT_COLS);
+        const cleanedMergedHeaders = expandMergedHeadersAndSpans(cleanedFilled, LEFT_COLS);
+        const cleaned = normalizeMergedSubrows(cleanedMergedHeaders, LEFT_COLS);
         const hierarchy = buildLeftHierarchy(cleaned, LEFT_COLS);
         return {
           id: i + 1,
@@ -696,7 +778,8 @@ async function extractPerfilPdfTablesFromBuffer(buffer, options = {}) {
       tables = blocks.map((b, i) => {
         const base = stabilizeLeftColumns(removeCompletelyEmptyRows(trimTrailingEmptyRows(b.map((r) => r.cells))));
         const filled = forwardFillLeftColumns(base, LEFT_COLS);
-        const celdas = normalizeMergedSubrows(filled, LEFT_COLS);
+        const mergedHeaders = expandMergedHeadersAndSpans(filled, LEFT_COLS);
+        const celdas = normalizeMergedSubrows(mergedHeaders, LEFT_COLS);
         const hierarchy = buildLeftHierarchy(celdas, LEFT_COLS);
         return {
           id: i + 1,
