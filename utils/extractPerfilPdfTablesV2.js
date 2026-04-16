@@ -401,6 +401,14 @@ function propagateSectionHeaders(tableCells, leftCols = LEFT_COLS) {
   const sectionCol = Math.max(0, leftCols - 2);
   const itemCol = Math.max(0, leftCols - 1);
   let activeSection = '';
+  const isSectionLabel = (text) => {
+    const t = normalizeCell(text);
+    if (!t || t.length < 6) return false;
+    const letters = t.replace(/[^A-Za-zÁÉÍÓÚÑÜáéíóúñü]/g, '');
+    if (!letters) return false;
+    const upper = letters.replace(/[^A-ZÁÉÍÓÚÑÜ]/g, '').length;
+    return upper / letters.length >= 0.6;
+  };
 
   for (let r = 0; r < out.length; r++) {
     const row = out[r];
@@ -408,7 +416,7 @@ function propagateSectionHeaders(tableCells, leftCols = LEFT_COLS) {
     const item = normalizeCell(row[itemCol]);
     const hasRight = hasAnyRightMark(row, leftCols);
 
-    if (sec && item && hasRight) {
+    if (sec && item && hasRight && isSectionLabel(sec)) {
       // Fila que trae encabezado de bloque + primer ítem.
       activeSection = sec;
       continue;
@@ -430,6 +438,11 @@ function propagateSectionHeaders(tableCells, leftCols = LEFT_COLS) {
 
     // Si viene vacío el encabezado de sección, lo repetimos (rowspan vertical).
     if (!sec && item) {
+      row[sectionCol] = activeSection;
+    }
+
+    // En filas de precio/cierre, preservar el encabezado de sección activo.
+    if (item && /^precio\s+sin\s+igv$/i.test(item)) {
       row[sectionCol] = activeSection;
     }
   }
