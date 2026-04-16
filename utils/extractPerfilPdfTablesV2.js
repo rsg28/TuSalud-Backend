@@ -15,6 +15,20 @@ function normalizeCell(s) {
   return String(s || '').replace(/\r/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
+function foldForCompare(s) {
+  return String(s || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toUpperCase();
+}
+
+function isExamenesGeneralesLabel(text) {
+  const f = foldForCompare(text);
+  return f === 'EXAMENES GENERALES' || f.startsWith('EXAMENES GENERALES ');
+}
+
 function median(nums) {
   if (!nums.length) return 0;
   const s = [...nums].sort((a, b) => a - b);
@@ -417,33 +431,35 @@ function propagateSectionHeaders(tableCells, leftCols = LEFT_COLS) {
     const hasRight = hasAnyRightMark(row, leftCols);
 
     if (sec && item && hasRight && isSectionLabel(sec)) {
-      // Fila que trae encabezado de bloque + primer ítem.
+      if (isExamenesGeneralesLabel(sec)) {
+        activeSection = '';
+        row[sectionCol] = '';
+        continue;
+      }
       activeSection = sec;
       continue;
     }
 
     if (!activeSection) continue;
-    // Corta bloque al llegar a una fila no-dato.
     if (!hasRight) {
       activeSection = '';
       continue;
     }
 
-    // Si el ítem cayó en columna de sección, lo movemos a la columna de detalle y mantenemos sección.
     if (sec && !item) {
       row[itemCol] = sec;
-      row[sectionCol] = activeSection;
+      if (!isExamenesGeneralesLabel(activeSection)) row[sectionCol] = activeSection;
+      else row[sectionCol] = '';
       continue;
     }
 
-    // Si viene vacío el encabezado de sección, lo repetimos (rowspan vertical).
     if (!sec && item) {
-      row[sectionCol] = activeSection;
+      if (isExamenesGeneralesLabel(activeSection)) row[sectionCol] = '';
+      else row[sectionCol] = activeSection;
     }
 
-    // En filas de precio/cierre, preservar el encabezado de sección activo.
     if (item && /^precio\s+sin\s+igv$/i.test(item)) {
-      row[sectionCol] = activeSection;
+      if (!isExamenesGeneralesLabel(activeSection)) row[sectionCol] = activeSection;
     }
   }
 
@@ -497,19 +513,23 @@ function fillGroupByVerticalContinuity(tableCells, leftCols = LEFT_COLS) {
 }
 
 /**
- * Etiqueta lateral "EXÁMENES GENERALES" (celda fusionada / texto rotado mal asignado):
- * no aporta fila de examen; se elimina del contenido de la celda para no contaminar columnas.
+ * Etiqueta lateral "EXÁMENES GENERALES": quitar de todas las celdas (incl. restos del PDF).
  */
 function stripExamenesGeneralesDecoration(tableCells) {
-  const reOnly = /^EX[AÁ]MENES\s+GENERALES$/i;
-  const rePart = /\bEX[AÁ]MENES\s+GENERALES\b/gi;
+  const re = /EX[ÁA]MENES\s+GENERALES/gi;
   return tableCells.map((row) =>
     row.map((cell) => {
-      const s = normalizeCell(cell);
+      let s = normalizeCell(cell);
       if (!s) return '';
-      if (reOnly.test(s)) return '';
-      const stripped = s.replace(rePart, ' ').replace(/\s+/g, ' ').trim();
-      return normalizeCell(stripped);
+      for (let i = 0; i < 6; i++) {
+        const f = foldForCompare(s);
+        if (f === 'EXAMENES GENERALES') return '';
+        if (!f.includes('EXAMENES GENERALES')) return s;
+        const next = normalizeCell(s.replace(re, ' ').replace(/\s+/g, ' ').trim());
+        if (next === s) return s;
+        s = next;
+      }
+      return normalizeCell(s);
     })
   );
 }
