@@ -1,2 +1,3 @@
-# Extracción de tablas PDF (extract_perfil_pdf_tables.py)
+# Opcional: solo si quieres ejecutar extract_perfil_pdf_tables.py en local con un venv.
+# El backend usa extracción en Node (pdfjs-dist); no hace falta Python en el servidor.
 pymupdf>=1.24.0
