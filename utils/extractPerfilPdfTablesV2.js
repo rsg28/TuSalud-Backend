@@ -272,6 +272,200 @@ function rowHasSelectionData(row, leftCols = LEFT_COLS) {
   return right.some((v) => /^x$/i.test(v) || /^s\/\s*\d/i.test(v));
 }
 
+/**
+ * Etiqueta corta de bloque (p. ej. GRUPO OCUPACIONAL): no confundir con una fila
+ * "solo sección" que debe seguir acogiendo subfilas con detalle en col2.
+ */
+function isLikelyGroupHeaderLabel(text) {
+  const t = normalizeCell(text);
+  if (!t || t.length > 52) return false;
+  const letters = t.replace(/[^A-Za-zÁÉÍÓÚÑÜáéíóúñü]/g, '');
+  if (!letters) return false;
+  const upper = letters.replace(/[^A-ZÁÉÍÓÚÑÜ]/g, '').length;
+  return upper / letters.length >= 0.82;
+}
+
+/**
+ * Cuando la fila anterior es cabecera (solo texto en la última columna del bloque izquierdo)
+ * o solo columna de grupo sin detalle (y no parece etiqueta de grupo en mayúsculas para
+ * subfilas), el detalle de esta fila suele estar en el PDF alineado con la columna de grupo;
+ * promoverlo evita que forwardFill deje el texto una columna a la derecha.
+ */
+function promoteDetailWhenPrevHeaderOrSectionOnly(tableCells, leftCols = LEFT_COLS) {
+  if (!tableCells.length) return tableCells;
+  const out = tableCells.map((r) => r.slice());
+  const sectionCol = Math.max(0, leftCols - 2);
+  const detailCol = Math.max(0, leftCols - 1);
+
+  const isPrevHeaderOnlyRightLeftColumn = (prev) => {
+    let n = 0;
+    let onlyIdx = -1;
+    for (let c = 0; c < leftCols; c++) {
+      if (normalizeCell(prev[c])) {
+        n += 1;
+        onlyIdx = c;
+      }
+    }
+    return n === 1 && onlyIdx === detailCol && !normalizeCell(prev[sectionCol]);
+  };
+
+  for (let r = 1; r < out.length; r++) {
+    const row = out[r];
+    if (!hasAnyRightMark(row, leftCols)) continue;
+    if (normalizeCell(row[sectionCol]) || !normalizeCell(row[detailCol])) continue;
+
+    const prev = out[r - 1];
+    const prevSec = normalizeCell(prev[sectionCol]);
+    const prevDet = normalizeCell(prev[detailCol]);
+
+    const prevSectionOnly = prevSec && !prevDet && !isLikelyGroupHeaderLabel(prevSec);
+    const prevHeaderOnlyRight = isPrevHeaderOnlyRightLeftColumn(prev);
+
+    if (prevSectionOnly || prevHeaderOnlyRight) {
+      row[sectionCol] = row[detailCol];
+      row[detailCol] = '';
+    }
+  }
+  return out;
+}
+
+/**
+ * Tras expandMergedHeaders: cabecera con la misma etiqueta en columna sección y detalle.
+ * La fila siguiente no debe repetir esa etiqueta en sección y dejar el texto nuevo solo en detalle.
+ */
+function dedentDetailUnderMergedDuplicateHeader(tableCells, leftCols = LEFT_COLS) {
+  if (!tableCells.length) return tableCells;
+  const out = tableCells.map((r) => r.slice());
+  const sectionCol = Math.max(0, leftCols - 2);
+  const detailCol = Math.max(0, leftCols - 1);
+  for (let r = 1; r < out.length; r++) {
+    const prev = out[r - 1];
+    const prevSec = normalizeCell(prev[sectionCol]);
+    const prevDet = normalizeCell(prev[detailCol]);
+    if (!prevSec || prevSec !== prevDet) continue;
+    const row = out[r];
+    if (!hasAnyRightMark(row, leftCols)) continue;
+    const det = normalizeCell(row[detailCol]);
+    if (!det) continue;
+    const sec = normalizeCell(row[sectionCol]);
+    if (sec === prevSec && det !== prevSec) {
+      row[sectionCol] = det;
+      row[detailCol] = '';
+    }
+  }
+  return out;
+}
+
+/**
+ * Cabecera de dos columnas distintas en el bloque izquierdo (ej. grupo en col1 y otra etiqueta
+ * de cabecera en col2): la fila siguiente con el mismo grupo repetido y texto nuevo en detalle
+ * debe alinear el texto en la columna de sección, no a la derecha de la etiqueta de grupo.
+ */
+function dedentDetailAfterTwoColumnGroupHeaderRow(tableCells, leftCols = LEFT_COLS) {
+  if (!tableCells.length) return tableCells;
+  const out = tableCells.map((r) => r.slice());
+  const sectionCol = Math.max(0, leftCols - 2);
+  const detailCol = Math.max(0, leftCols - 1);
+  for (let r = 1; r < out.length; r++) {
+    const prev = out[r - 1];
+    const prevSec = normalizeCell(prev[sectionCol]);
+    const prevDet = normalizeCell(prev[detailCol]);
+    if (!prevSec || !prevDet) continue;
+    if (prevSec === prevDet) continue;
+    if (!isLikelyGroupHeaderLabel(prevSec)) continue;
+    if (!isLikelyGroupHeaderLabel(prevDet)) continue;
+
+    const row = out[r];
+    if (!hasAnyRightMark(row, leftCols)) continue;
+    const sec = normalizeCell(row[sectionCol]);
+    const det = normalizeCell(row[detailCol]);
+    if (!det) continue;
+    if (sec !== prevSec) continue;
+    if (det === prevSec) continue;
+
+    row[sectionCol] = det;
+    row[detailCol] = '';
+  }
+  return out;
+}
+
+const MIN_PREV_SECTION_LEN_FOR_GROUP_DEDENT = 18;
+const ANNEX_SHORT_LINE_MAX = 18;
+
+/**
+ * Tras dedent de líneas cortas tipo anexo en col. sección, la fila siguiente puede quedar
+ * con la subcategoría (p. ej. oftalmológico) solo en col. sección y detalle vacío; reponer
+ * la etiqueta de grupo activa y mover el texto a la columna de detalle.
+ */
+function repairSubcategoryRowAfterShortSectionOnlyPrev(tableCells, leftCols = LEFT_COLS) {
+  if (!tableCells.length) return tableCells;
+  const out = tableCells.map((r) => r.slice());
+  const sectionCol = Math.max(0, leftCols - 2);
+  const detailCol = Math.max(0, leftCols - 1);
+  let carryGroup = '';
+  for (let r = 0; r < out.length; r++) {
+    const row = out[r];
+    const sec = normalizeCell(row[sectionCol]);
+    const det = normalizeCell(row[detailCol]);
+    if (sec && isLikelyGroupHeaderLabel(sec)) {
+      carryGroup = sec;
+      continue;
+    }
+    if (!hasAnyRightMark(row, leftCols)) continue;
+    if (r < 1) continue;
+    const prev = out[r - 1];
+    const prevSec = normalizeCell(prev[sectionCol]);
+    const prevDet = normalizeCell(prev[detailCol]);
+    const prevSectionOnly = prevSec && !prevDet;
+
+    const needRepair =
+      sec &&
+      !det &&
+      carryGroup &&
+      !isLikelyGroupHeaderLabel(sec) &&
+      prevSectionOnly &&
+      prevSec.length <= ANNEX_SHORT_LINE_MAX;
+
+    if (needRepair) {
+      row[detailCol] = row[sectionCol];
+      row[sectionCol] = carryGroup;
+    }
+  }
+  return out;
+}
+
+/**
+ * Fila anterior solo en columna sección (sin detalle), con texto suficientemente largo
+ * (p. ej. línea de anexo). Fila actual repite etiqueta de grupo en mayúsculas + texto nuevo:
+ * subir el detalle a la columna de sección para no quedar una columna a la derecha.
+ */
+function dedentDetailUnderLongSectionOnlyPrev(tableCells, leftCols = LEFT_COLS) {
+  if (!tableCells.length) return tableCells;
+  const out = tableCells.map((r) => r.slice());
+  const sectionCol = Math.max(0, leftCols - 2);
+  const detailCol = Math.max(0, leftCols - 1);
+  for (let r = 1; r < out.length; r++) {
+    const prev = out[r - 1];
+    const prevSec = normalizeCell(prev[sectionCol]);
+    const prevDet = normalizeCell(prev[detailCol]);
+    if (!prevSec || prevDet) continue;
+    if (isLikelyGroupHeaderLabel(prevSec)) continue;
+    if (prevSec.length < MIN_PREV_SECTION_LEN_FOR_GROUP_DEDENT) continue;
+
+    const row = out[r];
+    if (!hasAnyRightMark(row, leftCols)) continue;
+    const sec = normalizeCell(row[sectionCol]);
+    const det = normalizeCell(row[detailCol]);
+    if (!sec || !det) continue;
+    if (det === prevSec) continue;
+    if (!isLikelyGroupHeaderLabel(sec)) continue;
+
+    row[sectionCol] = det;
+    row[detailCol] = '';
+  }
+  return out;
+}
+
 function mergeMarksVectors(vectors) {
   if (!vectors.length) return [];
   const cols = vectors[0].length;
@@ -446,7 +640,9 @@ function propagateSectionHeaders(tableCells, leftCols = LEFT_COLS) {
       continue;
     }
 
-    if (sec && !item) {
+    // Solo filas cuya celda de sección es realmente una etiqueta de bloque (mayúsculas, etc.);
+    // líneas de contenido largas solo en col. sección (p. ej. anexo) no deben sustituirse por activeSection.
+    if (sec && !item && isSectionLabel(sec)) {
       row[itemCol] = sec;
       if (!isExamenesGeneralesLabel(activeSection)) row[sectionCol] = activeSection;
       else row[sectionCol] = '';
@@ -1042,9 +1238,14 @@ async function extractPerfilPdfTablesFromBuffer(buffer, options = {}) {
       const blocks = groupBorderRowsByTextBlocks(matrixByBorders, yLinesFromBorders, textBlocks);
       tables = blocks.map((celdas, i) => {
         const cleanedBase = stabilizeLeftColumns(removeCompletelyEmptyRows(trimTrailingEmptyRows(celdas)));
-        const cleanedFilled = forwardFillLeftColumns(cleanedBase, LEFT_COLS);
+        const promoted = promoteDetailWhenPrevHeaderOrSectionOnly(cleanedBase, LEFT_COLS);
+        const cleanedFilled = forwardFillLeftColumns(promoted, LEFT_COLS);
         const cleanedMergedHeaders = expandMergedHeadersAndSpans(cleanedFilled, LEFT_COLS);
-        const normalizedSubrows = normalizeMergedSubrows(cleanedMergedHeaders, LEFT_COLS);
+        const dedentMerged = dedentDetailUnderMergedDuplicateHeader(cleanedMergedHeaders, LEFT_COLS);
+        const dedentTwoCol = dedentDetailAfterTwoColumnGroupHeaderRow(dedentMerged, LEFT_COLS);
+        const dedentLong = dedentDetailUnderLongSectionOnlyPrev(dedentTwoCol, LEFT_COLS);
+        const repairedSub = repairSubcategoryRowAfterShortSectionOnlyPrev(dedentLong, LEFT_COLS);
+        const normalizedSubrows = normalizeMergedSubrows(repairedSub, LEFT_COLS);
         const collapsed = collapseStandaloneLargeRows(normalizedSubrows, LEFT_COLS);
         const sectioned = propagateSectionHeaders(collapsed, LEFT_COLS);
         const aligned = alignLeftColumnsByStructure(sectioned, LEFT_COLS);
@@ -1083,9 +1284,14 @@ async function extractPerfilPdfTablesFromBuffer(buffer, options = {}) {
       const blocks = splitRowBlocksByVerticalGaps(gridRows);
       tables = blocks.map((b, i) => {
         const base = stabilizeLeftColumns(removeCompletelyEmptyRows(trimTrailingEmptyRows(b.map((r) => r.cells))));
-        const filled = forwardFillLeftColumns(base, LEFT_COLS);
+        const promoted = promoteDetailWhenPrevHeaderOrSectionOnly(base, LEFT_COLS);
+        const filled = forwardFillLeftColumns(promoted, LEFT_COLS);
         const mergedHeaders = expandMergedHeadersAndSpans(filled, LEFT_COLS);
-        const normalizedSubrows = normalizeMergedSubrows(mergedHeaders, LEFT_COLS);
+        const dedentMerged = dedentDetailUnderMergedDuplicateHeader(mergedHeaders, LEFT_COLS);
+        const dedentTwoCol = dedentDetailAfterTwoColumnGroupHeaderRow(dedentMerged, LEFT_COLS);
+        const dedentLong = dedentDetailUnderLongSectionOnlyPrev(dedentTwoCol, LEFT_COLS);
+        const repairedSub = repairSubcategoryRowAfterShortSectionOnlyPrev(dedentLong, LEFT_COLS);
+        const normalizedSubrows = normalizeMergedSubrows(repairedSub, LEFT_COLS);
         const collapsed = collapseStandaloneLargeRows(normalizedSubrows, LEFT_COLS);
         const sectioned = propagateSectionHeaders(collapsed, LEFT_COLS);
         const aligned = alignLeftColumnsByStructure(sectioned, LEFT_COLS);
