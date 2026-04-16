@@ -583,6 +583,21 @@ function rebalanceSingleLeftCellToDominantColumn(tableCells, leftCols = LEFT_COL
   return out;
 }
 
+/**
+ * Fila de precios: en el PDF la etiqueta va en una celda; texto sobrante a la izquierda
+ * de "PRECIO" (misma fila) no aporta y suele ser arrastre de la fila anterior.
+ */
+function clearLeftCellsBeforePrecioInRow(tableCells) {
+  const cellHasPrecio = (cell) => /\bprecio\b/i.test(normalizeCell(String(cell || '')));
+  return tableCells.map((row) => {
+    const colIdx = row.findIndex((cell) => cellHasPrecio(cell));
+    if (colIdx <= 0) return row.slice();
+    const out = row.slice();
+    for (let c = 0; c < colIdx; c++) out[c] = '';
+    return out;
+  });
+}
+
 function countNonEmpty(arr) {
   return arr.reduce((n, c) => n + (normalizeCell(c) ? 1 : 0), 0);
 }
@@ -1027,7 +1042,9 @@ async function extractPerfilPdfTablesFromBuffer(buffer, options = {}) {
         const stripped = stripExamenesGeneralesDecoration(
           fillGroupByVerticalContinuity(aligned, LEFT_COLS)
         );
-        const cleaned = rebalanceSingleLeftCellToDominantColumn(stripped, LEFT_COLS);
+        const cleaned = clearLeftCellsBeforePrecioInRow(
+          rebalanceSingleLeftCellToDominantColumn(stripped, LEFT_COLS)
+        );
         const hierarchy = buildLeftHierarchy(cleaned, LEFT_COLS);
         return {
           id: i + 1,
@@ -1066,7 +1083,9 @@ async function extractPerfilPdfTablesFromBuffer(buffer, options = {}) {
         const sectioned = propagateSectionHeaders(collapsed, LEFT_COLS);
         const aligned = alignLeftColumnsByStructure(sectioned, LEFT_COLS);
         const stripped = stripExamenesGeneralesDecoration(fillGroupByVerticalContinuity(aligned, LEFT_COLS));
-        const celdas = rebalanceSingleLeftCellToDominantColumn(stripped, LEFT_COLS);
+        const celdas = clearLeftCellsBeforePrecioInRow(
+          rebalanceSingleLeftCellToDominantColumn(stripped, LEFT_COLS)
+        );
         const hierarchy = buildLeftHierarchy(celdas, LEFT_COLS);
         return {
           id: i + 1,
