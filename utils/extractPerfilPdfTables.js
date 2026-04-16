@@ -1,3 +1,543 @@
+const pdfjsLib = require('pdfjs-dist/legacy/build/pdf.js');
+
+pdfjsLib.GlobalWorkerOptions.workerSrc = require.resolve('pdfjs-dist/legacy/build/pdf.worker.js');
+
+const ROW_Y_TOL = 4;
+const INLINE_MERGE_GAP = 2;
+const LEFT_COLS = 3;
+const RIGHT_CENTER_CLUSTER_GAP = 15;
+const MIN_RIGHT_CLUSTER_HITS = 3;
+
+function normalizeCell(s) {
+  return String(s || '').replace(/\r/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function median(nums) {
+  if (!nums.length) return 0;
+  const s = [...nums].sort((a, b) => a - b);
+  const mid = Math.floor(s.length / 2);
+  return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
+}
+
+function trimTrailingEmptyRows(matrix) {
+  const out = matrix.slice();
+  while (out.length && out[out.length - 1].every((c) => !normalizeCell(c))) out.pop();
+  return out;
+}
+
+function cluster1D(values, gap) {
+  const s = [...values].sort((a, b) => a - b);
+  const groups = [];
+  for (const v of s) {
+    const g = groups[groups.length - 1];
+    if (!g || v - g[g.length - 1] > gap) groups.push([v]);
+    else g.push(v);
+  }
+  return groups.map((g) => ({ center: g.reduce((a, b) => a + b, 0) / g.length, size: g.length }));
+}
+
+function nearestCenter(x, centers) {
+  let idx = 0;
+  let dist = Number.POSITIVE_INFINITY;
+  for (let i = 0; i < centers.length; i++) {
+    const d = Math.abs(x - centers[i]);
+    if (d < dist) {
+      dist = d;
+      idx = i;
+    }
+  }
+  return { idx, dist };
+}
+
+function parseItems(textContent) {
+  return (textContent.items || [])
+    .filter((it) => it.str && String(it.str).trim() !== '')
+    .map((it) => {
+      const m = it.transform || [];
+      const x = m[4] || 0;
+      const y = m[5] || 0;
+      const w = typeof it.width === 'number' ? it.width : Math.abs(m[0] || 0) * String(it.str).length * 0.5 || 5;
+      const str = String(it.str);
+      return { str, x, y, w, x2: x + w, xmid: x + w / 2 };
+    });
+}
+
+function bucketRows(items) {
+  const sorted = [...items].sort((a, b) => {
+    if (Math.abs(a.y - b.y) > ROW_Y_TOL) return b.y - a.y;
+    return a.x - b.x;
+  });
+  const buckets = [];
+  for (const it of sorted) {
+    let placed = false;
+    for (const row of buckets) {
+      if (Math.abs(it.y - row.y) <= ROW_Y_TOL) {
+        row.items.push(it);
+        row.sumY += it.y;
+        row.count += 1;
+        row.y = row.sumY / row.count;
+        placed = true;
+        break;
+      }
+    }
+    if (!placed) buckets.push({ y: it.y, sumY: it.y, count: 1, items: [it] });
+  }
+  for (const r of buckets) r.items.sort((a, b) => a.x - b.x);
+  buckets.sort((a, b) => b.y - a.y);
+  return buckets;
+}
+
+function inferRightCenters(items) {
+  const candidates = [];
+  for (const it of items) {
+    const t = normalizeCell(it.str);
+    if (!t) continue;
+    const isMark = /^[xX]$/.test(t);
+    const isMoney = /^S\/\s*\d/i.test(t);
+    const shortNoSpace = t.length <= 18 && !/\s/.test(t) && it.w <= 45;
+    if (isMark || isMoney || shortNoSpace) candidates.push(it.xmid);
+  }
+  if (!candidates.length) return null;
+  const clusters = cluster1D(candidates, RIGHT_CENTER_CLUSTER_GAP)
+    .filter((c) => c.size >= MIN_RIGHT_CLUSTER_HITS)
+    .sort((a, b) => a.center - b.center);
+  if (!clusters.length) return null;
+  return clusters.map((c) => c.center);
+}
+
+function mergeLeftSegmentsToN(items, n = LEFT_COLS) {
+  if (!items.length) return Array.from({ length: n }, () => '');
+  const merged = [];
+  let cur = { ...items[0] };
+  for (let i = 1; i < items.length; i++) {
+    const nx = items[i];
+    if (nx.x - cur.x2 <= INLINE_MERGE_GAP) {
+      cur.str += String(nx.str).startsWith(' ') ? nx.str : ` ${nx.str}`;
+      cur.x2 = Math.max(cur.x2, nx.x2);
+    } else {
+      merged.push(cur);
+      cur = { ...nx };
+    }
+  }
+  merged.push(cur);
+  const parts = merged.map((m) => normalizeCell(m.str));
+  if (parts.length <= n) {
+    while (parts.length < n) parts.push('');
+    return parts;
+  }
+  return [...parts.slice(0, n - 1), parts.slice(n - 1).join(' ')];
+}
+
+function gridifyRows(rowBuckets, rightCenters) {
+  if (!rightCenters || !rightCenters.length) {
+    return rowBuckets.map((r) => ({ y: r.y, cells: [normalizeCell(r.items.map((it) => it.str).join(' '))] }));
+  }
+  const sortedCenters = [...rightCenters].sort((a, b) => a - b);
+  const gaps = sortedCenters.slice(1).map((c, i) => c - sortedCenters[i]);
+  const avgGap = gaps.length ? gaps.reduce((a, b) => a + b, 0) / gaps.length : 48;
+  const rightAssignDist = Math.max(16, avgGap * 0.48);
+  const leftBoundary = sortedCenters[0] - Math.max(20, avgGap * 0.45);
+
+  return rowBuckets.map((row) => {
+    const right = Array.from({ length: sortedCenters.length }, () => '');
+    const leftItems = [];
+    for (const it of row.items) {
+      const t = normalizeCell(it.str);
+      if (!t) continue;
+      const isMark = /^[xX]$/.test(t);
+      const isMoney = /^S\/\s*\d/i.test(t);
+      const shortValue = t.length <= 20 && it.w <= 60;
+      if (isMark || isMoney || shortValue) {
+        const { idx, dist } = nearestCenter(it.xmid, sortedCenters);
+        if (dist <= rightAssignDist) {
+          right[idx] = right[idx] ? `${right[idx]} ${t}` : t;
+          continue;
+        }
+      }
+      if (it.xmid < leftBoundary) leftItems.push(it);
+      else leftItems.push(it);
+    }
+    const left = mergeLeftSegmentsToN(leftItems.sort((a, b) => a.x - b.x), LEFT_COLS);
+    return { y: row.y, cells: [...left, ...right] };
+  });
+}
+
+function splitRowBlocksByVerticalGaps(rows) {
+  if (!rows.length) return [];
+  const ys = rows.map((r) => r.y);
+  const gaps = [];
+  for (let i = 0; i < ys.length - 1; i++) gaps.push(ys[i] - ys[i + 1]);
+  const baseline = median(gaps.filter((g) => g > 0 && g <= 15)) || median(gaps.filter((g) => g > 0)) || 8;
+  const splitGap = Math.max(20, baseline * 2.8);
+  const starts = [0];
+  for (let i = 0; i < gaps.length; i++) if (gaps[i] > splitGap) starts.push(i + 1);
+  const blocks = [];
+  for (let i = 0; i < starts.length; i++) {
+    const from = starts[i];
+    const to = i + 1 < starts.length ? starts[i + 1] : rows.length;
+    blocks.push(rows.slice(from, to));
+  }
+  return blocks.filter((b) => b.length > 0);
+}
+
+function maxColsOf(matrix) {
+  return matrix.reduce((n, r) => Math.max(n, r.length), 0);
+}
+
+function tableNameFromBlock(block, fallback) {
+  if (!block.length) return fallback;
+  const first = block[0].cells.slice(0, LEFT_COLS).map(normalizeCell).join(' ').trim();
+  if (!first) return fallback;
+  return first.length > 48 ? fallback : first.replace(/\s+/g, ' ');
+}
+
+async function extractPerfilPdfTablesFromBuffer(buffer) {
+  const data = Buffer.isBuffer(buffer)
+    ? new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength)
+    : new Uint8Array(buffer);
+  const task = pdfjsLib.getDocument({ data, useSystemFonts: true, disableFontFace: true, isEvalSupported: false });
+  const pdf = await task.promise;
+  try {
+    const numpages = pdf.numPages || 0;
+    if (numpages < 1) return { ok: true, numpages: 0, tables: [] };
+    const page = await pdf.getPage(1);
+    const textContent = await page.getTextContent({ normalizeWhitespace: false, disableCombineTextItems: false });
+    const items = parseItems(textContent);
+    if (!items.length) return { ok: true, numpages, tables: [] };
+    const rows = bucketRows(items);
+    const rightCenters = inferRightCenters(items);
+    const gridRows = gridifyRows(rows, rightCenters);
+    const blocks = splitRowBlocksByVerticalGaps(gridRows);
+    const tables = blocks.map((b, i) => {
+      const celdas = trimTrailingEmptyRows(b.map((r) => r.cells));
+      return {
+        id: i + 1,
+        nombre: tableNameFromBlock(b, `Tabla ${i + 1}`),
+        filas: celdas.length,
+        columnas: maxColsOf(celdas),
+        celdas,
+      };
+    });
+    return { ok: true, numpages, tables };
+  } finally {
+    try {
+      await pdf.cleanup(false);
+    } catch (_) {}
+    try {
+      await pdf.destroy();
+    } catch (_) {}
+  }
+}
+
+module.exports = { extractPerfilPdfTablesFromBuffer };
+
+/**
+ * Extracción genérica de tablas desde texto PDF (pdfjs-dist), basada en geometría:
+ * - filas por cercanía en Y
+ * - columnas por centros X repetidos (distancias / tamaño de celdas)
+ * - tablas distintas por saltos verticales entre bloques de filas
+ *
+ * No usa etiquetas fijas de contenido.
+ */
+
+const pdfjsLib = require('pdfjs-dist/legacy/build/pdf.js');
+
+pdfjsLib.GlobalWorkerOptions.workerSrc = require.resolve('pdfjs-dist/legacy/build/pdf.worker.js');
+
+const ROW_Y_TOL = 4;
+const INLINE_MERGE_GAP = 2;
+const LEFT_COLS = 3;
+const RIGHT_CENTER_CLUSTER_GAP = 15;
+const MIN_RIGHT_CLUSTER_HITS = 3;
+
+function normalizeCell(s) {
+  return String(s || '')
+    .replace(/\r/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function median(nums) {
+  if (!nums.length) return 0;
+  const s = [...nums].sort((a, b) => a - b);
+  const mid = Math.floor(s.length / 2);
+  return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
+}
+
+function trimTrailingEmptyRows(matrix) {
+  const out = matrix.slice();
+  while (out.length && out[out.length - 1].every((c) => !normalizeCell(c))) {
+    out.pop();
+  }
+  return out;
+}
+
+function cluster1D(values, gap) {
+  const s = [...values].sort((a, b) => a - b);
+  const groups = [];
+  for (const v of s) {
+    const g = groups[groups.length - 1];
+    if (!g || v - g[g.length - 1] > gap) groups.push([v]);
+    else g.push(v);
+  }
+  return groups.map((g) => ({
+    center: g.reduce((a, b) => a + b, 0) / g.length,
+    size: g.length,
+  }));
+}
+
+function nearestCenter(x, centers) {
+  let idx = 0;
+  let dist = Number.POSITIVE_INFINITY;
+  for (let i = 0; i < centers.length; i++) {
+    const d = Math.abs(x - centers[i]);
+    if (d < dist) {
+      dist = d;
+      idx = i;
+    }
+  }
+  return { idx, dist };
+}
+
+function parseItems(textContent) {
+  return (textContent.items || [])
+    .filter((it) => it.str && String(it.str).trim() !== '')
+    .map((it) => {
+      const m = it.transform || [];
+      const x = m[4] || 0;
+      const y = m[5] || 0;
+      const w = typeof it.width === 'number' ? it.width : Math.abs(m[0] || 0) * String(it.str).length * 0.5 || 5;
+      const h = typeof it.height === 'number' ? it.height : Math.abs(m[3] || 0) || 6;
+      const str = String(it.str);
+      return { str, x, y, w, h, x2: x + w, xmid: x + w / 2 };
+    });
+}
+
+function bucketRows(items) {
+  const sorted = [...items].sort((a, b) => {
+    if (Math.abs(a.y - b.y) > ROW_Y_TOL) return b.y - a.y;
+    return a.x - b.x;
+  });
+
+  const buckets = [];
+  for (const it of sorted) {
+    let placed = false;
+    for (const row of buckets) {
+      if (Math.abs(it.y - row.y) <= ROW_Y_TOL) {
+        row.items.push(it);
+        row.sumY += it.y;
+        row.count += 1;
+        row.y = row.sumY / row.count;
+        placed = true;
+        break;
+      }
+    }
+    if (!placed) {
+      buckets.push({ y: it.y, sumY: it.y, count: 1, items: [it] });
+    }
+  }
+
+  for (const r of buckets) r.items.sort((a, b) => a.x - b.x);
+  buckets.sort((a, b) => b.y - a.y);
+  return buckets;
+}
+
+function inferRightCenters(items) {
+  const candidates = [];
+  for (const it of items) {
+    const t = normalizeCell(it.str);
+    if (!t) continue;
+    const isMark = /^[xX]$/.test(t);
+    const isMoney = /^S\/\s*\d/i.test(t);
+    const shortNoSpace = t.length <= 18 && !/\s/.test(t) && it.w <= 45;
+    if (isMark || isMoney || shortNoSpace) candidates.push(it.xmid);
+  }
+  if (!candidates.length) return null;
+
+  const clusters = cluster1D(candidates, RIGHT_CENTER_CLUSTER_GAP)
+    .filter((c) => c.size >= MIN_RIGHT_CLUSTER_HITS)
+    .sort((a, b) => a.center - b.center);
+
+  if (!clusters.length) return null;
+  return clusters.map((c) => c.center);
+}
+
+function mergeLeftSegmentsToN(items, n = LEFT_COLS) {
+  if (!items.length) return Array.from({ length: n }, () => '');
+  const merged = [];
+  let cur = { ...items[0] };
+  for (let i = 1; i < items.length; i++) {
+    const nx = items[i];
+    if (nx.x - cur.x2 <= INLINE_MERGE_GAP) {
+      cur.str += String(nx.str).startsWith(' ') ? nx.str : ` ${nx.str}`;
+      cur.x2 = Math.max(cur.x2, nx.x2);
+    } else {
+      merged.push(cur);
+      cur = { ...nx };
+    }
+  }
+  merged.push(cur);
+
+  const parts = merged.map((m) => normalizeCell(m.str));
+  if (parts.length <= n) {
+    while (parts.length < n) parts.push('');
+    return parts;
+  }
+  const head = parts.slice(0, n - 1);
+  const tail = parts.slice(n - 1).join(' ');
+  return [...head, tail];
+}
+
+function gridifyRows(rowBuckets, rightCenters) {
+  if (!rightCenters || rightCenters.length === 0) {
+    // Fallback mínimo: todo a la izquierda.
+    return rowBuckets.map((r) => ({
+      y: r.y,
+      cells: [normalizeCell(r.items.map((it) => it.str).join(' '))],
+    }));
+  }
+
+  const sortedCenters = [...rightCenters].sort((a, b) => a - b);
+  const firstRight = sortedCenters[0];
+  const centerGaps = sortedCenters.slice(1).map((c, i) => c - sortedCenters[i]);
+  const avgGap = centerGaps.length ? centerGaps.reduce((a, b) => a + b, 0) / centerGaps.length : 48;
+  const rightAssignDist = Math.max(16, avgGap * 0.48);
+  const leftBoundary = firstRight - Math.max(20, avgGap * 0.45);
+
+  return rowBuckets.map((row) => {
+    const right = Array.from({ length: sortedCenters.length }, () => '');
+    const leftItems = [];
+
+    for (const it of row.items) {
+      const t = normalizeCell(it.str);
+      if (!t) continue;
+
+      const isMark = /^[xX]$/.test(t);
+      const isMoney = /^S\/\s*\d/i.test(t);
+      const shortValue = t.length <= 20 && it.w <= 60;
+      const likelyRight = isMark || isMoney || shortValue;
+
+      if (likelyRight) {
+        const { idx, dist } = nearestCenter(it.xmid, sortedCenters);
+        if (dist <= rightAssignDist) {
+          right[idx] = right[idx] ? `${right[idx]} ${t}` : t;
+          continue;
+        }
+      }
+
+      if (it.xmid < leftBoundary) leftItems.push(it);
+      else {
+        // Texto en zona intermedia: también lo tratamos como izquierdo para no perder info.
+        leftItems.push(it);
+      }
+    }
+
+    const left = mergeLeftSegmentsToN(leftItems.sort((a, b) => a.x - b.x), LEFT_COLS);
+    return { y: row.y, cells: [...left, ...right] };
+  });
+}
+
+function splitRowBlocksByVerticalGaps(rows) {
+  if (!rows.length) return [];
+  const ys = rows.map((r) => r.y);
+  const gaps = [];
+  for (let i = 0; i < ys.length - 1; i++) gaps.push(ys[i] - ys[i + 1]);
+
+  const baseline = median(gaps.filter((g) => g > 0 && g <= 15)) || median(gaps.filter((g) => g > 0)) || 8;
+  const splitGap = Math.max(20, baseline * 2.8);
+
+  const starts = [0];
+  for (let i = 0; i < gaps.length; i++) {
+    if (gaps[i] > splitGap) starts.push(i + 1);
+  }
+
+  const blocks = [];
+  for (let i = 0; i < starts.length; i++) {
+    const from = starts[i];
+    const to = i + 1 < starts.length ? starts[i + 1] : rows.length;
+    blocks.push(rows.slice(from, to));
+  }
+  return blocks.filter((b) => b.length > 0);
+}
+
+function maxColsOf(matrix) {
+  return matrix.reduce((n, r) => Math.max(n, r.length), 0);
+}
+
+function tableNameFromBlock(block, fallback) {
+  if (!block.length) return fallback;
+  const first = block[0].cells.slice(0, LEFT_COLS).map(normalizeCell).join(' ').trim();
+  if (!first) return fallback;
+  const compact = first.replace(/\s+/g, ' ').trim();
+  if (compact.length > 48) return fallback;
+  return compact;
+}
+
+/**
+ * @param {Buffer} buffer
+ * @returns {Promise<{ ok: boolean, numpages: number, tables: Array<{id:number,nombre:string,filas:number,columnas:number,celdas:string[][]}> }>}
+ */
+async function extractPerfilPdfTablesFromBuffer(buffer) {
+  const data = Buffer.isBuffer(buffer)
+    ? new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength)
+    : new Uint8Array(buffer);
+
+  const task = pdfjsLib.getDocument({
+    data,
+    useSystemFonts: true,
+    disableFontFace: true,
+    isEvalSupported: false,
+  });
+
+  const pdf = await task.promise;
+  try {
+    const numpages = pdf.numPages || 0;
+    if (numpages < 1) return { ok: true, numpages: 0, tables: [] };
+
+    const page = await pdf.getPage(1);
+    const textContent = await page.getTextContent({
+      normalizeWhitespace: false,
+      disableCombineTextItems: false,
+    });
+
+    const items = parseItems(textContent);
+    if (!items.length) return { ok: true, numpages, tables: [] };
+
+    const rowBuckets = bucketRows(items);
+    const rightCenters = inferRightCenters(items);
+    const gridRows = gridifyRows(rowBuckets, rightCenters);
+    const blocks = splitRowBlocksByVerticalGaps(gridRows);
+
+    const tables = blocks.map((b, i) => {
+      const celdas = trimTrailingEmptyRows(b.map((r) => r.cells));
+      return {
+        id: i + 1,
+        nombre: tableNameFromBlock(b, `Tabla ${i + 1}`),
+        filas: celdas.length,
+        columnas: maxColsOf(celdas),
+        celdas,
+      };
+    });
+
+    return { ok: true, numpages, tables };
+  } finally {
+    try {
+      await pdf.cleanup(false);
+    } catch (_) {
+      /* ignore */
+    }
+    try {
+      await pdf.destroy();
+    } catch (_) {
+      /* ignore */
+    }
+  }
+}
+
+module.exports = {
+  extractPerfilPdfTablesFromBuffer,
+};
+
 /**
  * Extrae tablas de un PDF de perfil EMO sin Python (pdf.js / pdfjs-dist).
  *

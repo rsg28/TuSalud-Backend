@@ -1,4 +1,4 @@
-const { extractPerfilPdfTablesFromBuffer } = require('../utils/extractPerfilPdfTables');
+const { extractPerfilPdfTablesFromBuffer } = require('../utils/extractPerfilPdfTablesV2');
 
 function isPdfBuffer(buf) {
   return Buffer.isBuffer(buf) && buf.length >= 5 && buf.slice(0, 5).toString('ascii') === '%PDF-';
@@ -32,7 +32,9 @@ async function extraerPdfPerfilTablas(req, res) {
       return res.status(400).json({ error: 'Solo se aceptan archivos PDF para extraer tablas de perfil.' });
     }
 
-    const result = await extractPerfilPdfTablesFromBuffer(buffer);
+    const debugRaw = String(req.query?.debug || '').trim().toLowerCase();
+    const debug = debugRaw === '1' || debugRaw === 'true' || debugRaw === 'yes';
+    const result = await extractPerfilPdfTablesFromBuffer(buffer, { debug });
 
     if (result && result.ok === false && result.error) {
       return res.status(400).json({ error: String(result.error) });
