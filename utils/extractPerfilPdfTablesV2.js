@@ -509,6 +509,15 @@ function fillGroupByVerticalContinuity(tableCells, leftCols = LEFT_COLS) {
     const detail = normalizeCell(row[detailCol]);
     const hasRight = hasAnyRightMark(row, leftCols);
 
+    // Tras el último subítem numerado del bloque oftalmológico (4) … campimetría),
+    // no heredar "Oftalmológico Básico" a filas que en el PDF son hermanas, no hijas.
+    if (r > 0) {
+      const prevDet = normalizeCell(out[r - 1][detailCol]);
+      if (/^\s*4\)\s/i.test(prevDet) && /campimetr/i.test(prevDet) && /oftalmológico/i.test(carry)) {
+        carry = '';
+      }
+    }
+
     if (group) {
       carry = group;
       continue;
@@ -520,6 +529,17 @@ function fillGroupByVerticalContinuity(tableCells, leftCols = LEFT_COLS) {
     if (isSectionLabel(detail)) continue;
     row[groupCol] = carry;
   }
+
+  // Refuerzo: si el detalle es claramente otro examen de primer nivel, no dejar grupo oftalmológico heredado.
+  for (let r = 0; r < out.length; r++) {
+    const det = normalizeCell(out[r][detailCol]);
+    const g = normalizeCell(out[r][groupCol]);
+    if (!g || !/oftalmológico/i.test(g)) continue;
+    if (/musculoesqueletico/i.test(det) && !/oftalmológico/i.test(det)) {
+      out[r][groupCol] = '';
+    }
+  }
+
   return out;
 }
 
@@ -552,17 +572,27 @@ function applyMajorVerticalSectionLabel(tableCells, leftCols = LEFT_COLS) {
 
   const label = 'EXÁMENES GENERALES';
 
-  // Extender hacia arriba: mismas filas de datos que pertenecen al bloque (después de Anexo).
-  let start = firstWithText;
-  while (start > 0) {
-    const prev = out[start - 1];
-    if (!hasAnyRightMark(prev, leftCols)) break;
-    const det = normalizeCell(prev[detailCol]);
-    if (/^anexo\s+16/i.test(det)) break;
-    start -= 1;
+  // Inicio del rowspan: primera fila de datos del bloque principal (Anexo 16 Evaluación clínica en el PDF).
+  let start = -1;
+  for (let r = 0; r < out.length; r++) {
+    const det = normalizeCell(out[r][detailCol]);
+    if (/anexo\s+16/i.test(det) && /evaluación\s+clínica/i.test(det)) {
+      start = r;
+      break;
+    }
+  }
+  if (start < 0) {
+    start = firstWithText;
+    while (start > 0) {
+      const prev = out[start - 1];
+      if (!hasAnyRightMark(prev, leftCols)) break;
+      const det = normalizeCell(prev[detailCol]);
+      if (/^anexo\s+16/i.test(det)) start -= 1;
+      else break;
+    }
   }
 
-  // Extender hacia abajo hasta la fila anterior a PRECIO SIN IGV.
+  // Extender hacia abajo hasta la fila anterior a PRECIO SIN IGV (no incluye precios).
   let end = out.length - 1;
   for (let r = 0; r < out.length; r++) {
     const det = normalizeCell(out[r][detailCol]);
@@ -585,11 +615,11 @@ function applyMajorVerticalSectionLabel(tableCells, leftCols = LEFT_COLS) {
     }
   }
 
-  // Fila de precio: misma columna mayor a la izquierda; quitar etiqueta duplicada en grupo.
+  // Fila de precio: no forma parte del rowspan de EXÁMENES GENERALES.
   for (let r = 0; r < out.length; r++) {
     const det = normalizeCell(out[r][detailCol]);
     if (!/^precio\s+sin\s+igv$/i.test(det)) continue;
-    out[r][majorCol] = label;
+    out[r][majorCol] = '';
     const g = normalizeCell(out[r][groupCol]);
     if (MAJOR_RE.test(g)) out[r][groupCol] = '';
   }
