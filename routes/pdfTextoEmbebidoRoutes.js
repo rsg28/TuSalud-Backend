@@ -2,6 +2,7 @@ const express = require('express');
 const multer = require('multer');
 const { authenticateToken } = require('../middleware/auth');
 const { extraerPdfTextoEmbebido } = require('../controllers/pdfTextoEmbebidoController');
+const { extraerPdfPerfilTablas } = require('../controllers/pdfPerfilTablasController');
 
 const router = express.Router();
 
@@ -55,5 +56,6 @@ function parsePdfBody(req, res, next) {
 }
 
 router.post('/pdf-texto-embebido', authenticateToken, parsePdfBody, extraerPdfTextoEmbebido);
+router.post('/pdf-perfil-tablas', authenticateToken, parsePdfBody, extraerPdfPerfilTablas);
 
 module.exports = router;

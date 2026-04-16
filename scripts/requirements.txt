@@ -1,0 +1,2 @@
+# Extracción de tablas PDF (extract_perfil_pdf_tables.py)
+pymupdf>=1.24.0

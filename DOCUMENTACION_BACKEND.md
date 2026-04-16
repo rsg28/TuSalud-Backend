@@ -1,6 +1,6 @@
 # Documentación del Backend TuSalud
 
-API REST para el **Sistema de Gestión Médica Ocupacional TuSalud**. Desarrollada con **Node.js**, **Express** y **MySQL**. El servidor está desplegado en una instancia **EC2** en la IP **54.235.48.67**.
+API REST para el **Sistema de Gestión Médica Ocupacional TuSalud**. Desarrollada con **Node.js**, **Express** y **MySQL**. El servidor está desplegado en una instancia **EC2** en la IP **44.222.223.244**.
 
 ---
 
@@ -9,8 +9,8 @@ API REST para el **Sistema de Gestión Médica Ocupacional TuSalud**. Desarrolla
 Para usar la API es necesario **iniciar sesión** y obtener un **token JWT**. Sin ese token no podrás acceder al resto de rutas (recibirás error 401 o 403).
 
 1. **Obtener el token:**  
-   - **Registro:** `POST http://54.235.48.67:3000/api/auth/register` (body: `nombre_usuario`, `email`, `password`, `nombre_completo`, etc.)  
-   - **Login:** `POST http://54.235.48.67:3000/api/auth/login` (body: `email`, `password`)  
+   - **Registro:** `POST http://44.222.223.244:3000/api/auth/register` (body: `nombre_usuario`, `email`, `password`, `nombre_completo`, etc.)  
+   - **Login:** `POST http://44.222.223.244:3000/api/auth/login` (body: `email`, `password`)  
    La respuesta incluye un `token`. Guárdalo.
 
 2. **Usar las rutas:**  
@@ -33,13 +33,13 @@ Roles en el sistema: `manager`, `vendedor`, `cliente`.
 
 ## Rutas (endpoints)
 
-**URL base:** `http://54.235.48.67:3000`
+**URL base:** `http://44.222.223.244:3000`
 
 ### Probar conexión
 
 | Método | Endpoint | Requisitos |
 |--------|----------|------------|
-| GET | `http://54.235.48.67:3000/health` | **Público** |
+| GET | `http://44.222.223.244:3000/health` | **Público** |
 
 Usa este endpoint para comprobar que el servidor está activo y puedes conectarte. No requiere token.
 
@@ -49,7 +49,7 @@ Usa este endpoint para comprobar que el servidor está activo y puedes conectart
 
 | Método | Endpoint | Requisitos |
 |--------|----------|------------|
-| GET | `http://54.235.48.67:3000/` | **Público** |
+| GET | `http://44.222.223.244:3000/` | **Público** |
 
 ---
 
@@ -57,11 +57,11 @@ Usa este endpoint para comprobar que el servidor está activo y puedes conectart
 
 | Método | Endpoint | Requisitos |
 |--------|----------|------------|
-| POST | `http://54.235.48.67:3000/api/auth/register` | **Público** |
-| POST | `http://54.235.48.67:3000/api/auth/login` | **Público** |
-| POST | `http://54.235.48.67:3000/api/auth/forgot-password` | **Público** — body: `{ "email": "..." }`. Envía correo con enlace para restablecer contraseña (Resend). |
-| POST | `http://54.235.48.67:3000/api/auth/reset-password` | **Público** — body: `{ "token": "...", "newPassword": "..." }`. Token = el recibido por correo. |
-| GET | `http://54.235.48.67:3000/api/auth/me` | **JWT** |
+| POST | `http://44.222.223.244:3000/api/auth/register` | **Público** |
+| POST | `http://44.222.223.244:3000/api/auth/login` | **Público** |
+| POST | `http://44.222.223.244:3000/api/auth/forgot-password` | **Público** — body: `{ "email": "..." }`. Envía correo con enlace para restablecer contraseña (Resend). |
+| POST | `http://44.222.223.244:3000/api/auth/reset-password` | **Público** — body: `{ "token": "...", "newPassword": "..." }`. Token = el recibido por correo. |
+| GET | `http://44.222.223.244:3000/api/auth/me` | **JWT** |
 
 ---
 
@@ -69,12 +69,12 @@ Usa este endpoint para comprobar que el servidor está activo y puedes conectart
 
 | Método | Endpoint | Requisitos |
 |--------|----------|------------|
-| GET | `http://54.235.48.67:3000/api/empresas` | **JWT** |
-| GET | `http://54.235.48.67:3000/api/empresas/mias` | **JWT** |
-| GET | `http://54.235.48.67:3000/api/empresas/:id` | **JWT** |
-| POST | `http://54.235.48.67:3000/api/empresas` | **JWT +** rol: manager, vendedor o cliente |
-| PUT | `http://54.235.48.67:3000/api/empresas/:id` | **JWT +** rol: manager o vendedor |
-| DELETE | `http://54.235.48.67:3000/api/empresas/:id` | **JWT +** rol: manager |
+| GET | `http://44.222.223.244:3000/api/empresas` | **JWT** |
+| GET | `http://44.222.223.244:3000/api/empresas/mias` | **JWT** |
+| GET | `http://44.222.223.244:3000/api/empresas/:id` | **JWT** |
+| POST | `http://44.222.223.244:3000/api/empresas` | **JWT +** rol: manager, vendedor o cliente |
+| PUT | `http://44.222.223.244:3000/api/empresas/:id` | **JWT +** rol: manager o vendedor |
+| DELETE | `http://44.222.223.244:3000/api/empresas/:id` | **JWT +** rol: manager |
 
 ---
 
@@ -82,7 +82,7 @@ Usa este endpoint para comprobar que el servidor está activo y puedes conectart
 
 | Método | Endpoint | Requisitos |
 |--------|----------|------------|
-| GET | `http://54.235.48.67:3000/api/sedes` | **JWT** |
+| GET | `http://44.222.223.244:3000/api/sedes` | **JWT** |
 
 ---
 
@@ -91,12 +91,12 @@ Usa este endpoint para comprobar que el servidor está activo y puedes conectart
 
 | Método | Endpoint | Requisitos |
 |--------|----------|------------|
-| GET | `http://54.235.48.67:3000/api/pacientes` | **JWT** |
-| GET | `http://54.235.48.67:3000/api/pacientes/:id` | **JWT** |
-| POST | `http://54.235.48.67:3000/api/pacientes` | **JWT +** rol: manager, vendedor o cliente |
-| PUT | `http://54.235.48.67:3000/api/pacientes/:id` | **JWT +** rol: manager, vendedor o cliente |
-| PUT | `http://54.235.48.67:3000/api/pacientes/:id/examen` | **JWT +** rol: manager, vendedor o cliente |
-| DELETE | `http://54.235.48.67:3000/api/pacientes/:id` | **JWT +** rol: manager o vendedor |
+| GET | `http://44.222.223.244:3000/api/pacientes` | **JWT** |
+| GET | `http://44.222.223.244:3000/api/pacientes/:id` | **JWT** |
+| POST | `http://44.222.223.244:3000/api/pacientes` | **JWT +** rol: manager, vendedor o cliente |
+| PUT | `http://44.222.223.244:3000/api/pacientes/:id` | **JWT +** rol: manager, vendedor o cliente |
+| PUT | `http://44.222.223.244:3000/api/pacientes/:id/examen` | **JWT +** rol: manager, vendedor o cliente |
+| DELETE | `http://44.222.223.244:3000/api/pacientes/:id` | **JWT +** rol: manager o vendedor |
 
 ---
 
@@ -104,9 +104,9 @@ Usa este endpoint para comprobar que el servidor está activo y puedes conectart
 
 | Método | Endpoint | Requisitos |
 |--------|----------|------------|
-| GET | `http://54.235.48.67:3000/api/usuarios` | **JWT +** rol: manager |
-| PUT | `http://54.235.48.67:3000/api/usuarios/:id/rol` | **JWT +** rol: manager |
-| PUT | `http://54.235.48.67:3000/api/usuarios/:id/activo` | **JWT +** rol: manager |
+| GET | `http://44.222.223.244:3000/api/usuarios` | **JWT +** rol: manager |
+| PUT | `http://44.222.223.244:3000/api/usuarios/:id/rol` | **JWT +** rol: manager |
+| PUT | `http://44.222.223.244:3000/api/usuarios/:id/activo` | **JWT +** rol: manager |
 
 ---
 
@@ -114,21 +114,21 @@ Usa este endpoint para comprobar que el servidor está activo y puedes conectart
 
 | Método | Endpoint | Requisitos |
 |--------|----------|------------|
-| GET | `http://54.235.48.67:3000/api/pedidos` | **JWT +** rol: vendedor o manager |
-| GET | `http://54.235.48.67:3000/api/pedidos/mios` | **JWT** |
-| GET | `http://54.235.48.67:3000/api/pedidos/pendientes-aprobacion` | **JWT +** rol: manager |
-| GET | `http://54.235.48.67:3000/api/pedidos/con-cotizacion-aprobada` | **JWT +** rol: vendedor o manager |
-| GET | `http://54.235.48.67:3000/api/pedidos/:pedido_id` | **JWT** |
-| GET | `http://54.235.48.67:3000/api/pedidos/:pedido_id/estado` | **JWT** |
-| GET | `http://54.235.48.67:3000/api/pedidos/:pedido_id/historial` | **JWT** |
-| GET | `http://54.235.48.67:3000/api/pedidos/:pedido_id/cotizaciones` | **JWT** |
-| GET | `http://54.235.48.67:3000/api/pedidos/:pedido_id/facturas` | **JWT** |
-| GET | `http://54.235.48.67:3000/api/pedidos/:pedido_id/pacientes-examenes` | **JWT** |
-| GET | `http://54.235.48.67:3000/api/pedidos/:pedido_id/pacientes-completados` | **JWT** |
-| POST | `http://54.235.48.67:3000/api/pedidos` | **JWT +** rol: vendedor, manager o cliente |
-| PATCH | `http://54.235.48.67:3000/api/pedidos/:pedido_id/estado` | **JWT +** rol: vendedor o manager |
-| POST | `http://54.235.48.67:3000/api/pedidos/:pedido_id/examenes` | **JWT +** rol: vendedor o manager |
-| POST | `http://54.235.48.67:3000/api/pedidos/:pedido_id/cancelar` | **JWT +** rol: vendedor, manager o cliente |
+| GET | `http://44.222.223.244:3000/api/pedidos` | **JWT +** rol: vendedor o manager |
+| GET | `http://44.222.223.244:3000/api/pedidos/mios` | **JWT** |
+| GET | `http://44.222.223.244:3000/api/pedidos/pendientes-aprobacion` | **JWT +** rol: manager |
+| GET | `http://44.222.223.244:3000/api/pedidos/con-cotizacion-aprobada` | **JWT +** rol: vendedor o manager |
+| GET | `http://44.222.223.244:3000/api/pedidos/:pedido_id` | **JWT** |
+| GET | `http://44.222.223.244:3000/api/pedidos/:pedido_id/estado` | **JWT** |
+| GET | `http://44.222.223.244:3000/api/pedidos/:pedido_id/historial` | **JWT** |
+| GET | `http://44.222.223.244:3000/api/pedidos/:pedido_id/cotizaciones` | **JWT** |
+| GET | `http://44.222.223.244:3000/api/pedidos/:pedido_id/facturas` | **JWT** |
+| GET | `http://44.222.223.244:3000/api/pedidos/:pedido_id/pacientes-examenes` | **JWT** |
+| GET | `http://44.222.223.244:3000/api/pedidos/:pedido_id/pacientes-completados` | **JWT** |
+| POST | `http://44.222.223.244:3000/api/pedidos` | **JWT +** rol: vendedor, manager o cliente |
+| PATCH | `http://44.222.223.244:3000/api/pedidos/:pedido_id/estado` | **JWT +** rol: vendedor o manager |
+| POST | `http://44.222.223.244:3000/api/pedidos/:pedido_id/examenes` | **JWT +** rol: vendedor o manager |
+| POST | `http://44.222.223.244:3000/api/pedidos/:pedido_id/cancelar` | **JWT +** rol: vendedor, manager o cliente |
 
 ---
 
@@ -136,14 +136,14 @@ Usa este endpoint para comprobar que el servidor está activo y puedes conectart
 
 | Método | Endpoint | Requisitos |
 |--------|----------|------------|
-| GET | `http://54.235.48.67:3000/api/cotizaciones` | **JWT** |
-| GET | `http://54.235.48.67:3000/api/cotizaciones/enviadas-al-manager` | **JWT +** rol: manager |
-| GET | `http://54.235.48.67:3000/api/cotizaciones/:id` | **JWT** |
-| GET | `http://54.235.48.67:3000/api/cotizaciones/:id/items` | **JWT** |
-| POST | `http://54.235.48.67:3000/api/cotizaciones` | **JWT +** rol: manager, vendedor o cliente |
-| PUT | `http://54.235.48.67:3000/api/cotizaciones/:id` | **JWT +** rol: manager, vendedor o cliente |
-| PATCH | `http://54.235.48.67:3000/api/cotizaciones/:id/estado` | **JWT +** rol: manager, vendedor o cliente |
-| DELETE | `http://54.235.48.67:3000/api/cotizaciones/:id` | **JWT +** rol: manager o vendedor |
+| GET | `http://44.222.223.244:3000/api/cotizaciones` | **JWT** |
+| GET | `http://44.222.223.244:3000/api/cotizaciones/enviadas-al-manager` | **JWT +** rol: manager |
+| GET | `http://44.222.223.244:3000/api/cotizaciones/:id` | **JWT** |
+| GET | `http://44.222.223.244:3000/api/cotizaciones/:id/items` | **JWT** |
+| POST | `http://44.222.223.244:3000/api/cotizaciones` | **JWT +** rol: manager, vendedor o cliente |
+| PUT | `http://44.222.223.244:3000/api/cotizaciones/:id` | **JWT +** rol: manager, vendedor o cliente |
+| PATCH | `http://44.222.223.244:3000/api/cotizaciones/:id/estado` | **JWT +** rol: manager, vendedor o cliente |
+| DELETE | `http://44.222.223.244:3000/api/cotizaciones/:id` | **JWT +** rol: manager o vendedor |
 
 ---
 
@@ -151,12 +151,12 @@ Usa este endpoint para comprobar que el servidor está activo y puedes conectart
 
 | Método | Endpoint | Requisitos |
 |--------|----------|------------|
-| GET | `http://54.235.48.67:3000/api/facturas` | **JWT** |
-| GET | `http://54.235.48.67:3000/api/facturas/:id` | **JWT** |
-| POST | `http://54.235.48.67:3000/api/facturas` | **JWT +** rol: manager o vendedor |
-| PUT | `http://54.235.48.67:3000/api/facturas/:id` | **JWT +** rol: manager o vendedor |
-| POST | `http://54.235.48.67:3000/api/facturas/:id/enviar-cliente` | **JWT +** rol: manager o vendedor |
-| DELETE | `http://54.235.48.67:3000/api/facturas/:id` | **JWT +** rol: vendedor |
+| GET | `http://44.222.223.244:3000/api/facturas` | **JWT** |
+| GET | `http://44.222.223.244:3000/api/facturas/:id` | **JWT** |
+| POST | `http://44.222.223.244:3000/api/facturas` | **JWT +** rol: manager o vendedor |
+| PUT | `http://44.222.223.244:3000/api/facturas/:id` | **JWT +** rol: manager o vendedor |
+| POST | `http://44.222.223.244:3000/api/facturas/:id/enviar-cliente` | **JWT +** rol: manager o vendedor |
+| DELETE | `http://44.222.223.244:3000/api/facturas/:id` | **JWT +** rol: vendedor |
 
 ---
 
@@ -164,23 +164,23 @@ Usa este endpoint para comprobar que el servidor está activo y puedes conectart
 
 | Método | Endpoint | Requisitos |
 |--------|----------|------------|
-| GET | `http://54.235.48.67:3000/api/precios/matriz` | **JWT** |
-| GET | `http://54.235.48.67:3000/api/precios/categorias` | **JWT** |
-| GET | `http://54.235.48.67:3000/api/precios/categorias/:categoria/examenes` | **JWT** |
-| GET | `http://54.235.48.67:3000/api/precios/buscar` | **JWT** |
-| GET | `http://54.235.48.67:3000/api/precios/sede/:sede_id` | **JWT** |
-| POST | `http://54.235.48.67:3000/api/precios/:solicitud_id/aprobar` | **JWT +** rol: manager |
+| GET | `http://44.222.223.244:3000/api/precios/matriz` | **JWT** |
+| GET | `http://44.222.223.244:3000/api/precios/categorias` | **JWT** |
+| GET | `http://44.222.223.244:3000/api/precios/categorias/:categoria/examenes` | **JWT** |
+| GET | `http://44.222.223.244:3000/api/precios/buscar` | **JWT** |
+| GET | `http://44.222.223.244:3000/api/precios/sede/:sede_id` | **JWT** |
+| POST | `http://44.222.223.244:3000/api/precios/:solicitud_id/aprobar` | **JWT +** rol: manager |
 
 ---
 
 ## Ejemplo: probar con Postman (de cero a una ruta protegida)
 
-Objetivo: llamar a **GET** `http://54.235.48.67:3000/api/usuarios` (solo permitido para rol **manager**). Hay que obtener antes un JWT con una cuenta que tenga ese rol.
+Objetivo: llamar a **GET** `http://44.222.223.244:3000/api/usuarios` (solo permitido para rol **manager**). Hay que obtener antes un JWT con una cuenta que tenga ese rol.
 
 ### Paso 1 — Obtener el JWT (login)
 
 1. En Postman, crea una petición **POST**.
-2. URL: `http://54.235.48.67:3000/api/auth/login`
+2. URL: `http://44.222.223.244:3000/api/auth/login`
 3. Pestaña **Body** → **raw** → tipo **JSON**. Cuerpo:
    ```json
    {
@@ -202,7 +202,7 @@ Objetivo: llamar a **GET** `http://54.235.48.67:3000/api/usuarios` (solo permiti
 ### Paso 2 — Llamar a GET /api/usuarios con el token
 
 1. Crea una petición **GET**.
-2. URL: `http://54.235.48.67:3000/api/usuarios`
+2. URL: `http://44.222.223.244:3000/api/usuarios`
 3. Pestaña **Authorization** → Type: **Bearer Token** → en **Token** pega el valor que copiaste en el paso 1.  
    (O en **Headers** añade: `Authorization` = `Bearer <tu_token>`.)
 4. **Send**. Deberías recibir la lista de usuarios en JSON.
