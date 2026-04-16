@@ -746,30 +746,6 @@ function expandMergedHeadersAndSpans(tableCells, leftCols = LEFT_COLS) {
     }
   }
 
-  // 4) Colspan en bloque izquierdo: una sola celda con texto en la última columna del bloque
-  // (0..leftCols-1 vacías salvo la derecha) = etiqueta que en el PDF abarca dos columnas;
-  // repetir en la columna inmediatamente anterior para reflejar el mismo valor en todo el ancho.
-  for (let r = 0; r < headerEnd; r++) {
-    const row = out[r];
-    let filledIdx = -1;
-    let n = 0;
-    for (let c = 0; c < leftCols; c++) {
-      if (normalizeCell(row[c])) {
-        n += 1;
-        filledIdx = c;
-      }
-    }
-    if (n !== 1 || filledIdx !== leftCols - 1 || filledIdx < 1) continue;
-    let onlyLast = true;
-    for (let c = 0; c < filledIdx; c++) {
-      if (normalizeCell(row[c])) {
-        onlyLast = false;
-        break;
-      }
-    }
-    if (onlyLast) row[filledIdx - 1] = row[filledIdx];
-  }
-
   return out;
 }
 
