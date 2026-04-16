@@ -360,10 +360,52 @@ function countNonEmpty(arr) {
  * algunas filas llegan una columna más a la izquierda por ruido de bbox.
  * Usa (a) columna dominante y (b) celda de arriba como guía.
  */
-function stabilizeLeftColumns(tableCells) {
-  // En modo bordes, preferimos no "mover" celdas entre columnas:
-  // la columna detectada por borde suele ser la más confiable.
-  return tableCells.map((r) => r.slice());
+function stabilizeLeftColumns(tableCells, leftCols = LEFT_COLS) {
+  if (!tableCells.length) return tableCells;
+  const out = tableCells.map((r) => r.slice());
+  const leftIndex = (row) => {
+    const idx = [];
+    for (let i = 0; i < leftCols; i++) if (normalizeCell(row[i])) idx.push(i);
+    return idx;
+  };
+
+  // Columna descriptiva dominante en filas de datos (con marcas a la derecha).
+  const freq = Array.from({ length: leftCols }, () => 0);
+  for (const row of out) {
+    if (!hasAnyRightMark(row, leftCols)) continue;
+    const idx = leftIndex(row);
+    if (idx.length === 1) freq[idx[0]] += 1;
+  }
+  let dominant = 0;
+  for (let i = 1; i < freq.length; i++) {
+    if (freq[i] > freq[dominant]) dominant = i;
+  }
+
+  // Corrección conservadora: mover solo +/-1 columna y con evidencia vertical.
+  for (let r = 1; r < out.length - 1; r++) {
+    const row = out[r];
+    if (!hasAnyRightMark(row, leftCols)) continue;
+    const idx = leftIndex(row);
+    if (idx.length !== 1) continue;
+    const src = idx[0];
+    if (src === dominant) continue;
+    if (Math.abs(src - dominant) !== 1) continue;
+    if (normalizeCell(row[dominant])) continue;
+
+    const prev = out[r - 1];
+    const next = out[r + 1];
+    const prevDom = normalizeCell(prev[dominant]) && hasAnyRightMark(prev, leftCols);
+    const nextDom = normalizeCell(next[dominant]) && hasAnyRightMark(next, leftCols);
+    const prevSrc = normalizeCell(prev[src]) && hasAnyRightMark(prev, leftCols);
+    const nextSrc = normalizeCell(next[src]) && hasAnyRightMark(next, leftCols);
+
+    // Solo ajustar cuando los vecinos de arriba/abajo respaldan la columna dominante.
+    if ((prevDom || nextDom) && !prevSrc && !nextSrc) {
+      row[dominant] = row[src];
+      row[src] = '';
+    }
+  }
+  return out;
 }
 
 /**
