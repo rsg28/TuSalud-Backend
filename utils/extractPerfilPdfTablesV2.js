@@ -356,6 +356,92 @@ function normalizeMergedSubrows(tableCells, leftCols = LEFT_COLS) {
   return out;
 }
 
+function collapseStandaloneLargeRows(tableCells, leftCols = LEFT_COLS) {
+  if (!tableCells.length) return tableCells;
+  const out = tableCells.map((r) => r.slice());
+  const groupCol = Math.max(0, leftCols - 2);
+  const detailCol = Math.max(0, leftCols - 1);
+  const toDelete = new Set();
+
+  for (let r = 0; r < out.length - 2; r++) {
+    const row = out[r];
+    const group = normalizeCell(row[groupCol]);
+    const detail = normalizeCell(row[detailCol]);
+    if (!group || detail) continue;
+    if (!hasAnyRightMark(row, leftCols)) continue;
+
+    const children = [];
+    for (let k = r + 1; k < out.length; k++) {
+      const rk = out[k];
+      const gk = normalizeCell(rk[groupCol]);
+      const dk = normalizeCell(rk[detailCol]);
+      if (!dk) break;
+      if (gk && gk !== group) break;
+      children.push(k);
+      if (children.length >= 8) break;
+    }
+
+    if (children.length < 2) continue;
+
+    // Reparte el bloque padre a subfilas: etiqueta + marcas en columnas derechas.
+    const parentMarks = rightMarksVector(row, leftCols);
+    for (const k of children) {
+      const ck = out[k];
+      if (!normalizeCell(ck[groupCol])) ck[groupCol] = group;
+      for (let c = 0; c < parentMarks.length; c++) {
+        if (!normalizeCell(ck[leftCols + c]) && normalizeCell(parentMarks[c])) {
+          ck[leftCols + c] = parentMarks[c];
+        }
+      }
+    }
+    toDelete.add(r);
+  }
+
+  return out.filter((_, idx) => !toDelete.has(idx));
+}
+
+function propagateSectionHeaders(tableCells, leftCols = LEFT_COLS) {
+  if (!tableCells.length) return tableCells;
+  const out = tableCells.map((r) => r.slice());
+  const sectionCol = Math.max(0, leftCols - 2);
+  const itemCol = Math.max(0, leftCols - 1);
+  let activeSection = '';
+
+  for (let r = 0; r < out.length; r++) {
+    const row = out[r];
+    const sec = normalizeCell(row[sectionCol]);
+    const item = normalizeCell(row[itemCol]);
+    const hasRight = hasAnyRightMark(row, leftCols);
+
+    if (sec && item && hasRight) {
+      // Fila que trae encabezado de bloque + primer ítem.
+      activeSection = sec;
+      continue;
+    }
+
+    if (!activeSection) continue;
+    // Corta bloque al llegar a una fila no-dato.
+    if (!hasRight) {
+      activeSection = '';
+      continue;
+    }
+
+    // Si el ítem cayó en columna de sección, lo movemos a la columna de detalle y mantenemos sección.
+    if (sec && !item) {
+      row[itemCol] = sec;
+      row[sectionCol] = activeSection;
+      continue;
+    }
+
+    // Si viene vacío el encabezado de sección, lo repetimos (rowspan vertical).
+    if (!sec && item) {
+      row[sectionCol] = activeSection;
+    }
+  }
+
+  return out;
+}
+
 function countNonEmpty(arr) {
   return arr.reduce((n, c) => n + (normalizeCell(c) ? 1 : 0), 0);
 }
@@ -745,7 +831,9 @@ async function extractPerfilPdfTablesFromBuffer(buffer, options = {}) {
         const cleanedBase = stabilizeLeftColumns(removeCompletelyEmptyRows(trimTrailingEmptyRows(celdas)));
         const cleanedFilled = forwardFillLeftColumns(cleanedBase, LEFT_COLS);
         const cleanedMergedHeaders = expandMergedHeadersAndSpans(cleanedFilled, LEFT_COLS);
-        const cleaned = normalizeMergedSubrows(cleanedMergedHeaders, LEFT_COLS);
+        const normalizedSubrows = normalizeMergedSubrows(cleanedMergedHeaders, LEFT_COLS);
+        const collapsed = collapseStandaloneLargeRows(normalizedSubrows, LEFT_COLS);
+        const cleaned = propagateSectionHeaders(collapsed, LEFT_COLS);
         const hierarchy = buildLeftHierarchy(cleaned, LEFT_COLS);
         return {
           id: i + 1,
@@ -779,7 +867,9 @@ async function extractPerfilPdfTablesFromBuffer(buffer, options = {}) {
         const base = stabilizeLeftColumns(removeCompletelyEmptyRows(trimTrailingEmptyRows(b.map((r) => r.cells))));
         const filled = forwardFillLeftColumns(base, LEFT_COLS);
         const mergedHeaders = expandMergedHeadersAndSpans(filled, LEFT_COLS);
-        const celdas = normalizeMergedSubrows(mergedHeaders, LEFT_COLS);
+        const normalizedSubrows = normalizeMergedSubrows(mergedHeaders, LEFT_COLS);
+        const collapsed = collapseStandaloneLargeRows(normalizedSubrows, LEFT_COLS);
+        const celdas = propagateSectionHeaders(collapsed, LEFT_COLS);
         const hierarchy = buildLeftHierarchy(celdas, LEFT_COLS);
         return {
           id: i + 1,
