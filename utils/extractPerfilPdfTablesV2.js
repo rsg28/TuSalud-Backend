@@ -534,6 +534,55 @@ function stripExamenesGeneralesDecoration(tableCells) {
   );
 }
 
+/**
+ * Rebalancea filas que quedaron corridas 1 columna a la derecha en el bloque izquierdo
+ * (caso típico tras limpiar etiquetas laterales de celdas fusionadas).
+ * Regla: usar columna dominante de filas de datos + continuidad vertical vecina.
+ */
+function rebalanceSingleLeftCellToDominantColumn(tableCells, leftCols = LEFT_COLS) {
+  if (!tableCells.length) return tableCells;
+  const out = tableCells.map((r) => r.slice());
+  const freq = Array.from({ length: leftCols }, () => 0);
+  const leftNonEmptyIdx = (row) => {
+    const idx = [];
+    for (let c = 0; c < leftCols; c++) if (normalizeCell(row[c])) idx.push(c);
+    return idx;
+  };
+
+  for (const row of out) {
+    if (!hasAnyRightMark(row, leftCols)) continue;
+    const idx = leftNonEmptyIdx(row);
+    if (idx.length === 1) freq[idx[0]] += 1;
+  }
+
+  let dominant = 0;
+  for (let c = 1; c < freq.length; c++) {
+    if (freq[c] > freq[dominant]) dominant = c;
+  }
+
+  for (let r = 1; r < out.length - 1; r++) {
+    const row = out[r];
+    if (!hasAnyRightMark(row, leftCols)) continue;
+    const idx = leftNonEmptyIdx(row);
+    if (idx.length !== 1) continue;
+    const src = idx[0];
+    if (src === dominant) continue;
+    if (Math.abs(src - dominant) !== 1) continue;
+    if (normalizeCell(row[dominant])) continue;
+
+    const prev = out[r - 1];
+    const next = out[r + 1];
+    const prevHasDom = normalizeCell(prev[dominant]) && hasAnyRightMark(prev, leftCols);
+    const nextHasDom = normalizeCell(next[dominant]) && hasAnyRightMark(next, leftCols);
+    if (!prevHasDom && !nextHasDom) continue;
+
+    row[dominant] = row[src];
+    row[src] = '';
+  }
+
+  return out;
+}
+
 function countNonEmpty(arr) {
   return arr.reduce((n, c) => n + (normalizeCell(c) ? 1 : 0), 0);
 }
@@ -975,9 +1024,10 @@ async function extractPerfilPdfTablesFromBuffer(buffer, options = {}) {
         const collapsed = collapseStandaloneLargeRows(normalizedSubrows, LEFT_COLS);
         const sectioned = propagateSectionHeaders(collapsed, LEFT_COLS);
         const aligned = alignLeftColumnsByStructure(sectioned, LEFT_COLS);
-        const cleaned = stripExamenesGeneralesDecoration(
+        const stripped = stripExamenesGeneralesDecoration(
           fillGroupByVerticalContinuity(aligned, LEFT_COLS)
         );
+        const cleaned = rebalanceSingleLeftCellToDominantColumn(stripped, LEFT_COLS);
         const hierarchy = buildLeftHierarchy(cleaned, LEFT_COLS);
         return {
           id: i + 1,
@@ -1015,7 +1065,8 @@ async function extractPerfilPdfTablesFromBuffer(buffer, options = {}) {
         const collapsed = collapseStandaloneLargeRows(normalizedSubrows, LEFT_COLS);
         const sectioned = propagateSectionHeaders(collapsed, LEFT_COLS);
         const aligned = alignLeftColumnsByStructure(sectioned, LEFT_COLS);
-        const celdas = stripExamenesGeneralesDecoration(fillGroupByVerticalContinuity(aligned, LEFT_COLS));
+        const stripped = stripExamenesGeneralesDecoration(fillGroupByVerticalContinuity(aligned, LEFT_COLS));
+        const celdas = rebalanceSingleLeftCellToDominantColumn(stripped, LEFT_COLS);
         const hierarchy = buildLeftHierarchy(celdas, LEFT_COLS);
         return {
           id: i + 1,
