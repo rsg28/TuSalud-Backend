@@ -523,6 +523,80 @@ function fillGroupByVerticalContinuity(tableCells, leftCols = LEFT_COLS) {
   return out;
 }
 
+/**
+ * Celda fusionada vertical muy ancha (ej. texto rotado "EXÁMENES GENERALES" en el PDF):
+ * repetir la etiqueta en la columna más izquierda (col 0) en todo el rango de filas que cubre,
+ * no solo donde cayó el texto. El rango se infiere por continuidad con filas de datos y
+ * cortes antes de Anexo / después de PRECIO.
+ */
+function applyMajorVerticalSectionLabel(tableCells, leftCols = LEFT_COLS) {
+  if (!tableCells.length || leftCols < 2) return tableCells;
+  const out = tableCells.map((r) => r.slice());
+  const majorCol = 0;
+  const groupCol = Math.max(0, leftCols - 2);
+  const detailCol = Math.max(0, leftCols - 1);
+
+  const MAJOR_RE = /EXÁMENES\s+GENERALES/i;
+  let firstWithText = -1;
+  for (let r = 0; r < out.length; r++) {
+    const leftJoined = out[r]
+      .slice(0, leftCols)
+      .map(normalizeCell)
+      .join(' ');
+    if (MAJOR_RE.test(leftJoined)) {
+      firstWithText = r;
+      break;
+    }
+  }
+  if (firstWithText < 0) return out;
+
+  const label = 'EXÁMENES GENERALES';
+
+  // Extender hacia arriba: mismas filas de datos que pertenecen al bloque (después de Anexo).
+  let start = firstWithText;
+  while (start > 0) {
+    const prev = out[start - 1];
+    if (!hasAnyRightMark(prev, leftCols)) break;
+    const det = normalizeCell(prev[detailCol]);
+    if (/^anexo\s+16/i.test(det)) break;
+    start -= 1;
+  }
+
+  // Extender hacia abajo hasta la fila anterior a PRECIO SIN IGV.
+  let end = out.length - 1;
+  for (let r = 0; r < out.length; r++) {
+    const det = normalizeCell(out[r][detailCol]);
+    if (/^precio\s+sin\s+igv$/i.test(det)) {
+      end = r - 1;
+      break;
+    }
+  }
+  if (end < start) end = start;
+
+  for (let r = start; r <= end; r++) {
+    out[r][majorCol] = label;
+  }
+
+  // Evitar duplicar la misma etiqueta en col de grupo cuando ya está en col 0.
+  for (let r = start; r <= end; r++) {
+    const g = normalizeCell(out[r][groupCol]);
+    if (MAJOR_RE.test(g) && normalizeCell(out[r][detailCol])) {
+      out[r][groupCol] = '';
+    }
+  }
+
+  // Fila de precio: misma columna mayor a la izquierda; quitar etiqueta duplicada en grupo.
+  for (let r = 0; r < out.length; r++) {
+    const det = normalizeCell(out[r][detailCol]);
+    if (!/^precio\s+sin\s+igv$/i.test(det)) continue;
+    out[r][majorCol] = label;
+    const g = normalizeCell(out[r][groupCol]);
+    if (MAJOR_RE.test(g)) out[r][groupCol] = '';
+  }
+
+  return out;
+}
+
 function countNonEmpty(arr) {
   return arr.reduce((n, c) => n + (normalizeCell(c) ? 1 : 0), 0);
 }
@@ -930,7 +1004,8 @@ async function extractPerfilPdfTablesFromBuffer(buffer, options = {}) {
         const collapsed = collapseStandaloneLargeRows(normalizedSubrows, LEFT_COLS);
         const sectioned = propagateSectionHeaders(collapsed, LEFT_COLS);
         const aligned = alignLeftColumnsByStructure(sectioned, LEFT_COLS);
-        const cleaned = fillGroupByVerticalContinuity(aligned, LEFT_COLS);
+        const filledGroup = fillGroupByVerticalContinuity(aligned, LEFT_COLS);
+        const cleaned = applyMajorVerticalSectionLabel(filledGroup, LEFT_COLS);
         const hierarchy = buildLeftHierarchy(cleaned, LEFT_COLS);
         return {
           id: i + 1,
@@ -968,7 +1043,8 @@ async function extractPerfilPdfTablesFromBuffer(buffer, options = {}) {
         const collapsed = collapseStandaloneLargeRows(normalizedSubrows, LEFT_COLS);
         const sectioned = propagateSectionHeaders(collapsed, LEFT_COLS);
         const aligned = alignLeftColumnsByStructure(sectioned, LEFT_COLS);
-        const celdas = fillGroupByVerticalContinuity(aligned, LEFT_COLS);
+        const filledGroup = fillGroupByVerticalContinuity(aligned, LEFT_COLS);
+        const celdas = applyMajorVerticalSectionLabel(filledGroup, LEFT_COLS);
         const hierarchy = buildLeftHierarchy(celdas, LEFT_COLS);
         return {
           id: i + 1,
