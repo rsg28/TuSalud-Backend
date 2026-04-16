@@ -244,6 +244,107 @@ function buildLeftHierarchy(tableCells, leftCols = LEFT_COLS) {
   return nodes;
 }
 
+function rightMarksVector(row, leftCols = LEFT_COLS) {
+  return row.slice(leftCols).map((v) => normalizeCell(v));
+}
+
+function hasAnyRightMark(row, leftCols = LEFT_COLS) {
+  return rightMarksVector(row, leftCols).some((v) => v.length > 0);
+}
+
+function mergeMarksVectors(vectors) {
+  if (!vectors.length) return [];
+  const cols = vectors[0].length;
+  const out = Array.from({ length: cols }, () => '');
+  for (const vec of vectors) {
+    for (let i = 0; i < cols; i++) {
+      const v = normalizeCell(vec[i]);
+      if (!v) continue;
+      if (!out[i]) out[i] = v;
+      else if (!out[i].includes(v)) out[i] = `${out[i]} ${v}`;
+    }
+  }
+  return out;
+}
+
+/**
+ * Ajustes genéricos para subfilas en celdas fusionadas:
+ * - si en un bloque de subítems numerados una fila tiene X y otras no, reparte las X a todas.
+ * - si una fila trae "Subcategoria 3) ..." separa y propaga "Subcategoria" al resto de subítems.
+ */
+function normalizeMergedSubrows(tableCells, leftCols = LEFT_COLS) {
+  const out = tableCells.map((r) => r.slice());
+  if (!out.length) return out;
+
+  const isNumbered = (s) => /\b\d\)\s/.test(normalizeCell(s));
+  const splitPrefixNumbered = (s) => {
+    const text = normalizeCell(s);
+    const m = text.match(/^(.*?)(\d\)\s.*)$/);
+    if (!m) return { prefix: '', numbered: text };
+    const prefix = normalizeCell(m[1]);
+    const numbered = normalizeCell(m[2]);
+    return { prefix, numbered };
+  };
+
+  let i = 0;
+  while (i < out.length) {
+    const baseKey = normalizeCell(out[i][1]);
+    let j = i;
+    while (j + 1 < out.length && normalizeCell(out[j + 1][1]) === baseKey) j++;
+
+    // bloque [i..j] con misma categoría principal
+    const numberedRows = [];
+    for (let r = i; r <= j; r++) {
+      if (isNumbered(out[r][2])) numberedRows.push(r);
+      else {
+        const { prefix, numbered } = splitPrefixNumbered(out[r][2]);
+        if (numbered && isNumbered(numbered)) {
+          out[r][2] = numbered;
+          if (prefix) out[r][0] = normalizeCell(out[r][0]) || prefix;
+          numberedRows.push(r);
+        }
+      }
+    }
+
+    if (numberedRows.length >= 2) {
+      // 1) Propagar subcategoría (prefijo) entre subítems numerados
+      let subgroup = '';
+      for (const r of numberedRows) {
+        const left0 = normalizeCell(out[r][0]);
+        if (left0) {
+          subgroup = left0;
+          break;
+        }
+      }
+      if (subgroup) {
+        for (const r of numberedRows) {
+          if (!normalizeCell(out[r][0])) out[r][0] = subgroup;
+        }
+      }
+
+      // 2) Repartir marcas X/valores de celdas fusionadas a todas las subfilas numeradas
+      const vecs = numberedRows
+        .map((r) => rightMarksVector(out[r], leftCols))
+        .filter((v) => v.some((x) => normalizeCell(x)));
+      if (vecs.length) {
+        const union = mergeMarksVectors(vecs);
+        for (const r of numberedRows) {
+          const has = hasAnyRightMark(out[r], leftCols);
+          if (!has) {
+            for (let c = 0; c < union.length; c++) {
+              out[r][leftCols + c] = union[c];
+            }
+          }
+        }
+      }
+    }
+
+    i = j + 1;
+  }
+
+  return out;
+}
+
 function countNonEmpty(arr) {
   return arr.reduce((n, c) => n + (normalizeCell(c) ? 1 : 0), 0);
 }
@@ -562,7 +663,8 @@ async function extractPerfilPdfTablesFromBuffer(buffer, options = {}) {
       const blocks = groupBorderRowsByTextBlocks(matrixByBorders, yLinesFromBorders, textBlocks);
       tables = blocks.map((celdas, i) => {
         const cleanedBase = stabilizeLeftColumns(removeCompletelyEmptyRows(trimTrailingEmptyRows(celdas)));
-        const cleaned = forwardFillLeftColumns(cleanedBase, LEFT_COLS);
+        const cleanedFilled = forwardFillLeftColumns(cleanedBase, LEFT_COLS);
+        const cleaned = normalizeMergedSubrows(cleanedFilled, LEFT_COLS);
         const hierarchy = buildLeftHierarchy(cleaned, LEFT_COLS);
         return {
           id: i + 1,
@@ -594,7 +696,8 @@ async function extractPerfilPdfTablesFromBuffer(buffer, options = {}) {
       const blocks = splitRowBlocksByVerticalGaps(gridRows);
       tables = blocks.map((b, i) => {
         const base = stabilizeLeftColumns(removeCompletelyEmptyRows(trimTrailingEmptyRows(b.map((r) => r.cells))));
-        const celdas = forwardFillLeftColumns(base, LEFT_COLS);
+        const filled = forwardFillLeftColumns(base, LEFT_COLS);
+        const celdas = normalizeMergedSubrows(filled, LEFT_COLS);
         const hierarchy = buildLeftHierarchy(celdas, LEFT_COLS);
         return {
           id: i + 1,
