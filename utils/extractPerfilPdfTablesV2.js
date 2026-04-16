@@ -64,8 +64,9 @@ function parseItems(textContent) {
       const x = m[4] || 0;
       const y = m[5] || 0;
       const w = typeof it.width === 'number' ? it.width : Math.abs(m[0] || 0) * String(it.str).length * 0.5 || 5;
+      const h = typeof it.height === 'number' && it.height > 0 ? it.height : Math.max(5, Math.abs(m[3] || 0));
       const str = String(it.str);
-      return { str, x, y, w, x2: x + w, xmid: x + w / 2 };
+      return { str, x, y, w, h, x2: x + w, xmid: x + w / 2 };
     });
 }
 
@@ -275,8 +276,9 @@ function mergeMarksVectors(vectors) {
 function normalizeMergedSubrows(tableCells, leftCols = LEFT_COLS) {
   const out = tableCells.map((r) => r.slice());
   if (!out.length) return out;
+  const subgroupCol = Math.max(0, leftCols - 2);
 
-  const isNumbered = (s) => /\b\d\)\s/.test(normalizeCell(s));
+  const isNumbered = (s) => /^\d\)\s/.test(normalizeCell(s));
   const splitPrefixNumbered = (s) => {
     const text = normalizeCell(s);
     const m = text.match(/^(.*?)(\d\)\s.*)$/);
@@ -300,7 +302,11 @@ function normalizeMergedSubrows(tableCells, leftCols = LEFT_COLS) {
         const { prefix, numbered } = splitPrefixNumbered(out[r][2]);
         if (numbered && isNumbered(numbered)) {
           out[r][2] = numbered;
-          if (prefix) out[r][0] = normalizeCell(out[r][0]) || prefix;
+          if (prefix) {
+            const cur = normalizeCell(out[r][subgroupCol]);
+            if (!cur) out[r][subgroupCol] = prefix;
+            else if (!cur.includes(prefix)) out[r][subgroupCol] = `${cur} ${prefix}`;
+          }
           numberedRows.push(r);
         }
       }
@@ -310,15 +316,15 @@ function normalizeMergedSubrows(tableCells, leftCols = LEFT_COLS) {
       // 1) Propagar subcategoría (prefijo) entre subítems numerados
       let subgroup = '';
       for (const r of numberedRows) {
-        const left0 = normalizeCell(out[r][0]);
-        if (left0) {
-          subgroup = left0;
+        const leftVal = normalizeCell(out[r][subgroupCol]);
+        if (leftVal) {
+          subgroup = leftVal;
           break;
         }
       }
       if (subgroup) {
         for (const r of numberedRows) {
-          if (!normalizeCell(out[r][0])) out[r][0] = subgroup;
+          if (!normalizeCell(out[r][subgroupCol])) out[r][subgroupCol] = subgroup;
         }
       }
 
@@ -355,59 +361,9 @@ function countNonEmpty(arr) {
  * Usa (a) columna dominante y (b) celda de arriba como guía.
  */
 function stabilizeLeftColumns(tableCells) {
-  if (!tableCells.length) return tableCells;
-  const out = tableCells.map((r) => r.slice());
-
-  // Columna dominante de descriptor en filas con contenido a la derecha.
-  const freq = Array.from({ length: LEFT_COLS }, () => 0);
-  for (const row of out) {
-    const rightHasData = countNonEmpty(row.slice(LEFT_COLS)) > 0;
-    if (!rightHasData) continue;
-    const leftIdx = [];
-    for (let i = 0; i < LEFT_COLS; i++) if (normalizeCell(row[i])) leftIdx.push(i);
-    if (leftIdx.length === 1) freq[leftIdx[0]] += 1;
-  }
-  let dominant = LEFT_COLS - 1;
-  let best = -1;
-  for (let i = 0; i < freq.length; i++) {
-    if (freq[i] > best) {
-      best = freq[i];
-      dominant = i;
-    }
-  }
-
-  for (let r = 1; r < out.length; r++) {
-    const row = out[r];
-    const prev = out[r - 1];
-    const rightHasData = countNonEmpty(row.slice(LEFT_COLS)) > 0;
-    if (!rightHasData) continue;
-
-    const leftIdx = [];
-    for (let i = 0; i < LEFT_COLS; i++) if (normalizeCell(row[i])) leftIdx.push(i);
-    if (leftIdx.length !== 1) continue;
-    const src = leftIdx[0];
-    if (src === dominant || normalizeCell(row[dominant])) continue;
-
-    // Preferir columna no vacía de la fila superior si está en bloque izquierdo.
-    let target = dominant;
-    for (let i = 0; i < LEFT_COLS; i++) {
-      if (normalizeCell(prev[i])) {
-        target = i;
-        break;
-      }
-    }
-    if (target < src && !normalizeCell(row[target])) {
-      row[target] = row[src];
-      row[src] = '';
-      continue;
-    }
-    if (target > src && !normalizeCell(row[target])) {
-      row[target] = row[src];
-      row[src] = '';
-      continue;
-    }
-  }
-  return out;
+  // En modo bordes, preferimos no "mover" celdas entre columnas:
+  // la columna detectada por borde suele ser la más confiable.
+  return tableCells.map((r) => r.slice());
 }
 
 /**
@@ -544,6 +500,7 @@ function assignItemsToGridCells(items, xLines, yLines) {
   for (const it of items) {
     const t = normalizeCell(it.str);
     if (!t) continue;
+    // Asignación estable por centro dentro de borde de celda
     let c = -1;
     for (let i = 0; i < xLines.length - 1; i++) {
       if (it.xmid >= xLines[i] && it.xmid < xLines[i + 1]) {
