@@ -383,16 +383,11 @@ function collapseStandaloneLargeRows(tableCells, leftCols = LEFT_COLS) {
 
     if (children.length < 2) continue;
 
-    // Reparte el bloque padre a subfilas: etiqueta + marcas en columnas derechas.
-    const parentMarks = rightMarksVector(row, leftCols);
+    // Reparte solo la etiqueta de bloque; las marcas se respetan por fila hija
+    // para no sobre-expandir X fuera del borde real de cada celda.
     for (const k of children) {
       const ck = out[k];
       if (!normalizeCell(ck[groupCol])) ck[groupCol] = group;
-      for (let c = 0; c < parentMarks.length; c++) {
-        if (!normalizeCell(ck[leftCols + c]) && normalizeCell(parentMarks[c])) {
-          ck[leftCols + c] = parentMarks[c];
-        }
-      }
     }
     toDelete.add(r);
   }
@@ -439,6 +434,44 @@ function propagateSectionHeaders(tableCells, leftCols = LEFT_COLS) {
     }
   }
 
+  return out;
+}
+
+function alignLeftColumnsByStructure(tableCells, leftCols = LEFT_COLS) {
+  if (!tableCells.length) return tableCells;
+  const out = tableCells.map((r) => r.slice());
+  const sectionCol = Math.max(0, leftCols - 2);
+  const detailCol = Math.max(0, leftCols - 1);
+
+  // Detectar columna estructural de detalle por filas con patrón de datos.
+  const score = Array.from({ length: leftCols }, () => 0);
+  for (const row of out) {
+    if (!hasAnyRightMark(row, leftCols)) continue;
+    for (let c = 0; c < leftCols; c++) {
+      if (normalizeCell(row[c])) score[c] += 1;
+    }
+  }
+  let structuralDetail = detailCol;
+  for (let c = 0; c < leftCols; c++) {
+    if (score[c] > score[structuralDetail]) structuralDetail = c;
+  }
+
+  for (let r = 1; r < out.length - 1; r++) {
+    const row = out[r];
+    if (!hasAnyRightMark(row, leftCols)) continue;
+    const sec = normalizeCell(row[sectionCol]);
+    const det = normalizeCell(row[structuralDetail]);
+
+    // Caso típico: el examen cayó una columna a la izquierda (ej. "Anexo 16 A").
+    if (sec && !det && sectionCol !== structuralDetail) {
+      const prevDet = normalizeCell(out[r - 1][structuralDetail]);
+      const nextDet = normalizeCell(out[r + 1][structuralDetail]);
+      if (prevDet || nextDet) {
+        row[structuralDetail] = sec;
+        row[sectionCol] = '';
+      }
+    }
+  }
   return out;
 }
 
@@ -709,12 +742,26 @@ function assignItemsToGridCells(items, xLines, yLines) {
   for (const it of items) {
     const t = normalizeCell(it.str);
     if (!t) continue;
-    // Asignación estable por centro dentro de borde de celda
+    // Columna por máximo solape horizontal con celdas delimitadas por bordes.
     let c = -1;
+    let bestW = 0;
     for (let i = 0; i < xLines.length - 1; i++) {
-      if (it.xmid >= xLines[i] && it.xmid < xLines[i + 1]) {
+      const x1 = xLines[i];
+      const x2 = xLines[i + 1];
+      const interW = Math.max(0, Math.min(it.x2, x2) - Math.max(it.x, x1));
+      if (interW > bestW) {
+        bestW = interW;
         c = i;
-        break;
+      }
+    }
+    if (c < 0 || bestW <= 0) {
+      // fallback por centro dentro de borde de celda
+      c = -1;
+      for (let i = 0; i < xLines.length - 1; i++) {
+        if (it.xmid >= xLines[i] && it.xmid < xLines[i + 1]) {
+          c = i;
+          break;
+        }
       }
     }
     if (c < 0) continue;
@@ -833,7 +880,8 @@ async function extractPerfilPdfTablesFromBuffer(buffer, options = {}) {
         const cleanedMergedHeaders = expandMergedHeadersAndSpans(cleanedFilled, LEFT_COLS);
         const normalizedSubrows = normalizeMergedSubrows(cleanedMergedHeaders, LEFT_COLS);
         const collapsed = collapseStandaloneLargeRows(normalizedSubrows, LEFT_COLS);
-        const cleaned = propagateSectionHeaders(collapsed, LEFT_COLS);
+        const sectioned = propagateSectionHeaders(collapsed, LEFT_COLS);
+        const cleaned = alignLeftColumnsByStructure(sectioned, LEFT_COLS);
         const hierarchy = buildLeftHierarchy(cleaned, LEFT_COLS);
         return {
           id: i + 1,
@@ -869,7 +917,8 @@ async function extractPerfilPdfTablesFromBuffer(buffer, options = {}) {
         const mergedHeaders = expandMergedHeadersAndSpans(filled, LEFT_COLS);
         const normalizedSubrows = normalizeMergedSubrows(mergedHeaders, LEFT_COLS);
         const collapsed = collapseStandaloneLargeRows(normalizedSubrows, LEFT_COLS);
-        const celdas = propagateSectionHeaders(collapsed, LEFT_COLS);
+        const sectioned = propagateSectionHeaders(collapsed, LEFT_COLS);
+        const celdas = alignLeftColumnsByStructure(sectioned, LEFT_COLS);
         const hierarchy = buildLeftHierarchy(celdas, LEFT_COLS);
         return {
           id: i + 1,
