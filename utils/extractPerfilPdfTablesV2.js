@@ -198,6 +198,52 @@ function tableNameFromBlock(block, fallback) {
   return first.length > 48 ? fallback : first.replace(/\s+/g, ' ');
 }
 
+/**
+ * Construye jerarquía izquierda (árbol) por continuidad vertical:
+ * si una celda en col i queda vacía, hereda el nodo activo superior de col i
+ * (rowspan implícito). Útil para categorías/subcategorías en tablas con celdas fusionadas.
+ */
+function buildLeftHierarchy(tableCells, leftCols = LEFT_COLS) {
+  const nodes = [];
+  const activeByCol = Array.from({ length: leftCols }, () => null);
+
+  for (let r = 0; r < tableCells.length; r++) {
+    const row = tableCells[r];
+    for (let c = 0; c < leftCols; c++) {
+      const val = normalizeCell(row[c]);
+      if (!val) {
+        const active = activeByCol[c];
+        if (active) active.endRow = r;
+        continue;
+      }
+
+      const prevActive = activeByCol[c];
+      if (prevActive && prevActive.label === val) {
+        prevActive.endRow = r;
+      } else {
+        // cerrar nodos más profundos cuando aparece un nuevo nodo en este nivel
+        for (let k = c; k < leftCols; k++) {
+          activeByCol[k] = null;
+        }
+        const parent = c > 0 ? activeByCol[c - 1] : null;
+        const node = {
+          id: nodes.length + 1,
+          level: c,
+          column: c,
+          label: val,
+          startRow: r,
+          endRow: r,
+          parentId: parent ? parent.id : null,
+        };
+        nodes.push(node);
+        activeByCol[c] = node;
+      }
+    }
+  }
+
+  return nodes;
+}
+
 function countNonEmpty(arr) {
   return arr.reduce((n, c) => n + (normalizeCell(c) ? 1 : 0), 0);
 }
@@ -499,12 +545,14 @@ async function extractPerfilPdfTablesFromBuffer(buffer, options = {}) {
       const blocks = groupBorderRowsByTextBlocks(matrixByBorders, yLinesRefined, textBlocks);
       tables = blocks.map((celdas, i) => {
         const cleaned = stabilizeLeftColumns(removeCompletelyEmptyRows(trimTrailingEmptyRows(celdas)));
+        const hierarchy = buildLeftHierarchy(cleaned, LEFT_COLS);
         return {
           id: i + 1,
           nombre: tableNameFromBlock(cleaned.map((cells) => ({ cells })), `Tabla ${i + 1}`),
           filas: cleaned.length,
           columnas: maxColsOf(cleaned),
           celdas: cleaned,
+          leftHierarchy: hierarchy,
         };
       });
       if (debug) {
@@ -528,12 +576,14 @@ async function extractPerfilPdfTablesFromBuffer(buffer, options = {}) {
       const blocks = splitRowBlocksByVerticalGaps(gridRows);
       tables = blocks.map((b, i) => {
         const celdas = stabilizeLeftColumns(removeCompletelyEmptyRows(trimTrailingEmptyRows(b.map((r) => r.cells))));
+        const hierarchy = buildLeftHierarchy(celdas, LEFT_COLS);
         return {
           id: i + 1,
           nombre: tableNameFromBlock(b, `Tabla ${i + 1}`),
           filas: celdas.length,
           columnas: maxColsOf(celdas),
           celdas,
+          leftHierarchy: hierarchy,
         };
       });
       if (debug) {
