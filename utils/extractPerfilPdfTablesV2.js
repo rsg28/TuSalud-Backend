@@ -488,6 +488,41 @@ function alignLeftColumnsByStructure(tableCells, leftCols = LEFT_COLS) {
   return out;
 }
 
+function fillGroupByVerticalContinuity(tableCells, leftCols = LEFT_COLS) {
+  if (!tableCells.length) return tableCells;
+  const out = tableCells.map((r) => r.slice());
+  const groupCol = Math.max(0, leftCols - 2);
+  const detailCol = Math.max(0, leftCols - 1);
+  const isSectionLabel = (text) => {
+    const t = normalizeCell(text);
+    if (!t || t.length < 6) return false;
+    const letters = t.replace(/[^A-Za-zÁÉÍÓÚÑÜáéíóúñü]/g, '');
+    if (!letters) return false;
+    const upper = letters.replace(/[^A-ZÁÉÍÓÚÑÜ]/g, '').length;
+    return upper / letters.length >= 0.6;
+  };
+
+  let carry = '';
+  for (let r = 0; r < out.length; r++) {
+    const row = out[r];
+    const group = normalizeCell(row[groupCol]);
+    const detail = normalizeCell(row[detailCol]);
+    const hasRight = hasAnyRightMark(row, leftCols);
+
+    if (group) {
+      carry = group;
+      continue;
+    }
+    if (!carry) continue;
+    if (!detail || !hasRight) continue;
+
+    // No cruzar hacia encabezados de sección en mayúsculas.
+    if (isSectionLabel(detail)) continue;
+    row[groupCol] = carry;
+  }
+  return out;
+}
+
 function countNonEmpty(arr) {
   return arr.reduce((n, c) => n + (normalizeCell(c) ? 1 : 0), 0);
 }
@@ -894,7 +929,8 @@ async function extractPerfilPdfTablesFromBuffer(buffer, options = {}) {
         const normalizedSubrows = normalizeMergedSubrows(cleanedMergedHeaders, LEFT_COLS);
         const collapsed = collapseStandaloneLargeRows(normalizedSubrows, LEFT_COLS);
         const sectioned = propagateSectionHeaders(collapsed, LEFT_COLS);
-        const cleaned = alignLeftColumnsByStructure(sectioned, LEFT_COLS);
+        const aligned = alignLeftColumnsByStructure(sectioned, LEFT_COLS);
+        const cleaned = fillGroupByVerticalContinuity(aligned, LEFT_COLS);
         const hierarchy = buildLeftHierarchy(cleaned, LEFT_COLS);
         return {
           id: i + 1,
@@ -931,7 +967,8 @@ async function extractPerfilPdfTablesFromBuffer(buffer, options = {}) {
         const normalizedSubrows = normalizeMergedSubrows(mergedHeaders, LEFT_COLS);
         const collapsed = collapseStandaloneLargeRows(normalizedSubrows, LEFT_COLS);
         const sectioned = propagateSectionHeaders(collapsed, LEFT_COLS);
-        const celdas = alignLeftColumnsByStructure(sectioned, LEFT_COLS);
+        const aligned = alignLeftColumnsByStructure(sectioned, LEFT_COLS);
+        const celdas = fillGroupByVerticalContinuity(aligned, LEFT_COLS);
         const hierarchy = buildLeftHierarchy(celdas, LEFT_COLS);
         return {
           id: i + 1,
