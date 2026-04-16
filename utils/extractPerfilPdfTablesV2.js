@@ -396,23 +396,6 @@ function tryBuildGridFromRectangles(rects) {
   };
 }
 
-function refineYLinesWithTextRows(yLines, rowBuckets) {
-  const sorted = [...yLines].sort((a, b) => b - a);
-  const rowYs = rowBuckets.map((r) => r.y).sort((a, b) => b - a);
-  const mids = [];
-  for (let i = 0; i < rowYs.length - 1; i++) {
-    const gap = rowYs[i] - rowYs[i + 1];
-    if (gap >= 6 && gap <= 14) {
-      mids.push((rowYs[i] + rowYs[i + 1]) / 2);
-    }
-  }
-  const out = [...sorted];
-  for (const m of mids) {
-    const near = out.some((y) => Math.abs(y - m) <= 2);
-    if (!near) out.push(m);
-  }
-  return out.sort((a, b) => b - a);
-}
 
 function assignRowBucketsToXGrid(rowBuckets, xLines) {
   const sortedX = [...xLines].sort((a, b) => a - b);
@@ -571,11 +554,12 @@ async function extractPerfilPdfTablesFromBuffer(buffer, options = {}) {
     const grid = tryBuildGridFromRectangles(rects);
     if (grid) {
       const rowBuckets = bucketRows(items);
-      const yLinesRefined = refineYLinesWithTextRows(grid.yLines, rowBuckets);
-      const matrixByBorders = assignItemsToGridCells(items, grid.xLines, yLinesRefined);
+      // Importante: separar celdas SOLO con bordes reales, sin cortes sintéticos por texto.
+      const yLinesFromBorders = [...grid.yLines].sort((a, b) => b - a);
+      const matrixByBorders = assignItemsToGridCells(items, grid.xLines, yLinesFromBorders);
       const textRows = bucketRows(items);
       const textBlocks = splitRowBlocksByVerticalGaps(textRows);
-      const blocks = groupBorderRowsByTextBlocks(matrixByBorders, yLinesRefined, textBlocks);
+      const blocks = groupBorderRowsByTextBlocks(matrixByBorders, yLinesFromBorders, textBlocks);
       tables = blocks.map((celdas, i) => {
         const cleanedBase = stabilizeLeftColumns(removeCompletelyEmptyRows(trimTrailingEmptyRows(celdas)));
         const cleaned = forwardFillLeftColumns(cleanedBase, LEFT_COLS);
@@ -593,7 +577,7 @@ async function extractPerfilPdfTablesFromBuffer(buffer, options = {}) {
         debugInfo = {
           method: 'borders+x-columns',
           xLines: grid.xLines,
-          yLinesSample: yLinesRefined.slice(0, 120),
+          yLinesSample: yLinesFromBorders.slice(0, 120),
           blockSizes: blocks.map((b) => b.length),
           textBlockSizes: textBlocks.map((b) => b.length),
           rectCount: rects.length,
