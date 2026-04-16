@@ -496,6 +496,24 @@ function fillGroupByVerticalContinuity(tableCells, leftCols = LEFT_COLS) {
   return tableCells.map((r) => r.slice());
 }
 
+/**
+ * Etiqueta lateral "EXÁMENES GENERALES" (celda fusionada / texto rotado mal asignado):
+ * no aporta fila de examen; se elimina del contenido de la celda para no contaminar columnas.
+ */
+function stripExamenesGeneralesDecoration(tableCells) {
+  const reOnly = /^EX[AÁ]MENES\s+GENERALES$/i;
+  const rePart = /\bEX[AÁ]MENES\s+GENERALES\b/gi;
+  return tableCells.map((row) =>
+    row.map((cell) => {
+      const s = normalizeCell(cell);
+      if (!s) return '';
+      if (reOnly.test(s)) return '';
+      const stripped = s.replace(rePart, ' ').replace(/\s+/g, ' ').trim();
+      return normalizeCell(stripped);
+    })
+  );
+}
+
 function countNonEmpty(arr) {
   return arr.reduce((n, c) => n + (normalizeCell(c) ? 1 : 0), 0);
 }
@@ -937,7 +955,9 @@ async function extractPerfilPdfTablesFromBuffer(buffer, options = {}) {
         const collapsed = collapseStandaloneLargeRows(normalizedSubrows, LEFT_COLS);
         const sectioned = propagateSectionHeaders(collapsed, LEFT_COLS);
         const aligned = alignLeftColumnsByStructure(sectioned, LEFT_COLS);
-        const cleaned = fillGroupByVerticalContinuity(aligned, LEFT_COLS);
+        const cleaned = stripExamenesGeneralesDecoration(
+          fillGroupByVerticalContinuity(aligned, LEFT_COLS)
+        );
         const hierarchy = buildLeftHierarchy(cleaned, LEFT_COLS);
         return {
           id: i + 1,
@@ -975,7 +995,7 @@ async function extractPerfilPdfTablesFromBuffer(buffer, options = {}) {
         const collapsed = collapseStandaloneLargeRows(normalizedSubrows, LEFT_COLS);
         const sectioned = propagateSectionHeaders(collapsed, LEFT_COLS);
         const aligned = alignLeftColumnsByStructure(sectioned, LEFT_COLS);
-        const celdas = fillGroupByVerticalContinuity(aligned, LEFT_COLS);
+        const celdas = stripExamenesGeneralesDecoration(fillGroupByVerticalContinuity(aligned, LEFT_COLS));
         const hierarchy = buildLeftHierarchy(celdas, LEFT_COLS);
         return {
           id: i + 1,
