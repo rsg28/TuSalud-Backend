@@ -198,6 +198,71 @@ function tableNameFromBlock(block, fallback) {
   return first.length > 48 ? fallback : first.replace(/\s+/g, ' ');
 }
 
+function countNonEmpty(arr) {
+  return arr.reduce((n, c) => n + (normalizeCell(c) ? 1 : 0), 0);
+}
+
+/**
+ * Corrige drift horizontal en el bloque izquierdo (cols 0..LEFT_COLS-1):
+ * algunas filas llegan una columna más a la izquierda por ruido de bbox.
+ * Usa (a) columna dominante y (b) celda de arriba como guía.
+ */
+function stabilizeLeftColumns(tableCells) {
+  if (!tableCells.length) return tableCells;
+  const out = tableCells.map((r) => r.slice());
+
+  // Columna dominante de descriptor en filas con contenido a la derecha.
+  const freq = Array.from({ length: LEFT_COLS }, () => 0);
+  for (const row of out) {
+    const rightHasData = countNonEmpty(row.slice(LEFT_COLS)) > 0;
+    if (!rightHasData) continue;
+    const leftIdx = [];
+    for (let i = 0; i < LEFT_COLS; i++) if (normalizeCell(row[i])) leftIdx.push(i);
+    if (leftIdx.length === 1) freq[leftIdx[0]] += 1;
+  }
+  let dominant = LEFT_COLS - 1;
+  let best = -1;
+  for (let i = 0; i < freq.length; i++) {
+    if (freq[i] > best) {
+      best = freq[i];
+      dominant = i;
+    }
+  }
+
+  for (let r = 1; r < out.length; r++) {
+    const row = out[r];
+    const prev = out[r - 1];
+    const rightHasData = countNonEmpty(row.slice(LEFT_COLS)) > 0;
+    if (!rightHasData) continue;
+
+    const leftIdx = [];
+    for (let i = 0; i < LEFT_COLS; i++) if (normalizeCell(row[i])) leftIdx.push(i);
+    if (leftIdx.length !== 1) continue;
+    const src = leftIdx[0];
+    if (src === dominant || normalizeCell(row[dominant])) continue;
+
+    // Preferir columna no vacía de la fila superior si está en bloque izquierdo.
+    let target = dominant;
+    for (let i = 0; i < LEFT_COLS; i++) {
+      if (normalizeCell(prev[i])) {
+        target = i;
+        break;
+      }
+    }
+    if (target < src && !normalizeCell(row[target])) {
+      row[target] = row[src];
+      row[src] = '';
+      continue;
+    }
+    if (target > src && !normalizeCell(row[target])) {
+      row[target] = row[src];
+      row[src] = '';
+      continue;
+    }
+  }
+  return out;
+}
+
 function clusterEdges(values, gap = EDGE_CLUSTER_GAP) {
   if (!values.length) return [];
   const s = [...values].sort((a, b) => a - b);
@@ -433,7 +498,7 @@ async function extractPerfilPdfTablesFromBuffer(buffer, options = {}) {
       const textBlocks = splitRowBlocksByVerticalGaps(textRows);
       const blocks = groupBorderRowsByTextBlocks(matrixByBorders, yLinesRefined, textBlocks);
       tables = blocks.map((celdas, i) => {
-        const cleaned = removeCompletelyEmptyRows(trimTrailingEmptyRows(celdas));
+        const cleaned = stabilizeLeftColumns(removeCompletelyEmptyRows(trimTrailingEmptyRows(celdas)));
         return {
           id: i + 1,
           nombre: tableNameFromBlock(cleaned.map((cells) => ({ cells })), `Tabla ${i + 1}`),
@@ -462,7 +527,7 @@ async function extractPerfilPdfTablesFromBuffer(buffer, options = {}) {
       const gridRows = gridifyRows(rows, rightCenters);
       const blocks = splitRowBlocksByVerticalGaps(gridRows);
       tables = blocks.map((b, i) => {
-        const celdas = removeCompletelyEmptyRows(trimTrailingEmptyRows(b.map((r) => r.cells)));
+        const celdas = stabilizeLeftColumns(removeCompletelyEmptyRows(trimTrailingEmptyRows(b.map((r) => r.cells))));
         return {
           id: i + 1,
           nombre: tableNameFromBlock(b, `Tabla ${i + 1}`),
