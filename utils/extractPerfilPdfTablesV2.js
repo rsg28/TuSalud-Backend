@@ -8,7 +8,7 @@ const LEFT_COLS = 3;
 const RIGHT_CENTER_CLUSTER_GAP = 15;
 const MIN_RIGHT_CLUSTER_HITS = 3;
 const EDGE_CLUSTER_GAP = 1.5;
-const EDGE_MIN_HITS = 6;
+const EDGE_MIN_HITS = 10;
 
 function normalizeCell(s) {
   return String(s || '').replace(/\r/g, ' ').replace(/\s+/g, ' ').trim();
@@ -361,6 +361,28 @@ function splitGridRowsByYGaps(matrix, yLines) {
   return blocks;
 }
 
+function groupBorderRowsByTextBlocks(matrixByBorders, yLines, textBlocks) {
+  const rowMids = [];
+  for (let i = 0; i < yLines.length - 1 && i < matrixByBorders.length; i++) {
+    rowMids.push({ yMid: (yLines[i] + yLines[i + 1]) / 2, cells: matrixByBorders[i] });
+  }
+
+  const ranges = textBlocks.map((b) => {
+    const ys = b.map((r) => r.y);
+    const top = Math.max(...ys);
+    const bottom = Math.min(...ys);
+    return { top, bottom };
+  });
+
+  const MARGIN_Y = 24;
+  return ranges.map((rg) => {
+    const rows = rowMids
+      .filter((r) => r.yMid <= rg.top + MARGIN_Y && r.yMid >= rg.bottom - MARGIN_Y)
+      .map((r) => r.cells);
+    return trimTrailingEmptyRows(rows);
+  });
+}
+
 async function extractPerfilPdfTablesFromBuffer(buffer, options = {}) {
   const debug = !!options.debug;
   const data = Buffer.isBuffer(buffer)
@@ -381,26 +403,27 @@ async function extractPerfilPdfTablesFromBuffer(buffer, options = {}) {
 
     const grid = tryBuildGridFromRectangles(rects);
     if (grid) {
-      const rowBuckets = bucketRows(items);
-      const gridRowsByTextY = assignRowBucketsToXGrid(rowBuckets, grid.xLines);
-      const blocks = splitRowBlocksByVerticalGaps(gridRowsByTextY);
-      tables = blocks.map((b, i) => {
-        const celdas = trimTrailingEmptyRows(b.map((r) => r.cells));
+      const matrixByBorders = assignItemsToGridCells(items, grid.xLines, grid.yLines);
+      const textRows = bucketRows(items);
+      const textBlocks = splitRowBlocksByVerticalGaps(textRows);
+      const blocks = groupBorderRowsByTextBlocks(matrixByBorders, grid.yLines, textBlocks);
+      tables = blocks.map((celdas, i) => {
+        const cleaned = trimTrailingEmptyRows(celdas);
         return {
-        id: i + 1,
-        nombre: tableNameFromBlock(b, `Tabla ${i + 1}`),
-        filas: celdas.length,
-        columnas: maxColsOf(celdas),
-        celdas,
-      };
+          id: i + 1,
+          nombre: tableNameFromBlock(cleaned.map((cells) => ({ cells })), `Tabla ${i + 1}`),
+          filas: cleaned.length,
+          columnas: maxColsOf(cleaned),
+          celdas: cleaned,
+        };
       });
       if (debug) {
         debugInfo = {
           method: 'borders+x-columns',
           xLines: grid.xLines,
-          yLinesSample: grid.yLines.slice(0, 40),
-          rowYs: rowBuckets.map((r) => Number(r.y.toFixed(2))),
+          yLinesSample: grid.yLines.slice(0, 80),
           blockSizes: blocks.map((b) => b.length),
+          textBlockSizes: textBlocks.map((b) => b.length),
           rectCount: rects.length,
           itemCount: items.length,
         };
