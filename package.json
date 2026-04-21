@@ -28,7 +28,7 @@
     "multer": "^2.1.1",
     "mysql2": "^3.6.5",
     "pdf-parse": "^1.1.1",
-    "pdfjs-dist": "^3.11.174",
+    "pdfjs-dist": "^4.4.168",
     "resend": "^6.9.3",
     "tesseract.js": "^6.0.1"
   },

@@ -1,6 +1,18 @@
-const pdfjsLib = require('pdfjs-dist/legacy/build/pdf.js');
+const { pathToFileURL } = require('url');
 
-pdfjsLib.GlobalWorkerOptions.workerSrc = require.resolve('pdfjs-dist/legacy/build/pdf.worker.js');
+/** pdfjs-dist ≥4 es ESM; carga perezosa + worker vía file URL (CVE-2024-4367 corregido en ≥4.2.67). */
+let pdfjsLibPromise;
+function getPdfjsLib() {
+  if (!pdfjsLibPromise) {
+    pdfjsLibPromise = import('pdfjs-dist/legacy/build/pdf.mjs').then((pdfjsLib) => {
+      pdfjsLib.GlobalWorkerOptions.workerSrc = pathToFileURL(
+        require.resolve('pdfjs-dist/legacy/build/pdf.worker.mjs')
+      ).href;
+      return pdfjsLib;
+    });
+  }
+  return pdfjsLibPromise;
+}
 
 const ROW_Y_TOL = 4;
 const INLINE_MERGE_GAP = 2;
@@ -823,7 +835,7 @@ function computeStackDeltaY(mergedItems, nextPageItems, gap) {
   return bottomPrev - topNext - gap;
 }
 
-async function extractRectanglesFromPage(page) {
+async function extractRectanglesFromPage(page, pdfjsLib) {
   const OPS = pdfjsLib.OPS;
   const operatorList = await page.getOperatorList();
   const rects = [];
@@ -1053,6 +1065,7 @@ async function extractPerfilPdfTablesFromBuffer(buffer, options = {}) {
   const data = Buffer.isBuffer(buffer)
     ? new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength)
     : new Uint8Array(buffer);
+  const pdfjsLib = await getPdfjsLib();
   const task = pdfjsLib.getDocument({ data, useSystemFonts: true, disableFontFace: true, isEvalSupported: false });
   const pdf = await task.promise;
   try {
@@ -1065,7 +1078,7 @@ async function extractPerfilPdfTablesFromBuffer(buffer, options = {}) {
       const page = await pdf.getPage(pi);
       const textContent = await page.getTextContent({ normalizeWhitespace: false, disableCombineTextItems: false });
       const pageItems = parseItems(textContent);
-      const pageRects = await extractRectanglesFromPage(page);
+      const pageRects = await extractRectanglesFromPage(page, pdfjsLib);
       perPage.push({ items: pageItems, rects: pageRects });
     }
 
