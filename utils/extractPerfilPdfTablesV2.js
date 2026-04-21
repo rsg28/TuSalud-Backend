@@ -861,6 +861,10 @@ function computeStackDeltaY(mergedItems, nextPageItems, gap) {
   return bottomPrev - topNext - gap;
 }
 
+/**
+ * Rectángulos explícitos en el stream (p. ej. `re` + fill). Muchos PDF dibujan líneas con `m`/`l`/`S`
+ * sin relleno; esos bordes NO entran aquí → `tryBuildGridFromRectangles` falla y se usa solo texto.
+ */
 async function extractRectanglesFromPage(page, pdfjsLib) {
   const OPS = pdfjsLib.OPS;
   const operatorList = await page.getOperatorList();
@@ -1086,6 +1090,81 @@ function groupBorderRowsByTextBlocks(matrixByBorders, yLines, textBlocks) {
   });
 }
 
+function rowEmptyCellRatio(row) {
+  const n = Math.max(1, row.length);
+  return row.filter((c) => !normalizeCell(c)).length / n;
+}
+
+/**
+ * Dos tablas pegadas en la misma grilla X/Y: a veces hay filas casi vacías entre bloques.
+ * Parte solo si salen ≥2 bloques con algo de cuerpo.
+ */
+function splitMatrixOnSparseSeparatorBands(matrix, minBlockRows = 3, sparseThreshold = 0.94) {
+  if (!matrix || matrix.length < minBlockRows * 2 + 1) return null;
+  const blocks = [];
+  let buf = [];
+  let sepStreak = 0;
+  for (const row of matrix) {
+    if (rowEmptyCellRatio(row) >= sparseThreshold) {
+      sepStreak += 1;
+      if (buf.length >= minBlockRows) {
+        blocks.push(trimTrailingEmptyRows(buf));
+        buf = [];
+      }
+      continue;
+    }
+    sepStreak = 0;
+    buf.push(row);
+  }
+  if (buf.length) blocks.push(trimTrailingEmptyRows(buf));
+  return blocks.length > 1 ? blocks : null;
+}
+
+function mergeAdjacentSmallBlocks(blocks, minRows = 2) {
+  if (blocks.length <= 1) return blocks;
+  const out = [];
+  for (const b of blocks) {
+    if (b.length >= minRows) {
+      out.push(b);
+      continue;
+    }
+    if (out.length) out[out.length - 1] = [...out[out.length - 1], ...b];
+    else if (b.length) out.push(b);
+  }
+  return out.length ? out : blocks;
+}
+
+/** Elige cómo partir tablas cuando ya hay rejilla por rectángulos (bordes) en el PDF. */
+function chooseBorderTableBlocks(matrixByBorders, yLines, textBlocks) {
+  const clean = (rows) => trimTrailingEmptyRows(removeCompletelyEmptyRows(rows));
+
+  const byText = groupBorderRowsByTextBlocks(matrixByBorders, yLines, textBlocks).map(clean).filter((b) => b.length > 0);
+
+  let byGap = [];
+  try {
+    byGap = splitGridRowsByYGaps(matrixByBorders, yLines).map(clean).filter((b) => b.length > 0);
+  } catch {
+    byGap = [];
+  }
+
+  const bySparse = splitMatrixOnSparseSeparatorBands(matrixByBorders);
+
+  const substantial = (bs) => bs.filter((b) => b.length >= 4).length;
+
+  let pick = byText;
+  /** Cortes por “salto” vertical entre filas de la rejilla (dos tablas con distinta densidad de líneas). */
+  if (byGap.length > byText.length && byGap.length <= 22 && substantial(byGap) >= Math.max(1, substantial(byText) - 1)) {
+    pick = byGap;
+  }
+  /** Filas casi vacías entre bloques de celdas llenas. */
+  if (bySparse && bySparse.length > pick.length && bySparse.length <= 22) {
+    pick = bySparse;
+  }
+
+  pick = mergeAdjacentSmallBlocks(pick, 2);
+  return pick.length ? pick : [matrixByBorders];
+}
+
 async function extractPerfilPdfTablesFromBuffer(buffer, options = {}) {
   const debug = !!options.debug;
   const data = Buffer.isBuffer(buffer)
@@ -1140,7 +1219,7 @@ async function extractPerfilPdfTablesFromBuffer(buffer, options = {}) {
       const matrixByBorders = assignItemsToGridCells(items, grid.xLines, yLinesFromBorders);
       const textRows = bucketRows(items);
       const textBlocks = splitRowBlocksByVerticalGaps(textRows);
-      const blocks = groupBorderRowsByTextBlocks(matrixByBorders, yLinesFromBorders, textBlocks);
+      const blocks = chooseBorderTableBlocks(matrixByBorders, yLinesFromBorders, textBlocks);
       tables = blocks.map((celdas, i) => {
         const cleanedBase = stabilizeLeftColumns(removeCompletelyEmptyRows(trimTrailingEmptyRows(celdas)));
         const cleanedFilled = forwardFillLeftColumns(cleanedBase, LEFT_COLS);
