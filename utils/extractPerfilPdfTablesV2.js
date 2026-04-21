@@ -1,15 +1,41 @@
+const fs = require('fs');
+const path = require('path');
 const { pathToFileURL } = require('url');
 
-/** pdfjs-dist ≥4 es ESM; carga perezosa + worker vía file URL (CVE-2024-4367 corregido en ≥4.2.67). */
+/**
+ * pdfjs-dist ≥4 es ESM (.mjs). Cargar con `import(fileURL)` evita resoluciones raras de `import('pkg/...')`
+ * y falla con mensaje claro si en EC2 no se ejecutó `npm install` en TuSalud-Backend o quedó pdfjs 3.x.
+ * (CVE-2024-4367 corregido en ≥4.2.67.)
+ */
 let pdfjsLibPromise;
 function getPdfjsLib() {
   if (!pdfjsLibPromise) {
-    pdfjsLibPromise = import('pdfjs-dist/legacy/build/pdf.mjs').then((pdfjsLib) => {
-      pdfjsLib.GlobalWorkerOptions.workerSrc = pathToFileURL(
-        require.resolve('pdfjs-dist/legacy/build/pdf.worker.mjs')
-      ).href;
+    pdfjsLibPromise = (async () => {
+      let pkgJson;
+      try {
+        pkgJson = require.resolve('pdfjs-dist/package.json');
+      } catch {
+        throw new Error(
+          'pdfjs-dist no instalado en el backend. En la EC2: cd TuSalud-Backend && npm install && reinicie Node.'
+        );
+      }
+      const root = path.dirname(pkgJson);
+      const legacyPdf = path.join(root, 'legacy', 'build', 'pdf.mjs');
+      const legacyWorker = path.join(root, 'legacy', 'build', 'pdf.worker.mjs');
+      if (!fs.existsSync(legacyPdf)) {
+        const legacyJs = path.join(root, 'legacy', 'build', 'pdf.js');
+        const hint = fs.existsSync(legacyJs)
+          ? 'Hay pdf.js 3.x (legacy .js); actualice package.json a pdfjs-dist ^4.4.x y npm install.'
+          : `No existe ${legacyPdf}. Ejecute npm install en TuSalud-Backend y despliegue node_modules o el lockfile.`;
+        throw new Error(`pdfjs-dist incompleto en ${root}. ${hint}`);
+      }
+      if (!fs.existsSync(legacyWorker)) {
+        throw new Error(`pdfjs-dist incompleto: falta ${legacyWorker}`);
+      }
+      const pdfjsLib = await import(pathToFileURL(legacyPdf).href);
+      pdfjsLib.GlobalWorkerOptions.workerSrc = pathToFileURL(legacyWorker).href;
       return pdfjsLib;
-    });
+    })();
   }
   return pdfjsLibPromise;
 }
