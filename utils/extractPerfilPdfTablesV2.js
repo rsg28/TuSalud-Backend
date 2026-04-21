@@ -779,6 +779,50 @@ function clusterEdges(values, gap = EDGE_CLUSTER_GAP) {
   }));
 }
 
+/**
+ * Borde inferior “útil” del texto acumulado (evita usar una línea de pie muy baja como ancla).
+ * Usa la fila agrupada más baja en Y con varios fragmentos de texto.
+ */
+function approximateContentBottomY(items) {
+  if (!items.length) return 0;
+  const rows = bucketRows(items);
+  if (!rows.length) return Math.min(...items.map((i) => i.y));
+  const asc = [...rows].sort((a, b) => a.y - b.y);
+  for (const row of asc) {
+    const n = row.items.filter((it) => normalizeCell(it.str).length >= 2).length;
+    if (n >= 2) return row.y;
+  }
+  return asc[0].y;
+}
+
+/** Borde superior útil de la página siguiente (cabecera / primera banda con texto). */
+function approximateContentTopY(items) {
+  if (!items.length) return 0;
+  const rows = bucketRows(items);
+  if (!rows.length) return Math.max(...items.map((i) => i.y));
+  return Math.max(...rows.map((r) => r.y));
+}
+
+function computeInterPageStackGap(items) {
+  const rows = bucketRows(items);
+  if (rows.length < 2) return 10;
+  const ys = rows.map((r) => r.y).sort((a, b) => b - a);
+  const gaps = [];
+  for (let i = 0; i < ys.length - 1; i++) {
+    const g = ys[i] - ys[i + 1];
+    if (g > 0 && g < 48) gaps.push(g);
+  }
+  const m = median(gaps);
+  return m > 0 && m < 48 ? Math.min(16, Math.max(6, m * 0.85)) : 10;
+}
+
+function computeStackDeltaY(mergedItems, nextPageItems, gap) {
+  if (!mergedItems.length || !nextPageItems.length) return 0;
+  const bottomPrev = approximateContentBottomY(mergedItems);
+  const topNext = approximateContentTopY(nextPageItems);
+  return bottomPrev - topNext - gap;
+}
+
 async function extractRectanglesFromPage(page) {
   const OPS = pdfjsLib.OPS;
   const operatorList = await page.getOperatorList();
@@ -1014,11 +1058,38 @@ async function extractPerfilPdfTablesFromBuffer(buffer, options = {}) {
   try {
     const numpages = pdf.numPages || 0;
     if (numpages < 1) return { ok: true, numpages: 0, tables: [] };
-    const page = await pdf.getPage(1);
-    const textContent = await page.getTextContent({ normalizeWhitespace: false, disableCombineTextItems: false });
-    const items = parseItems(textContent);
-    if (!items.length) return { ok: true, numpages, tables: [] };
-    const rects = await extractRectanglesFromPage(page);
+
+    /** Todas las páginas: texto + rectángulos en un solo eje Y para tablas cortadas entre páginas. */
+    const perPage = [];
+    for (let pi = 1; pi <= numpages; pi++) {
+      const page = await pdf.getPage(pi);
+      const textContent = await page.getTextContent({ normalizeWhitespace: false, disableCombineTextItems: false });
+      const pageItems = parseItems(textContent);
+      const pageRects = await extractRectanglesFromPage(page);
+      perPage.push({ items: pageItems, rects: pageRects });
+    }
+
+    const mergedItems = [];
+    const mergedRects = [];
+    const stackGap =
+      perPage[0] && perPage[0].items.length ? computeInterPageStackGap(perPage[0].items) : 10;
+
+    for (let i = 0; i < perPage.length; i++) {
+      const { items: rawItems, rects: rawRects } = perPage[i];
+      if (!rawItems.length) continue;
+      if (!mergedItems.length) {
+        for (const it of rawItems) mergedItems.push({ ...it });
+        for (const r of rawRects) mergedRects.push({ ...r });
+        continue;
+      }
+      const deltaY = computeStackDeltaY(mergedItems, rawItems, stackGap);
+      for (const it of rawItems) mergedItems.push({ ...it, y: it.y + deltaY });
+      for (const r of rawRects) mergedRects.push({ ...r, y1: r.y1 + deltaY, y2: r.y2 + deltaY });
+    }
+
+    if (!mergedItems.length) return { ok: true, numpages, tables: [] };
+    const items = mergedItems;
+    const rects = mergedRects;
     let tables = [];
     let debugInfo = null;
 
@@ -1107,6 +1178,8 @@ async function extractPerfilPdfTablesFromBuffer(buffer, options = {}) {
         };
       }
     }
+
+    tables = tables.filter((t) => Array.isArray(t.celdas) && t.celdas.length > 0);
 
     if (debug) {
       return { ok: true, numpages, tables, debug: debugInfo };
