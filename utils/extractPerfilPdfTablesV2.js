@@ -1120,22 +1120,46 @@ function splitMatrixOnSparseSeparatorBands(matrix, minBlockRows = 3, sparseThres
   return blocks.length > 1 ? blocks : null;
 }
 
+/**
+ * Bloques con menos de `minRows` filas se fusionan con el vecino adyacente más razonable:
+ * si hay vecino previo, se le anexan; si no, se anteponen al siguiente.
+ * Esto evita que una cabecera corta salga como "tabla" separada.
+ */
 function mergeAdjacentSmallBlocks(blocks, minRows = 2) {
   if (blocks.length <= 1) return blocks;
   const out = [];
+  const queued = [];
   for (const b of blocks) {
     if (b.length >= minRows) {
-      out.push(b);
+      if (queued.length) {
+        const merged = queued.reduce((acc, q) => acc.concat(q), []);
+        out.push([...merged, ...b]);
+        queued.length = 0;
+      } else {
+        out.push(b);
+      }
       continue;
     }
-    if (out.length) out[out.length - 1] = [...out[out.length - 1], ...b];
-    else if (b.length) out.push(b);
+    if (out.length) {
+      out[out.length - 1] = [...out[out.length - 1], ...b];
+    } else {
+      queued.push(b);
+    }
+  }
+  if (queued.length) {
+    const merged = queued.reduce((acc, q) => acc.concat(q), []);
+    if (out.length) out[0] = [...merged, ...out[0]];
+    else if (merged.length) out.push(merged);
   }
   return out.length ? out : blocks;
 }
 
-/** Elige cómo partir tablas cuando ya hay rejilla por rectángulos (bordes) en el PDF. */
-function chooseBorderTableBlocks(matrixByBorders, yLines, textBlocks) {
+/**
+ * Dentro de una banda semántica ya delimitada por títulos (ANEXO/NOTA/etc.) no debe volver a
+ * partirse la rejilla: el dueño real del corte es el título. `anchorMode` baja la agresividad.
+ */
+function chooseBorderTableBlocks(matrixByBorders, yLines, textBlocks, options = {}) {
+  const anchorMode = !!options.anchorMode;
   const clean = (rows) => trimTrailingEmptyRows(removeCompletelyEmptyRows(rows));
 
   const byText = groupBorderRowsByTextBlocks(matrixByBorders, yLines, textBlocks).map(clean).filter((b) => b.length > 0);
@@ -1151,17 +1175,21 @@ function chooseBorderTableBlocks(matrixByBorders, yLines, textBlocks) {
 
   const substantial = (bs) => bs.filter((b) => b.length >= 4).length;
 
+  if (anchorMode) {
+    return [trimTrailingEmptyRows(removeCompletelyEmptyRows(matrixByBorders))].filter(
+      (b) => b.length > 0
+    );
+  }
+
   let pick = byText;
-  /** Cortes por “salto” vertical entre filas de la rejilla (dos tablas con distinta densidad de líneas). */
   if (byGap.length > byText.length && byGap.length <= 22 && substantial(byGap) >= Math.max(1, substantial(byText) - 1)) {
     pick = byGap;
   }
-  /** Filas casi vacías entre bloques de celdas llenas. */
   if (bySparse && bySparse.length > pick.length && bySparse.length <= 22) {
     pick = bySparse;
   }
 
-  pick = mergeAdjacentSmallBlocks(pick, 2);
+  pick = mergeAdjacentSmallBlocks(pick, 4);
   return pick.length ? pick : [matrixByBorders];
 }
 
@@ -1301,7 +1329,8 @@ function buildSemanticSlicesOrFull(items, rects) {
 /**
  * Extrae tablas de un subconjunto ya recortado por Y (una banda ancla o documento completo).
  */
-async function extractTablesFromItemRectSlice(items, rects, debug) {
+async function extractTablesFromItemRectSlice(items, rects, debug, options = {}) {
+  const anchorMode = !!options.anchorMode;
   let tables = [];
   let debugInfo = null;
   const grid = tryBuildGridFromRectangles(rects);
@@ -1311,7 +1340,7 @@ async function extractTablesFromItemRectSlice(items, rects, debug) {
     const matrixByBorders = assignItemsToGridCells(items, grid.xLines, yLinesFromBorders);
     const textRows = bucketRows(items);
     const textBlocks = splitRowBlocksByVerticalGaps(textRows);
-    const blocks = chooseBorderTableBlocks(matrixByBorders, yLinesFromBorders, textBlocks);
+    const blocks = chooseBorderTableBlocks(matrixByBorders, yLinesFromBorders, textBlocks, { anchorMode });
     tables = blocks.map((celdas, i) => {
       const cleanedBase = stabilizeLeftColumns(removeCompletelyEmptyRows(trimTrailingEmptyRows(celdas)));
       const cleanedFilled = forwardFillLeftColumns(cleanedBase, LEFT_COLS);
@@ -1384,7 +1413,9 @@ async function extractTablesFromItemRectSlice(items, rects, debug) {
     }
   }
 
-  tables = tables.filter((t) => Array.isArray(t.celdas) && t.celdas.length > 0);
+  tables = tables.filter(
+    (t) => Array.isArray(t.celdas) && t.celdas.length > 0 && (t.columnas || maxColsOf(t.celdas)) > 1
+  );
   return { tables, debugInfo };
 }
 
@@ -1437,7 +1468,8 @@ async function extractPerfilPdfTablesFromBuffer(buffer, options = {}) {
       const { tables: part, debugInfo: d } = await extractTablesFromItemRectSlice(
         slice.items,
         slice.rects,
-        debug
+        debug,
+        { anchorMode: !!slice.anchorMode }
       );
       tables.push(...part);
       if (debug && d) {
