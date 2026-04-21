@@ -1165,6 +1165,229 @@ function chooseBorderTableBlocks(matrixByBorders, yLines, textBlocks) {
   return pick.length ? pick : [matrixByBorders];
 }
 
+const ANCHOR_Y_PAD = 10;
+const ANCHOR_MIN_SEP = 36;
+const ANCHOR_MIN_BAND_HEIGHT = 28;
+const ANCHOR_SLICE_MIN_ITEMS = 4;
+
+function textItemVerticalBBox(it) {
+  const h = Math.max(6, Math.abs(it.h || 0));
+  const yTop = Math.max(it.y, it.y + (it.h >= 0 ? h * 0.2 : -h * 0.2));
+  const yBot = Math.min(it.y, it.y - h);
+  return { yTop, yBot };
+}
+
+/**
+ * Títulos de sección típicos del protocolo (fuera o encima de la rejilla).
+ * Patrones genéricos, sin nombres de cliente.
+ */
+function isSemanticAnchorString(t) {
+  const s = normalizeCell(t);
+  if (!s || s.length > 160) return false;
+  const f = foldForCompare(s);
+  if (/^\s*ANEXO\s*0?\d+/i.test(s)) return true;
+  if (/^\s*NOTA\s*\d+\s*:/i.test(s)) return true;
+  if (/\bNOTA\s*\d+\s*:/i.test(s) && s.length <= 100) return true;
+  if (/\bANEXO\s*0?\d+\b/i.test(s) && s.length <= 95) return true;
+  if (/\bEX[ÁA]MENES\s+ESPECIALES\b/i.test(f)) return true;
+  if (/\bPOR\s+OPERACIONES\b/i.test(f) && s.length <= 90) return true;
+  if (/\bEX[ÁA]MEN\s+M[EÉ]DICO\s+ANUAL\b/i.test(f)) return true;
+  if (/\bANUAL\s+O\s+PERI[OÓ]DICO\b/i.test(f) && s.length <= 95) return true;
+  if (/\bEX[ÁA]MEN\s+M[EÉ]DICO\s+PREOCUPACIONAL\b/i.test(f)) return true;
+  if (/\bPREOCUPACIONAL\s+O\s+INGRESO\b/i.test(f) && s.length <= 100) return true;
+  if (/\bEX[ÁA]MEN\s+M[EÉ]DICO\s+POST\b/i.test(f)) return true;
+  if (/\bPOST\s+OCUPACIONAL\b/i.test(f) && s.length <= 100) return true;
+  if (/\bDE\s+RETIRO\b/i.test(f) && s.length <= 100) return true;
+  if (/\bEX[ÁA]MENES\s+CONDICIONALES\b/i.test(f)) return true;
+  if (/\bEX[ÁA]MEN\s+M[EÉ]DICO\s+PERI[OÓ]DICO\b/i.test(f)) return true;
+  if (/\bCONTROL\s+(ANUAL|TRIMESTRAL)\b/i.test(f) && s.length <= 120) return true;
+  if (/\bMANIPULADOR\s+DE\s+ALIMENTOS\b/i.test(f) && s.length <= 120) return true;
+  return false;
+}
+
+function detectSemanticAnchors(items) {
+  const out = [];
+  for (const it of items) {
+    if (!isSemanticAnchorString(it.str)) continue;
+    const { yTop, yBot } = textItemVerticalBBox(it);
+    out.push({
+      yTop,
+      yBot,
+      text: normalizeCell(it.str).slice(0, 120),
+    });
+  }
+  out.sort((a, b) => b.yTop - a.yTop);
+  const deduped = [];
+  for (const a of out) {
+    const prev = deduped[deduped.length - 1];
+    if (prev && Math.abs(prev.yTop - a.yTop) < ROW_Y_TOL * 2 && Math.abs(prev.yBot - a.yBot) < ROW_Y_TOL * 3) {
+      prev.yTop = Math.max(prev.yTop, a.yTop);
+      prev.yBot = Math.min(prev.yBot, a.yBot);
+      if (a.text.length > prev.text.length) prev.text = a.text;
+      continue;
+    }
+    deduped.push({ ...a });
+  }
+  return deduped;
+}
+
+/**
+ * Bandas verticales: contenido entre título superior e inferior (lectura PDF, y mayor = más arriba).
+ */
+function buildSemanticYBands(anchors, items) {
+  if (!anchors.length) return [];
+  const ys = items.map((it) => it.y);
+  const yMax = Math.max(...ys);
+  const yMin = Math.min(...ys);
+  const bands = [];
+  const first = anchors[0];
+  if (first.yTop + ANCHOR_Y_PAD < yMax - ANCHOR_MIN_BAND_HEIGHT) {
+    bands.push({ yLo: first.yTop + ANCHOR_Y_PAD, yHi: yMax + 50, kind: 'above-first-anchor' });
+  }
+  for (let i = 0; i < anchors.length - 1; i++) {
+    const upper = anchors[i];
+    const lower = anchors[i + 1];
+    if (upper.yBot - ANCHOR_Y_PAD <= lower.yTop + ANCHOR_Y_PAD) continue;
+    if (upper.yBot - lower.yTop < ANCHOR_MIN_SEP) continue;
+    bands.push({
+      yLo: lower.yTop + ANCHOR_Y_PAD,
+      yHi: upper.yBot - ANCHOR_Y_PAD,
+      kind: 'between-anchors',
+    });
+  }
+  const last = anchors[anchors.length - 1];
+  if (last.yBot - ANCHOR_Y_PAD > yMin + ANCHOR_MIN_BAND_HEIGHT) {
+    bands.push({ yLo: yMin - 50, yHi: last.yBot - ANCHOR_Y_PAD, kind: 'below-last-anchor' });
+  }
+  return bands.filter((b) => b.yHi - b.yLo >= ANCHOR_MIN_BAND_HEIGHT);
+}
+
+function itemYInBand(it, yLo, yHi) {
+  return it.y >= yLo && it.y <= yHi;
+}
+
+function rectOverlapsVerticalBand(r, yLo, yHi) {
+  const r1 = Math.min(r.y1, r.y2);
+  const r2 = Math.max(r.y1, r.y2);
+  return !(r2 < yLo || r1 > yHi);
+}
+
+function sliceItemsAndRectsByBand(items, rects, yLo, yHi) {
+  const subItems = items.filter((it) => itemYInBand(it, yLo, yHi));
+  const subRects = rects.filter((r) => rectOverlapsVerticalBand(r, yLo, yHi));
+  return { items: subItems, rects: subRects };
+}
+
+function buildSemanticSlicesOrFull(items, rects) {
+  const anchors = detectSemanticAnchors(items);
+  const fullFallback = {
+    slices: [{ items, rects, anchorMode: false, band: null }],
+    anchors,
+  };
+  if (anchors.length < 2) return fullFallback;
+  const bands = buildSemanticYBands(anchors, items);
+  if (!bands.length) return fullFallback;
+  bands.sort((a, b) => b.yHi - a.yHi);
+  const slices = [];
+  for (const b of bands) {
+    const { items: si, rects: sr } = sliceItemsAndRectsByBand(items, rects, b.yLo, b.yHi);
+    if (si.length < ANCHOR_SLICE_MIN_ITEMS) continue;
+    slices.push({ items: si, rects: sr, anchorMode: true, band: b });
+  }
+  if (!slices.length) return fullFallback;
+  return { slices, anchors };
+}
+
+/**
+ * Extrae tablas de un subconjunto ya recortado por Y (una banda ancla o documento completo).
+ */
+async function extractTablesFromItemRectSlice(items, rects, debug) {
+  let tables = [];
+  let debugInfo = null;
+  const grid = tryBuildGridFromRectangles(rects);
+  if (grid) {
+    const rowBuckets = bucketRows(items);
+    const yLinesFromBorders = [...grid.yLines].sort((a, b) => b - a);
+    const matrixByBorders = assignItemsToGridCells(items, grid.xLines, yLinesFromBorders);
+    const textRows = bucketRows(items);
+    const textBlocks = splitRowBlocksByVerticalGaps(textRows);
+    const blocks = chooseBorderTableBlocks(matrixByBorders, yLinesFromBorders, textBlocks);
+    tables = blocks.map((celdas, i) => {
+      const cleanedBase = stabilizeLeftColumns(removeCompletelyEmptyRows(trimTrailingEmptyRows(celdas)));
+      const cleanedFilled = forwardFillLeftColumns(cleanedBase, LEFT_COLS);
+      const cleanedMergedHeaders = expandMergedHeadersAndSpans(cleanedFilled, LEFT_COLS);
+      const normalizedSubrows = normalizeMergedSubrows(cleanedMergedHeaders, LEFT_COLS);
+      const collapsed = collapseStandaloneLargeRows(normalizedSubrows, LEFT_COLS);
+      const sectioned = propagateSectionHeaders(collapsed, LEFT_COLS);
+      const aligned = alignLeftColumnsByStructure(sectioned, LEFT_COLS);
+      const stripped = stripExamenesGeneralesDecoration(fillGroupByVerticalContinuity(aligned, LEFT_COLS));
+      const cleaned = clearLeftCellsBeforePrecioInRow(
+        rebalanceSingleLeftCellToDominantColumn(stripped, LEFT_COLS)
+      );
+      const hierarchy = buildLeftHierarchy(cleaned, LEFT_COLS);
+      return {
+        id: i + 1,
+        nombre: tableNameFromBlock(cleaned.map((cells) => ({ cells })), `Tabla ${i + 1}`),
+        filas: cleaned.length,
+        columnas: maxColsOf(cleaned),
+        celdas: cleaned,
+        leftHierarchy: hierarchy,
+      };
+    });
+    if (debug) {
+      debugInfo = {
+        method: 'borders+x-columns',
+        xLines: grid.xLines,
+        yLinesSample: yLinesFromBorders.slice(0, 120),
+        blockSizes: blocks.map((b) => b.length),
+        textBlockSizes: textBlocks.map((b) => b.length),
+        rectCount: rects.length,
+        itemCount: items.length,
+      };
+    }
+  }
+
+  if (!tables.length) {
+    const rows = bucketRows(items);
+    const rightCenters = inferRightCenters(items);
+    const gridRows = gridifyRows(rows, rightCenters);
+    const blocks = splitRowBlocksByVerticalGaps(gridRows);
+    tables = blocks.map((b, i) => {
+      const base = stabilizeLeftColumns(removeCompletelyEmptyRows(trimTrailingEmptyRows(b.map((r) => r.cells))));
+      const filled = forwardFillLeftColumns(base, LEFT_COLS);
+      const mergedHeaders = expandMergedHeadersAndSpans(filled, LEFT_COLS);
+      const normalizedSubrows = normalizeMergedSubrows(mergedHeaders, LEFT_COLS);
+      const collapsed = collapseStandaloneLargeRows(normalizedSubrows, LEFT_COLS);
+      const sectioned = propagateSectionHeaders(collapsed, LEFT_COLS);
+      const aligned = alignLeftColumnsByStructure(sectioned, LEFT_COLS);
+      const stripped = stripExamenesGeneralesDecoration(fillGroupByVerticalContinuity(aligned, LEFT_COLS));
+      const celdas = clearLeftCellsBeforePrecioInRow(rebalanceSingleLeftCellToDominantColumn(stripped, LEFT_COLS));
+      const hierarchy = buildLeftHierarchy(celdas, LEFT_COLS);
+      return {
+        id: i + 1,
+        nombre: tableNameFromBlock(b, `Tabla ${i + 1}`),
+        filas: celdas.length,
+        columnas: maxColsOf(celdas),
+        celdas,
+        leftHierarchy: hierarchy,
+      };
+    });
+    if (debug) {
+      debugInfo = {
+        method: 'text-geometry-fallback',
+        rightCenters: rightCenters || [],
+        rowYs: rows.map((r) => Number(r.y.toFixed(2))),
+        blockSizes: blocks.map((b) => b.length),
+        rectCount: rects.length,
+        itemCount: items.length,
+      };
+    }
+  }
+
+  tables = tables.filter((t) => Array.isArray(t.celdas) && t.celdas.length > 0);
+  return { tables, debugInfo };
+}
+
 async function extractPerfilPdfTablesFromBuffer(buffer, options = {}) {
   const debug = !!options.debug;
   const data = Buffer.isBuffer(buffer)
@@ -1206,98 +1429,44 @@ async function extractPerfilPdfTablesFromBuffer(buffer, options = {}) {
     }
 
     if (!mergedItems.length) return { ok: true, numpages, tables: [] };
-    const items = mergedItems;
-    const rects = mergedRects;
+
+    const { slices, anchors: semanticAnchors } = buildSemanticSlicesOrFull(mergedItems, mergedRects);
+    const sliceDebugs = [];
     let tables = [];
+    for (const slice of slices) {
+      const { tables: part, debugInfo: d } = await extractTablesFromItemRectSlice(
+        slice.items,
+        slice.rects,
+        debug
+      );
+      tables.push(...part);
+      if (debug && d) {
+        sliceDebugs.push({
+          anchorMode: slice.anchorMode,
+          band: slice.band,
+          itemCount: slice.items.length,
+          rectCount: slice.rects.length,
+          ...d,
+        });
+      }
+    }
+
+    tables.forEach((t, idx) => {
+      t.id = idx + 1;
+    });
+
     let debugInfo = null;
-
-    const grid = tryBuildGridFromRectangles(rects);
-    if (grid) {
-      const rowBuckets = bucketRows(items);
-      // Importante: separar celdas SOLO con bordes reales, sin cortes sintéticos por texto.
-      const yLinesFromBorders = [...grid.yLines].sort((a, b) => b - a);
-      const matrixByBorders = assignItemsToGridCells(items, grid.xLines, yLinesFromBorders);
-      const textRows = bucketRows(items);
-      const textBlocks = splitRowBlocksByVerticalGaps(textRows);
-      const blocks = chooseBorderTableBlocks(matrixByBorders, yLinesFromBorders, textBlocks);
-      tables = blocks.map((celdas, i) => {
-        const cleanedBase = stabilizeLeftColumns(removeCompletelyEmptyRows(trimTrailingEmptyRows(celdas)));
-        const cleanedFilled = forwardFillLeftColumns(cleanedBase, LEFT_COLS);
-        const cleanedMergedHeaders = expandMergedHeadersAndSpans(cleanedFilled, LEFT_COLS);
-        const normalizedSubrows = normalizeMergedSubrows(cleanedMergedHeaders, LEFT_COLS);
-        const collapsed = collapseStandaloneLargeRows(normalizedSubrows, LEFT_COLS);
-        const sectioned = propagateSectionHeaders(collapsed, LEFT_COLS);
-        const aligned = alignLeftColumnsByStructure(sectioned, LEFT_COLS);
-        const stripped = stripExamenesGeneralesDecoration(
-          fillGroupByVerticalContinuity(aligned, LEFT_COLS)
-        );
-        const cleaned = clearLeftCellsBeforePrecioInRow(
-          rebalanceSingleLeftCellToDominantColumn(stripped, LEFT_COLS)
-        );
-        const hierarchy = buildLeftHierarchy(cleaned, LEFT_COLS);
-        return {
-          id: i + 1,
-          nombre: tableNameFromBlock(cleaned.map((cells) => ({ cells })), `Tabla ${i + 1}`),
-          filas: cleaned.length,
-          columnas: maxColsOf(cleaned),
-          celdas: cleaned,
-          leftHierarchy: hierarchy,
-        };
-      });
-      if (debug) {
-        debugInfo = {
-          method: 'borders+x-columns',
-          xLines: grid.xLines,
-          yLinesSample: yLinesFromBorders.slice(0, 120),
-          blockSizes: blocks.map((b) => b.length),
-          textBlockSizes: textBlocks.map((b) => b.length),
-          rectCount: rects.length,
-          itemCount: items.length,
-        };
-      }
+    if (debug) {
+      debugInfo = {
+        semanticAnchorSlices: slices.length,
+        semanticAnchorsFound: semanticAnchors.map((a) => ({
+          text: a.text,
+          yTop: Number(a.yTop.toFixed(2)),
+          yBot: Number(a.yBot.toFixed(2)),
+        })),
+        anchorSlicesDetail: sliceDebugs,
+      };
     }
-
-    if (!tables.length) {
-      // Fallback: solo geometría de texto si no se pudo armar grilla por bordes.
-      const rows = bucketRows(items);
-      const rightCenters = inferRightCenters(items);
-      const gridRows = gridifyRows(rows, rightCenters);
-      const blocks = splitRowBlocksByVerticalGaps(gridRows);
-      tables = blocks.map((b, i) => {
-        const base = stabilizeLeftColumns(removeCompletelyEmptyRows(trimTrailingEmptyRows(b.map((r) => r.cells))));
-        const filled = forwardFillLeftColumns(base, LEFT_COLS);
-        const mergedHeaders = expandMergedHeadersAndSpans(filled, LEFT_COLS);
-        const normalizedSubrows = normalizeMergedSubrows(mergedHeaders, LEFT_COLS);
-        const collapsed = collapseStandaloneLargeRows(normalizedSubrows, LEFT_COLS);
-        const sectioned = propagateSectionHeaders(collapsed, LEFT_COLS);
-        const aligned = alignLeftColumnsByStructure(sectioned, LEFT_COLS);
-        const stripped = stripExamenesGeneralesDecoration(fillGroupByVerticalContinuity(aligned, LEFT_COLS));
-        const celdas = clearLeftCellsBeforePrecioInRow(
-          rebalanceSingleLeftCellToDominantColumn(stripped, LEFT_COLS)
-        );
-        const hierarchy = buildLeftHierarchy(celdas, LEFT_COLS);
-        return {
-          id: i + 1,
-          nombre: tableNameFromBlock(b, `Tabla ${i + 1}`),
-          filas: celdas.length,
-          columnas: maxColsOf(celdas),
-          celdas,
-          leftHierarchy: hierarchy,
-        };
-      });
-      if (debug) {
-        debugInfo = {
-          method: 'text-geometry-fallback',
-          rightCenters: rightCenters || [],
-          rowYs: rows.map((r) => Number(r.y.toFixed(2))),
-          blockSizes: blocks.map((b) => b.length),
-          rectCount: rects.length,
-          itemCount: items.length,
-        };
-      }
-    }
-
-    tables = tables.filter((t) => Array.isArray(t.celdas) && t.celdas.length > 0);
 
     if (debug) {
       return { ok: true, numpages, tables, debug: debugInfo };
