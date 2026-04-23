@@ -1259,10 +1259,14 @@ function expandValuesAcrossMergedRects(matrix, xLines, yLines, rects, options = 
   const minCellW = options.minCellWidth ?? 6;
   const minCellH = options.minCellHeight ?? 6;
   const maxSpanRows = options.maxSpanRows ?? 8;
-  const maxSpanCols = options.maxSpanCols ?? 3;
   const sortedX = [...xLines].sort((a, b) => a - b);
   const sortedY = [...yLines].sort((a, b) => b - a);
   if (sortedX.length < 2 || sortedY.length < 2) return matrix;
+  const gridCols = sortedX.length - 1;
+  // Permitir cualquier colspan salvo los que abarcan casi toda la tabla (marco externo).
+  // El filtro por tamaño de rectángulo ya descarta fondos/marcos; este tope complementario
+  // evita propagar accidentalmente el borde más externo del bloque.
+  const maxSpanCols = options.maxSpanCols ?? Math.max(3, Math.floor(gridCols * 0.85));
 
   const totalWidth = sortedX[sortedX.length - 1] - sortedX[0];
   const totalHeight = sortedY[0] - sortedY[sortedY.length - 1];
