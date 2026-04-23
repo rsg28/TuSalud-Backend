@@ -45,8 +45,8 @@ const INLINE_MERGE_GAP = 2;
 const LEFT_COLS = 3;
 const RIGHT_CENTER_CLUSTER_GAP = 15;
 const MIN_RIGHT_CLUSTER_HITS = 3;
-const EDGE_CLUSTER_GAP = 1.5;
-const EDGE_MIN_HITS_X = 10;
+const EDGE_CLUSTER_GAP = 1.8;
+const EDGE_MIN_HITS_X = 4;
 const EDGE_MIN_HITS_Y = 3;
 
 function normalizeCell(s) {
@@ -862,25 +862,92 @@ function computeStackDeltaY(mergedItems, nextPageItems, gap) {
 }
 
 /**
- * Rectángulos explícitos en el stream (p. ej. `re` + fill). Muchos PDF dibujan líneas con `m`/`l`/`S`
- * sin relleno; esos bordes NO entran aquí → `tryBuildGridFromRectangles` falla y se usa solo texto.
+ * Extrae los bordes del stream del PDF como “rectángulos delgados”:
+ *  - Cajas explícitas (`re`) → rectángulo tal cual.
+ *  - Caminos con `moveTo`/`lineTo` → cada segmento horizontal / vertical se normaliza a un
+ *    rectángulo fino (así `tryBuildGridFromRectangles` reconoce líneas de tabla aunque el PDF
+ *    las dibuje como trazos y no como `re` + fill). Esto es clave para tablas cuyas columnas
+ *    internas no se detectaban porque solo los cuadros exteriores eran rectángulos rellenos.
  */
 async function extractRectanglesFromPage(page, pdfjsLib) {
   const OPS = pdfjsLib.OPS;
   const operatorList = await page.getOperatorList();
   const rects = [];
+  const SEGMENT_AXIS_TOL = 0.8;
+  const SEGMENT_MIN_LENGTH = 3;
+  const SEGMENT_THICKNESS = 0.5;
+
+  const pushRect = (x1, x2, y1, y2) => {
+    rects.push({
+      x1: Math.min(x1, x2),
+      x2: Math.max(x1, x2),
+      y1: Math.min(y1, y2),
+      y2: Math.max(y1, y2),
+      w: Math.abs(x2 - x1),
+      h: Math.abs(y2 - y1),
+    });
+  };
+
+  const pushSegmentAsRect = (ax, ay, bx, by) => {
+    const dx = Math.abs(bx - ax);
+    const dy = Math.abs(by - ay);
+    if (dx <= SEGMENT_AXIS_TOL && dy >= SEGMENT_MIN_LENGTH) {
+      pushRect(ax - SEGMENT_THICKNESS, ax + SEGMENT_THICKNESS, ay, by);
+      return;
+    }
+    if (dy <= SEGMENT_AXIS_TOL && dx >= SEGMENT_MIN_LENGTH) {
+      pushRect(ax, bx, ay - SEGMENT_THICKNESS, ay + SEGMENT_THICKNESS);
+    }
+  };
+
   for (let i = 0; i < operatorList.fnArray.length; i++) {
     if (operatorList.fnArray[i] !== OPS.constructPath) continue;
     const args = operatorList.argsArray[i] || [];
     const ops = args[0];
-    const coords = args[1];
-    if (!ops || ops.length !== 1 || ops[0] !== OPS.rectangle || !coords || coords.length !== 4) continue;
-    const [x, y, w, h] = coords;
-    const x1 = Math.min(x, x + w);
-    const x2 = Math.max(x, x + w);
-    const y1 = Math.min(y, y + h);
-    const y2 = Math.max(y, y + h);
-    rects.push({ x1, x2, y1, y2, w: Math.abs(w), h: Math.abs(h) });
+    const coords = args[1] || [];
+    if (!ops || !ops.length) continue;
+
+    let ci = 0;
+    let curX = 0;
+    let curY = 0;
+    let startX = 0;
+    let startY = 0;
+    for (const op of ops) {
+      if (op === OPS.moveTo) {
+        const x = coords[ci++];
+        const y = coords[ci++];
+        curX = x;
+        curY = y;
+        startX = x;
+        startY = y;
+      } else if (op === OPS.lineTo) {
+        const x = coords[ci++];
+        const y = coords[ci++];
+        pushSegmentAsRect(curX, curY, x, y);
+        curX = x;
+        curY = y;
+      } else if (op === OPS.curveTo) {
+        ci += 6;
+      } else if (op === OPS.curveTo2 || op === OPS.curveTo3) {
+        ci += 4;
+      } else if (op === OPS.rectangle) {
+        const x = coords[ci++];
+        const y = coords[ci++];
+        const w = coords[ci++];
+        const h = coords[ci++];
+        pushRect(x, x + w, y, y + h);
+        curX = x;
+        curY = y;
+        startX = x;
+        startY = y;
+      } else if (op === OPS.closePath) {
+        if (curX !== startX || curY !== startY) {
+          pushSegmentAsRect(curX, curY, startX, startY);
+          curX = startX;
+          curY = startY;
+        }
+      }
+    }
   }
   return rects;
 }
@@ -1035,9 +1102,251 @@ function assignItemsToGridCells(items, xLines, yLines) {
         }
       }
       merged.push(cur);
-      return normalizeCell(merged.map((m) => m.str).join(' '));
+      return dedupeCellTokens(normalizeCell(merged.map((m) => m.str).join(' ')));
     })
   );
+}
+
+/**
+ * Colapsa repeticiones de tokens o frases dentro de una celda. Totalmente genérico:
+ *   "X X X"              -> "X"
+ *   "NO APLICA NO APLICA"-> "NO APLICA"
+ *   "foo bar foo bar"    -> "foo bar"
+ * No depende de valores concretos; detecta cualquier frase (1..N tokens) repetida.
+ */
+function dedupeCellTokens(raw) {
+  const s = normalizeCell(raw);
+  if (!s) return '';
+  if (s.length > 120) return s;
+  const parts = s.split(/\s+/).filter(Boolean);
+  if (parts.length < 2) return s;
+
+  const condensed = [];
+  for (const p of parts) {
+    if (condensed.length && condensed[condensed.length - 1] === p) continue;
+    condensed.push(p);
+  }
+  if (condensed.length === 1) return condensed[0];
+
+  const n = condensed.length;
+  for (let k = 1; k <= Math.floor(n / 2); k++) {
+    if (n % k !== 0) continue;
+    let allMatch = true;
+    for (let j = k; j < n && allMatch; j += k) {
+      for (let i = 0; i < k; i++) {
+        if (condensed[j + i] !== condensed[i]) {
+          allMatch = false;
+          break;
+        }
+      }
+    }
+    if (allMatch) return condensed.slice(0, k).join(' ');
+  }
+  return condensed.join(' ');
+}
+
+/**
+ * Decide si la fila `rowAt` dentro de un span vertical es en realidad una cabecera de grupo
+ * (y debe excluirse del merge). Criterios genéricos basados únicamente en el patrón numérico
+ * de la columna izquierda — no hay strings hardcodeados.
+ */
+function isGroupHeaderRow(matrix, rowAt, rowOther, labelCol = 0) {
+  if (!matrix[rowAt] || !matrix[rowOther]) return false;
+  const parse = (v) => {
+    const s = normalizeCell(v);
+    const m = s.match(/^\s*(\d+)(?:\.(\d+))?/);
+    if (!m) return null;
+    return { major: m[1], minor: m[2] || null, raw: s };
+  };
+  const top = parse(matrix[rowAt][labelCol]);
+  if (!top) return false;
+
+  const rStart = Math.min(rowAt, rowOther);
+  const rEnd = Math.max(rowAt, rowOther);
+  const subs = [];
+  for (let r = rStart; r <= rEnd; r++) {
+    if (r === rowAt) continue;
+    const p = parse(matrix[r][labelCol]);
+    if (p) subs.push(p);
+  }
+  if (subs.length === 0) return false;
+
+  const allSubDecimal = subs.every((p) => p.major === top.major && p.minor !== null);
+  if (allSubDecimal && !top.minor) return true;
+
+  const allSubPlain = subs.every((p) => !p.minor);
+  if (allSubPlain && !top.minor) {
+    const firstSub = subs[0];
+    if (firstSub.major === '1' && top.major !== '1') return true;
+    if (Number(firstSub.major) <= Number(top.major) - 1) return false;
+    if (Number(firstSub.major) < Number(top.major)) return true;
+  }
+  return false;
+}
+
+/**
+ * Limpia celdas cuya posición geométrica (fila × columna de la rejilla) no está cubierta
+ * por ningún rectángulo de celda del PDF. Sirve para descartar texto del membrete u otra
+ * información que geométricamente cae fuera del contorno real de la tabla.
+ * Adicionalmente, poda del tope/base filas cuya cobertura de columnas con rectángulos es baja
+ * (cajas aisladas como badges de cotización, etc.), descartando también sus líneas de rejilla.
+ * Es puramente geométrico — sin strings hardcodeados.
+ *
+ * Devuelve { matrix, yLines } alineados.
+ */
+function clearCellsOutsideTableRects(matrix, xLines, yLines, rects, options = {}) {
+  const minCellW = options.minCellWidth ?? 6;
+  const minCellH = options.minCellHeight ?? 6;
+  const minColFraction = options.minColFraction ?? 0.4;
+  const sortedX = [...xLines].sort((a, b) => a - b);
+  const sortedY = [...yLines].sort((a, b) => b - a);
+  const nRows = matrix.length;
+  const nCols = matrix[0] ? matrix[0].length : 0;
+  if (!nRows || !nCols) return { matrix, yLines: sortedY };
+
+  const totalWidth = sortedX[sortedX.length - 1] - sortedX[0];
+  const totalHeight = sortedY[0] - sortedY[sortedY.length - 1];
+  const maxW = totalWidth * 0.85;
+  const maxH = totalHeight * 0.6;
+  const cellRects = rects.filter(
+    (r) => r.w >= minCellW && r.h >= minCellH && r.w <= maxW && r.h <= maxH
+  );
+  if (!cellRects.length) return { matrix, yLines: sortedY };
+
+  const coverage = Array.from({ length: nRows }, () => new Array(nCols).fill(false));
+  for (let j = 0; j < nRows; j++) {
+    const yTop = sortedY[j];
+    const yBot = sortedY[j + 1];
+    for (const r of cellRects) {
+      const rX1 = Math.min(r.x1, r.x2);
+      const rX2 = Math.max(r.x1, r.x2);
+      const rYTop = Math.max(r.y1, r.y2);
+      const rYBot = Math.min(r.y1, r.y2);
+      const yOver = Math.min(rYTop, yTop) - Math.max(rYBot, yBot);
+      if (yOver <= 0) continue;
+      for (let i = 0; i < nCols; i++) {
+        if (coverage[j][i]) continue;
+        const cX1 = sortedX[i];
+        const cX2 = sortedX[i + 1];
+        const xOver = Math.min(rX2, cX2) - Math.max(rX1, cX1);
+        if (xOver > 0) coverage[j][i] = true;
+      }
+    }
+  }
+
+  const cleaned = matrix.map((row, j) => row.map((v, i) => (coverage[j][i] ? v : '')));
+
+  const rowFrac = coverage.map((row) => row.filter(Boolean).length / nCols);
+  const threshold = minColFraction;
+  let top = 0;
+  while (top < nRows && rowFrac[top] < threshold) top += 1;
+  let bot = nRows - 1;
+  while (bot > top && rowFrac[bot] < threshold) bot -= 1;
+
+  const trimmedMatrix = cleaned.slice(top, bot + 1);
+  const trimmedYLines = sortedY.slice(top, bot + 2);
+  return { matrix: trimmedMatrix, yLines: trimmedYLines };
+}
+
+/**
+ * Propaga el valor de una celda a todo el bloque que ocupa un rectángulo grande del PDF
+ * (celda combinada vertical u horizontal). Si el rectángulo cubre varias filas/columnas de la
+ * rejilla, la celda no vacía dentro de ese bloque se replica en las demás.
+ * Es genérico: funciona para cualquier `rowspan` / `colspan` detectado por geometría.
+ */
+function expandValuesAcrossMergedRects(matrix, xLines, yLines, rects, options = {}) {
+  if (!matrix || !matrix.length) return matrix;
+  const minCellW = options.minCellWidth ?? 6;
+  const minCellH = options.minCellHeight ?? 6;
+  const maxSpanRows = options.maxSpanRows ?? 8;
+  const maxSpanCols = options.maxSpanCols ?? 3;
+  const sortedX = [...xLines].sort((a, b) => a - b);
+  const sortedY = [...yLines].sort((a, b) => b - a);
+  if (sortedX.length < 2 || sortedY.length < 2) return matrix;
+
+  const totalWidth = sortedX[sortedX.length - 1] - sortedX[0];
+  const totalHeight = sortedY[0] - sortedY[sortedY.length - 1];
+  const maxW = totalWidth * 0.85;
+  const maxH = totalHeight * 0.6;
+
+  /** Solo rectángulos del tamaño de una celda o un merge razonable. Descarta marcos/fondos. */
+  const bigRects = rects.filter(
+    (r) => r.w >= minCellW && r.h >= minCellH && r.w <= maxW && r.h <= maxH
+  );
+  const out = matrix.map((r) => r.slice());
+  const nRows = out.length;
+  const nCols = out[0] ? out[0].length : 0;
+
+  for (const r of bigRects) {
+    const rx1 = Math.min(r.x1, r.x2);
+    const rx2 = Math.max(r.x1, r.x2);
+    const ryTop = Math.max(r.y1, r.y2);
+    const ryBot = Math.min(r.y1, r.y2);
+
+    const COL_TOL = 1.0;
+    let colFrom = -1;
+    let colTo = -1;
+    for (let i = 0; i < sortedX.length - 1 && i < nCols; i++) {
+      const cx1 = sortedX[i];
+      const cx2 = sortedX[i + 1];
+      if (cx1 >= rx1 - COL_TOL && cx2 <= rx2 + COL_TOL) {
+        if (colFrom < 0) colFrom = i;
+        colTo = i;
+      }
+    }
+    if (colFrom < 0) continue;
+
+    const ROW_TOL = 1.5;
+    let rowFrom = -1;
+    let rowTo = -1;
+    for (let j = 0; j < sortedY.length - 1 && j < nRows; j++) {
+      const rTop = sortedY[j];
+      const rBot = sortedY[j + 1];
+      if (rTop <= ryTop + ROW_TOL && rBot >= ryBot - ROW_TOL) {
+        if (rowFrom < 0) rowFrom = j;
+        rowTo = j;
+      }
+    }
+    if (rowFrom < 0) continue;
+
+    let spanRows = rowTo - rowFrom + 1;
+    let spanCols = colTo - colFrom + 1;
+    if (spanRows < 2 && spanCols < 2) continue;
+    if (spanRows > maxSpanRows || spanCols > maxSpanCols) continue;
+    /**
+     * Solo merges “puros”: vertical (rowspan, 1 columna) u horizontal (colspan, 1 fila).
+     * Un rectángulo que cubre varias filas Y varias columnas suele ser el borde externo
+     * de un bloque/grupo y no una celda combinada real; no se propaga.
+     */
+    const isRowspanCand = spanRows >= 2 && spanCols === 1;
+    const isColspanCand = spanCols >= 2 && spanRows === 1;
+    if (!isRowspanCand && !isColspanCand) continue;
+
+    if (isRowspanCand && colFrom > 0) {
+      while (rowFrom < rowTo && isGroupHeaderRow(out, rowFrom, rowTo, 0)) {
+        rowFrom += 1;
+      }
+      spanRows = rowTo - rowFrom + 1;
+      if (spanRows < 2) continue;
+    }
+
+    const values = [];
+    for (let rr = rowFrom; rr <= rowTo; rr++) {
+      for (let cc = colFrom; cc <= colTo; cc++) {
+        const v = normalizeCell(out[rr] && out[rr][cc]);
+        if (v && !values.includes(v)) values.push(v);
+      }
+    }
+    if (values.length !== 1) continue;
+    const filled = values[0];
+    for (let rr = rowFrom; rr <= rowTo; rr++) {
+      for (let cc = colFrom; cc <= colTo; cc++) {
+        if (!out[rr]) continue;
+        if (!normalizeCell(out[rr][cc])) out[rr][cc] = filled;
+      }
+    }
+  }
+  return out;
 }
 
 function splitGridRowsByYGaps(matrix, yLines) {
@@ -1337,10 +1646,22 @@ async function extractTablesFromItemRectSlice(items, rects, debug, options = {})
   if (grid) {
     const rowBuckets = bucketRows(items);
     const yLinesFromBorders = [...grid.yLines].sort((a, b) => b - a);
-    const matrixByBorders = assignItemsToGridCells(items, grid.xLines, yLinesFromBorders);
+    const assignedMatrix = assignItemsToGridCells(items, grid.xLines, yLinesFromBorders);
+    const { matrix: trimmedMatrix, yLines: trimmedYLines } = clearCellsOutsideTableRects(
+      assignedMatrix,
+      grid.xLines,
+      yLinesFromBorders,
+      rects
+    );
+    const matrixByBorders = expandValuesAcrossMergedRects(
+      trimmedMatrix,
+      grid.xLines,
+      trimmedYLines,
+      rects
+    );
     const textRows = bucketRows(items);
     const textBlocks = splitRowBlocksByVerticalGaps(textRows);
-    const blocks = chooseBorderTableBlocks(matrixByBorders, yLinesFromBorders, textBlocks, { anchorMode });
+    const blocks = chooseBorderTableBlocks(matrixByBorders, trimmedYLines, textBlocks, { anchorMode });
     tables = blocks.map((celdas, i) => {
       const cleanedBase = stabilizeLeftColumns(removeCompletelyEmptyRows(trimTrailingEmptyRows(celdas)));
       const cleanedFilled = forwardFillLeftColumns(cleanedBase, LEFT_COLS);
@@ -1419,6 +1740,33 @@ async function extractTablesFromItemRectSlice(items, rects, debug, options = {})
   return { tables, debugInfo };
 }
 
+/**
+ * Elimina tablas diminutas (membretes, badges tipo "COTIZACIÓN/Fecha/Codificación", firmas, etc.)
+ * cuando existe al menos una tabla dominante mucho mayor en el mismo documento.
+ * Genérico por tamaño relativo: una tabla se conserva si tiene al menos el 15% del número
+ * de celdas de la más grande o un mínimo absoluto de celdas con datos.
+ */
+function tableDataCellCount(t) {
+  const rows = Array.isArray(t && t.celdas) ? t.celdas : [];
+  let n = 0;
+  for (const r of rows) {
+    if (!Array.isArray(r)) continue;
+    for (const c of r) {
+      if (normalizeCell(c)) n += 1;
+    }
+  }
+  return n;
+}
+
+function filterOutTinyMetadataTables(tables) {
+  if (!Array.isArray(tables) || tables.length <= 1) return tables;
+  const sizes = tables.map(tableDataCellCount);
+  const maxSize = sizes.reduce((m, v) => (v > m ? v : m), 0);
+  if (maxSize < 30) return tables;
+  const minAbs = 10;
+  return tables.filter((t, i) => sizes[i] >= minAbs);
+}
+
 async function extractPerfilPdfTablesFromBuffer(buffer, options = {}) {
   const debug = !!options.debug;
   const data = Buffer.isBuffer(buffer)
@@ -1483,6 +1831,7 @@ async function extractPerfilPdfTablesFromBuffer(buffer, options = {}) {
       }
     }
 
+    tables = filterOutTinyMetadataTables(tables);
     tables.forEach((t, idx) => {
       t.id = idx + 1;
     });
