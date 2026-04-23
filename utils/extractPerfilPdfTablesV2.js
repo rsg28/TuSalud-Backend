@@ -1222,10 +1222,20 @@ function isGroupHeaderRow(matrix, rowAt, rowOther, labelCol = 0) {
  *
  * Devuelve { matrix, yLines } alineados.
  */
+/**
+ * Recorta SOLO filas del extremo superior/inferior que estén claramente fuera de la tabla.
+ *
+ * Heurística geométrica (sin texto hardcodeado):
+ *   - Para cada fila, contamos cuántos rectángulos del PDF se solapan con su banda Y.
+ *   - Las filas del cuerpo de la tabla tienen muchos rectángulos (bordes, fondos, celdas).
+ *   - Las filas de metadatos/encabezados de documento sueltos (títulos, "Razón Social",
+ *     badges, fecha, etc.) tienen muy pocos rectángulos y pocas celdas con texto.
+ *
+ * La función solo recorta desde los extremos hacia adentro; nunca borra filas del medio.
+ */
 function clearCellsOutsideTableRects(matrix, xLines, yLines, rects, options = {}) {
   const minCellW = options.minCellWidth ?? 6;
   const minCellH = options.minCellHeight ?? 6;
-  const minColFraction = options.minColFraction ?? 0.4;
   const sortedX = [...xLines].sort((a, b) => a - b);
   const sortedY = [...yLines].sort((a, b) => b - a);
   const nRows = matrix.length;
@@ -1234,44 +1244,44 @@ function clearCellsOutsideTableRects(matrix, xLines, yLines, rects, options = {}
 
   const totalWidth = sortedX[sortedX.length - 1] - sortedX[0];
   const totalHeight = sortedY[0] - sortedY[sortedY.length - 1];
-  const maxW = totalWidth * 0.85;
-  const maxH = totalHeight * 0.6;
-  const cellRects = rects.filter(
+  // Excluimos solo rectángulos degenerados o que cubran prácticamente todo el bloque
+  // (marco exterior / fondo global), para no sobrecontar.
+  const maxW = totalWidth * 0.98;
+  const maxH = totalHeight * 0.9;
+  const useful = rects.filter(
     (r) => r.w >= minCellW && r.h >= minCellH && r.w <= maxW && r.h <= maxH
   );
-  if (!cellRects.length) return { matrix, yLines: sortedY };
+  if (!useful.length) return { matrix, yLines: sortedY };
 
-  const coverage = Array.from({ length: nRows }, () => new Array(nCols).fill(false));
+  const rectsPerRow = new Array(nRows).fill(0);
   for (let j = 0; j < nRows; j++) {
     const yTop = sortedY[j];
     const yBot = sortedY[j + 1];
-    for (const r of cellRects) {
-      const rX1 = Math.min(r.x1, r.x2);
-      const rX2 = Math.max(r.x1, r.x2);
+    let count = 0;
+    for (const r of useful) {
       const rYTop = Math.max(r.y1, r.y2);
       const rYBot = Math.min(r.y1, r.y2);
       const yOver = Math.min(rYTop, yTop) - Math.max(rYBot, yBot);
-      if (yOver <= 0) continue;
-      for (let i = 0; i < nCols; i++) {
-        if (coverage[j][i]) continue;
-        const cX1 = sortedX[i];
-        const cX2 = sortedX[i + 1];
-        const xOver = Math.min(rX2, cX2) - Math.max(rX1, cX1);
-        if (xOver > 0) coverage[j][i] = true;
-      }
+      if (yOver > 0) count += 1;
     }
+    rectsPerRow[j] = count;
   }
 
-  const cleaned = matrix.map((row, j) => row.map((v, i) => (coverage[j][i] ? v : '')));
+  // Mediana de rects por fila como referencia: las filas del cuerpo deberían alcanzarla;
+  // las "de fuera" tendrán un orden de magnitud menos.
+  const sortedCounts = [...rectsPerRow].sort((a, b) => a - b);
+  const median = sortedCounts[Math.floor(sortedCounts.length / 2)] || 0;
+  const lowThreshold = Math.max(1, Math.floor(median * 0.25));
 
-  const rowFrac = coverage.map((row) => row.filter(Boolean).length / nCols);
-  const threshold = minColFraction;
+  const textCount = matrix.map((row) => row.filter((v) => normalizeCell(v)).length);
+  const isOutsideRow = (j) => rectsPerRow[j] <= lowThreshold && textCount[j] <= 2;
+
   let top = 0;
-  while (top < nRows && rowFrac[top] < threshold) top += 1;
+  while (top < nRows && isOutsideRow(top)) top += 1;
   let bot = nRows - 1;
-  while (bot > top && rowFrac[bot] < threshold) bot -= 1;
+  while (bot > top && isOutsideRow(bot)) bot -= 1;
 
-  const trimmedMatrix = cleaned.slice(top, bot + 1);
+  const trimmedMatrix = matrix.slice(top, bot + 1);
   const trimmedYLines = sortedY.slice(top, bot + 2);
   return { matrix: trimmedMatrix, yLines: trimmedYLines };
 }
