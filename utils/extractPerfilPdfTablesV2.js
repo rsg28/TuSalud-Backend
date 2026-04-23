@@ -43,6 +43,11 @@ function getPdfjsLib() {
 const ROW_Y_TOL = 4;
 const INLINE_MERGE_GAP = 2;
 const LEFT_COLS = 3;
+// Separador invisible usado para marcar que dos segmentos de texto en una misma celda
+// del grid provienen de items visualmente apartados en X (no son parte de una sola
+// oración continua). Permite decidir al final del pipeline si dividir la fila o colapsar
+// los segmentos en un solo string.
+const SEG_SEP = '\u001F';
 const RIGHT_CENTER_CLUSTER_GAP = 15;
 const MIN_RIGHT_CLUSTER_HITS = 3;
 const EDGE_CLUSTER_GAP = 1.8;
@@ -980,6 +985,56 @@ async function extractRectanglesFromPage(page, pdfjsLib) {
   return rects;
 }
 
+/**
+ * Fusiona columnas anormalmente estrechas (artefactos de líneas X espurias detectadas por
+ * clúster de bordes — por ejemplo, una celda de cabecera dividida internamente entre dos
+ * textos "EXÁMENES" y "PERSONAL"). Una columna se considera espuria si su ancho es menor
+ * que `max(minAbsWidth, mediana * minColRatio)`. Se fusiona con el vecino más ancho para
+ * reconstruir la columna lógica.
+ *
+ * Criterio puramente geométrico: no mira el contenido textual. Iterativo: repite hasta que
+ * todas las columnas cumplen el umbral.
+ */
+function removeSpuriousNarrowColumns(xLines, options = {}) {
+  const minColRatio = options.minColRatio ?? 0.35;
+  // Piso absoluto bajo. Los marcadores/columnas estrechas legítimas suelen estar entre
+  // 10 y 20 px; las espurias son las que adicionalmente quedan por debajo de la mediana
+  // escalada por `minColRatio`.
+  const minAbsWidth = options.minAbsWidth ?? 8;
+  const sorted = [...xLines].sort((a, b) => a - b);
+  if (sorted.length < 4) return sorted;
+
+  for (let iter = 0; iter < 50; iter++) {
+    const widths = [];
+    for (let i = 0; i < sorted.length - 1; i++) widths.push(sorted[i + 1] - sorted[i]);
+    if (widths.length < 3) break;
+    const sortedW = [...widths].sort((a, b) => a - b);
+    const median = sortedW[Math.floor(sortedW.length / 2)];
+    const threshold = Math.max(minAbsWidth, median * minColRatio);
+
+    let minIdx = 0;
+    for (let i = 1; i < widths.length; i++) {
+      if (widths[i] < widths[minIdx]) minIdx = i;
+    }
+    if (widths[minIdx] >= threshold) break;
+
+    const leftW = minIdx > 0 ? widths[minIdx - 1] : -1;
+    const rightW = minIdx < widths.length - 1 ? widths[minIdx + 1] : -1;
+    // Si la columna estrecha está en un extremo y no tiene vecino por un lado, fusionamos
+    // con el único vecino disponible; si está en el medio, con el más ancho.
+    if (leftW < 0) {
+      sorted.splice(minIdx + 1, 1);
+    } else if (rightW < 0) {
+      sorted.splice(minIdx, 1);
+    } else if (leftW >= rightW) {
+      sorted.splice(minIdx, 1);
+    } else {
+      sorted.splice(minIdx + 1, 1);
+    }
+  }
+  return sorted;
+}
+
 function tryBuildGridFromRectangles(rects) {
   if (!rects.length) return null;
   const xEdges = [];
@@ -1003,8 +1058,10 @@ function tryBuildGridFromRectangles(rects) {
   const xClusters = clusterEdges(xEdges).filter((c) => c.hits >= EDGE_MIN_HITS_X).sort((a, b) => a.value - b.value);
   const yClusters = clusterEdges(yEdges).filter((c) => c.hits >= EDGE_MIN_HITS_Y).sort((a, b) => b.value - a.value);
   if (xClusters.length < 4) return null;
+  const rawX = xClusters.map((c) => c.value);
+  const cleanX = removeSpuriousNarrowColumns(rawX);
   return {
-    xLines: xClusters.map((c) => c.value),
+    xLines: cleanX,
     yLines: yClusters.map((c) => c.value),
   };
 }
@@ -1113,25 +1170,157 @@ function assignItemsToGridCells(items, xLines, yLines) {
     rows[r][c].push(it);
   }
 
+  // La celda se compone de "segmentos". Dos items consecutivos se unen en el MISMO segmento
+  // si están en la misma línea Y, no se solapan en X y su gap horizontal es pequeño
+  // (secuencia izquierda→derecha de una sola oración). Entre segmentos usamos `SEG_SEP`
+  // como marcador sólo cuando los items están en líneas Y distintas O se solapan en X
+  // (texto apilado verticalmente dentro de una misma celda del grid). Cuando están en la
+  // misma línea pero con un gap grande, se unen con espacio simple.
+  const isSameLine = (a, b) => {
+    if (Math.abs(a.y - b.y) > ROW_Y_TOL) return false;
+    // Si se solapan significativamente en X, no son la misma línea: son dos items apilados
+    // verticalmente en posiciones X muy parecidas.
+    const overlap = Math.min(a.x2, b.x2) - Math.max(a.x, b.x);
+    const minW = Math.min(a.x2 - a.x, b.x2 - b.x);
+    if (minW > 0 && overlap > minW * 0.3) return false;
+    return true;
+  };
+
   return rows.map((row) =>
     row.map((cellItems) => {
       if (!cellItems.length) return '';
-      const sorted = [...cellItems].sort((a, b) => a.x - b.x);
-      const merged = [];
+      // Orden estable: primero por X ascendente (permite merge inline izq→der), usando el
+      // índice original como desempate para conservar el orden de lectura cuando dos items
+      // están al mismo X pero en distintas líneas Y.
+      const indexed = cellItems.map((it, idx) => ({ it, idx }));
+      indexed.sort((a, b) => (a.it.x - b.it.x) || (a.idx - b.idx));
+      const sorted = indexed.map((e) => e.it);
+      const segments = [];
       let cur = { ...sorted[0] };
       for (let i = 1; i < sorted.length; i++) {
         const nx = sorted[i];
-        if (nx.x - cur.x2 <= INLINE_MERGE_GAP) {
+        const gap = nx.x - cur.x2;
+        if (isSameLine(cur, nx) && gap >= 0 && gap <= INLINE_MERGE_GAP) {
           cur.str += String(nx.str).startsWith(' ') ? nx.str : ` ${nx.str}`;
           cur.x2 = Math.max(cur.x2, nx.x2);
         } else {
-          merged.push(cur);
+          segments.push(cur);
           cur = { ...nx };
         }
       }
-      merged.push(cur);
-      return dedupeCellTokens(normalizeCell(merged.map((m) => m.str).join(' ')));
+      segments.push(cur);
+
+      if (!segments.length) return '';
+      const clean = segments
+        .map((s) => ({ ...s, str: dedupeCellTokens(normalizeCell(s.str)) }))
+        .filter((s) => s.str);
+      if (!clean.length) return '';
+      let out = clean[0].str;
+      for (let i = 1; i < clean.length; i++) {
+        const prev = clean[i - 1];
+        const nx = clean[i];
+        out += isSameLine(prev, nx) ? ' ' + nx.str : SEG_SEP + nx.str;
+      }
+      return out;
     })
+  );
+}
+
+/**
+ * Si una celda de una columna izquierda (descriptiva/ítem) contiene múltiples segmentos
+ * visualmente apartados en X (marcados con `SEG_SEP`), divide la fila en sub-filas: una por
+ * segmento. La primera sub-fila conserva todas las demás columnas; las sub-filas extra
+ * llevan solo el texto del segmento en la columna partida y vacío en el resto.
+ *
+ * Esto traduce un layout físico de dos columnas visuales de ítems en una sola columna
+ * lógica con filas apiladas, respetando "todo lo que está debajo de otra cosa está en la
+ * misma columna".
+ */
+function splitRowsByMultiSegmentColumn(matrix, leftCols = LEFT_COLS) {
+  if (!Array.isArray(matrix) || !matrix.length) return matrix;
+  const out = [];
+  for (const row of matrix) {
+    if (!Array.isArray(row)) {
+      out.push(row);
+      continue;
+    }
+    let splitCol = -1;
+    let segs = null;
+    const maxLeft = Math.min(leftCols, row.length);
+    for (let c = 0; c < maxLeft; c++) {
+      const v = row[c];
+      if (typeof v === 'string' && v.indexOf(SEG_SEP) >= 0) {
+        const parts = v.split(SEG_SEP).map((s) => normalizeCell(s)).filter(Boolean);
+        if (parts.length >= 2) {
+          splitCol = c;
+          segs = parts;
+          break;
+        }
+      }
+    }
+    if (splitCol < 0 || !segs) {
+      // No hay split en columnas izquierdas: colapsar cualquier SEG_SEP residual.
+      out.push(
+        row.map((v) =>
+          typeof v === 'string' && v.indexOf(SEG_SEP) >= 0
+            ? v.split(SEG_SEP).map((s) => normalizeCell(s)).filter(Boolean).join(' ')
+            : v
+        )
+      );
+      continue;
+    }
+
+    // Determinamos cuántas sub-filas genera el split (N = cantidad de segmentos en la
+    // columna izquierda partida).
+    const N = segs.length;
+    // Para cada columna, obtenemos sus segmentos. Si una celda tiene exactamente N
+    // segmentos, distribuimos 1:1 a cada sub-fila. Si tiene 1 segmento (un solo valor),
+    // se lo quedan TODAS las sub-filas (igual que un rowspan implícito). Si tiene otra
+    // cantidad ≥ 2, los unimos con espacio y se los queda la sub-fila principal.
+    const colSegments = row.map((v) => {
+      if (typeof v !== 'string') return [String(v ?? '')];
+      if (v.indexOf(SEG_SEP) < 0) return [v];
+      return v.split(SEG_SEP).map((s) => normalizeCell(s)).filter(Boolean);
+    });
+
+    for (let k = 0; k < N; k++) {
+      const subRow = new Array(row.length).fill('');
+      for (let c = 0; c < row.length; c++) {
+        const cSegs = colSegments[c];
+        if (!cSegs.length) {
+          subRow[c] = '';
+        } else if (cSegs.length === 1) {
+          // Valor único: lo hereda solo la sub-fila principal (k=0) para preservar el
+          // significado de fila-principal-con-datos y sub-filas-vacías cuando el resto
+          // del layout así lo indica. Esto evita duplicar x's que sólo pertenecen a un
+          // examen.
+          subRow[c] = k === 0 ? cSegs[0] : '';
+        } else if (cSegs.length === N) {
+          subRow[c] = cSegs[k];
+        } else {
+          // Cantidad distinta a N: concatenamos todo en la sub-fila principal.
+          subRow[c] = k === 0 ? cSegs.join(' ') : '';
+        }
+      }
+      // Reemplazamos la celda partida con el segmento correspondiente explícitamente.
+      subRow[splitCol] = segs[k];
+      out.push(subRow);
+    }
+  }
+  return out;
+}
+
+/** Colapsa cualquier `SEG_SEP` residual reemplazándolo por un espacio simple. */
+function collapseSegmentSeparators(matrix) {
+  if (!Array.isArray(matrix)) return matrix;
+  return matrix.map((row) =>
+    Array.isArray(row)
+      ? row.map((v) =>
+          typeof v === 'string' && v.indexOf(SEG_SEP) >= 0
+            ? v.split(SEG_SEP).map((s) => normalizeCell(s)).filter(Boolean).join(' ')
+            : v
+        )
+      : row
   );
 }
 
@@ -1705,7 +1894,8 @@ async function extractTablesFromItemRectSlice(items, rects, debug, options = {})
     const textBlocks = splitRowBlocksByVerticalGaps(textRows);
     const blocks = chooseBorderTableBlocks(matrixByBorders, trimmedYLines, textBlocks, { anchorMode });
     tables = blocks.map((celdas, i) => {
-      const cleanedBase = stabilizeLeftColumns(removeCompletelyEmptyRows(trimTrailingEmptyRows(celdas)));
+      const split = splitRowsByMultiSegmentColumn(celdas, LEFT_COLS);
+      const cleanedBase = stabilizeLeftColumns(removeCompletelyEmptyRows(trimTrailingEmptyRows(split)));
       const cleanedFilled = forwardFillLeftColumns(cleanedBase, LEFT_COLS);
       const cleanedMergedHeaders = expandMergedHeadersAndSpans(cleanedFilled, LEFT_COLS);
       const normalizedSubrows = normalizeMergedSubrows(cleanedMergedHeaders, LEFT_COLS);
@@ -1713,9 +1903,10 @@ async function extractTablesFromItemRectSlice(items, rects, debug, options = {})
       const sectioned = propagateSectionHeaders(collapsed, LEFT_COLS);
       const aligned = alignLeftColumnsByStructure(sectioned, LEFT_COLS);
       const stripped = stripExamenesGeneralesDecoration(fillGroupByVerticalContinuity(aligned, LEFT_COLS));
-      const cleaned = clearLeftCellsBeforePrecioInRow(
+      const cleanedRaw = clearLeftCellsBeforePrecioInRow(
         rebalanceSingleLeftCellToDominantColumn(stripped, LEFT_COLS)
       );
+      const cleaned = collapseSegmentSeparators(cleanedRaw);
       const hierarchy = buildLeftHierarchy(cleaned, LEFT_COLS);
       return {
         id: i + 1,
