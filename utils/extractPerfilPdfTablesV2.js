@@ -452,6 +452,34 @@ function propagateSectionHeaders(tableCells, leftCols = LEFT_COLS) {
   const out = tableCells.map((r) => r.slice());
   const sectionCol = Math.max(0, leftCols - 2);
   const itemCol = Math.max(0, leftCols - 1);
+
+  /**
+   * Si en las filas con marcas a la derecha, la columna supuesta de "items" contiene en
+   * su mayoría valores tipo marca (x / NO APLICA / S/.<n> / vacío / números cortos), entonces
+   * esa columna no es una columna de ítems sino la primera columna de datos: la columna real
+   * de ítems es `sectionCol`. En ese caso desactivamos la propagación, que está pensada para
+   * tablas con patrón (sección, ítem, marcas...).
+   */
+  const isMarkLike = (text) => {
+    const t = normalizeCell(text);
+    if (!t) return true;
+    if (/^x$/i.test(t)) return true;
+    if (/^no\s*aplica$/i.test(t)) return true;
+    if (/^s\/\s*\d/i.test(t)) return true;
+    if (/^[0-9][0-9.,\s/%-]*$/.test(t)) return true;
+    return false;
+  };
+  let markRows = 0;
+  let markInItemCol = 0;
+  for (const row of out) {
+    if (!hasAnyRightMark(row, leftCols)) continue;
+    markRows += 1;
+    if (isMarkLike(row[itemCol])) markInItemCol += 1;
+  }
+  if (markRows >= 3 && markInItemCol / markRows >= 0.6) {
+    return out;
+  }
+
   let activeSection = '';
   const isSectionLabel = (text) => {
     const t = normalizeCell(text);
