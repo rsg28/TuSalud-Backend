@@ -89,6 +89,25 @@ function removeCompletelyEmptyRows(matrix) {
   return matrix.filter((row) => row.some((c) => normalizeCell(c)));
 }
 
+// Detección genérica de fechas (pies de página tipo "Ver 03 16/09/2024", fechas de emisión,
+// "Lima, 24 de enero del 2025", etc.). No dependemos de ninguna cadena literal del documento:
+// sólo buscamos patrones de fecha en los formatos más comunes (numéricos y con nombre de mes).
+const DATE_NUMERIC_RE = /\b(?:\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4}|\d{4}[\/\-.]\d{1,2}[\/\-.]\d{1,2})\b/;
+const DATE_MONTH_RE = /\b\d{1,2}\s+de\s+(?:enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre)(?:\s+de[l]?\s+\d{2,4})?\b/i;
+function cellLooksLikeDate(s) {
+  const t = normalizeCell(s);
+  if (!t) return false;
+  return DATE_NUMERIC_RE.test(t) || DATE_MONTH_RE.test(t);
+}
+function rowContainsDate(row) {
+  if (!Array.isArray(row)) return false;
+  return row.some((c) => cellLooksLikeDate(c));
+}
+function dropRowsWithDates(matrix) {
+  if (!Array.isArray(matrix)) return matrix;
+  return matrix.filter((row) => !rowContainsDate(row));
+}
+
 function cluster1D(values, gap) {
   const s = [...values].sort((a, b) => a - b);
   const groups = [];
@@ -2110,7 +2129,8 @@ async function extractTablesFromItemRectSlice(items, rects, debug, options = {})
         rebalanceSingleLeftCellToDominantColumn(stripped, LEFT_COLS)
       );
       dbg('cleanedRaw', cleanedRaw);
-      const cleaned = collapseSegmentSeparators(cleanedRaw);
+      const withoutDates = dropRowsWithDates(collapseSegmentSeparators(cleanedRaw));
+      const cleaned = withoutDates;
       dbg('cleaned', cleaned);
       const hierarchy = buildLeftHierarchy(cleaned, LEFT_COLS);
       return {
@@ -2149,7 +2169,9 @@ async function extractTablesFromItemRectSlice(items, rects, debug, options = {})
       const sectioned = propagateSectionHeaders(collapsed, LEFT_COLS);
       const aligned = alignLeftColumnsByStructure(sectioned, LEFT_COLS);
       const stripped = stripExamenesGeneralesDecoration(fillGroupByVerticalContinuity(aligned, LEFT_COLS));
-      const celdas = clearLeftCellsBeforePrecioInRow(rebalanceSingleLeftCellToDominantColumn(stripped, LEFT_COLS));
+      const celdas = dropRowsWithDates(
+        clearLeftCellsBeforePrecioInRow(rebalanceSingleLeftCellToDominantColumn(stripped, LEFT_COLS))
+      );
       const hierarchy = buildLeftHierarchy(celdas, LEFT_COLS);
       return {
         id: i + 1,
