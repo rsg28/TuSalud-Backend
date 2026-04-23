@@ -312,7 +312,14 @@ function hasAnyRightMark(row, leftCols = LEFT_COLS) {
 
 function rowHasSelectionData(row, leftCols = LEFT_COLS) {
   const right = row.slice(leftCols).map((v) => normalizeCell(v));
-  return right.some((v) => /^x$/i.test(v) || /^s\/\s*\d/i.test(v));
+  if (right.some((v) => /^x$/i.test(v) || /^s\/\s*\d/i.test(v))) return true;
+  // Caso tabla angosta (menos columnas que LEFT_COLS, p. ej. ANEXOS de 2-3 cols con
+  // estructura "texto | x"): la "x" vive en la zona que normalmente consideramos
+  // "izquierda" (label), pero sigue siendo un marcador de selección. Sin esto, rows
+  // como ["","BK ESPUTO","x","","",""] son clasificadas como cabeceras y sus "x" se
+  // propagan por colspan al resto de columnas.
+  const anyMark = row.map((v) => normalizeCell(v)).some((v) => /^x$/i.test(v));
+  return anyMark;
 }
 
 function mergeMarksVectors(vectors) {
@@ -856,14 +863,17 @@ function clusterEdges(values, gap = EDGE_CLUSTER_GAP) {
  */
 function approximateContentBottomY(items) {
   if (!items.length) return 0;
-  const rows = bucketRows(items);
-  if (!rows.length) return Math.min(...items.map((i) => i.y));
-  const asc = [...rows].sort((a, b) => a.y - b.y);
-  for (const row of asc) {
-    const n = row.items.filter((it) => normalizeCell(it.str).length >= 2).length;
-    if (n >= 2) return row.y;
+  // Usamos el mínimo real (fondo absoluto del contenido) para calcular el apilado entre
+  // páginas. Antes devolvíamos la primera fila con ≥2 items desde abajo, pero eso dejaba
+  // muchas filas "colgando" debajo del valor usado y provocaba que la página siguiente
+  // se solapase verticalmente con el final de la anterior, mezclando sub-tablas de
+  // páginas distintas (p. ej. "Test de Fobias" de la p. 2 caía en la banda de "NOTA 5"
+  // de la p. 3).
+  let minY = Infinity;
+  for (const it of items) {
+    if (typeof it.y === 'number' && it.y < minY) minY = it.y;
   }
-  return asc[0].y;
+  return isFinite(minY) ? minY : 0;
 }
 
 /** Borde superior útil de la página siguiente (cabecera / primera banda con texto). */
@@ -1037,17 +1047,53 @@ function removeSpuriousNarrowColumns(xLines, options = {}) {
 
 function tryBuildGridFromRectangles(rects) {
   if (!rects.length) return null;
+  // Identificar rectángulos de "decoración" de ancho anormalmente grande (barras/fondos
+  // de sección que abarcan casi toda la página y que en PDFs compactos inyectan edges
+  // espurios en los extremos). Los detectamos como rects cuyo ancho supera en más de
+  // ~2.5x la mediana de anchos reales. Para filtrar sin heurísticas dependientes de
+  // strings, sólo los excluimos si el PDF también tiene rects "normales" en la misma
+  // banda, para no romper tablas anchas legítimas.
+  // Excluir rectángulos "decorativos" (barras horizontales de sección de ancho completo
+  // de la página) que en slices pequeños (1-2 filas) dominan y contaminan los bordes con
+  // edges espurios en los extremos del papel (x≈25, x≈816). Detectamos decoración como
+  // rects cuyo ancho es apreciablemente mayor que el modo de anchos del slice (el cuerpo
+  // típico de una tabla usa pocos anchos distintos y recurrentes), combinado con una
+  // altura baja. No usamos la mediana, que sesga hacia la decoración cuando ésta es
+  // numerosa.
+  const widths = rects.map((r) => r.w).filter((w) => w > 4);
+  const bucketKey = (w) => Math.round(w / 5) * 5;
+  const bucketCounts = new Map();
+  for (const w of widths) {
+    const k = bucketKey(w);
+    bucketCounts.set(k, (bucketCounts.get(k) || 0) + 1);
+  }
+  let modeW = 0;
+  let modeHits = 0;
+  for (const [k, n] of bucketCounts) {
+    if (n > modeHits || (n === modeHits && k < modeW)) {
+      modeHits = n;
+      modeW = k;
+    }
+  }
+  // Si el modo es grande (ej. 790 en una página casi vacía con 4-5 barras) lo descartamos:
+  // usamos el mínimo entre el modo y un ancho absoluto razonable para distinguir decoración.
+  const effectiveMode = Math.min(modeW || 200, 400);
+  const decorationWidth = Math.max(effectiveMode * 2.2, 400);
+  const isDecoration = (r) => r.w >= decorationWidth && r.h <= 10;
+
   const xEdges = [];
   const yEdges = [];
   for (const r of rects) {
     // ignorar rectángulos minúsculos
     if (r.w < 8 && r.h < 8) continue;
+    if (isDecoration(r)) continue;
     xEdges.push(r.x1, r.x2);
     yEdges.push(r.y1, r.y2);
   }
   // Bordes dibujados como rectángulos muy delgados (líneas horizontales/verticales)
   for (const r of rects) {
     if (r.w < 4 && r.h < 4) continue;
+    if (isDecoration(r)) continue;
     const horiz = r.w >= 18 && r.h <= 7;
     const vert = r.h >= 18 && r.w <= 7;
     if (horiz || vert) {
@@ -1055,9 +1101,17 @@ function tryBuildGridFromRectangles(rects) {
       yEdges.push(r.y1, r.y2);
     }
   }
-  const xClusters = clusterEdges(xEdges).filter((c) => c.hits >= EDGE_MIN_HITS_X).sort((a, b) => a.value - b.value);
-  const yClusters = clusterEdges(yEdges).filter((c) => c.hits >= EDGE_MIN_HITS_Y).sort((a, b) => b.value - a.value);
-  if (xClusters.length < 4) return null;
+  // Umbrales adaptativos: tablas diminutas (ANEXO 05, NOTA 7 "CBC AUDIOMETRIA")
+  // tienen apenas 1-2 filas de rects, por lo que cada divisor de columna sólo acumula
+  // 2-3 hits y quedaría descartado con el umbral global. En esas bandas relajamos el
+  // mínimo de hits por cluster proporcional al tamaño del slice.
+  const rectBudget = rects.length;
+  const minHitsX = rectBudget <= 20 ? 2 : EDGE_MIN_HITS_X;
+  const minHitsY = rectBudget <= 20 ? 2 : EDGE_MIN_HITS_Y;
+  const minCols = rectBudget <= 20 ? 3 : 4;
+  const xClusters = clusterEdges(xEdges).filter((c) => c.hits >= minHitsX).sort((a, b) => a.value - b.value);
+  const yClusters = clusterEdges(yEdges).filter((c) => c.hits >= minHitsY).sort((a, b) => b.value - a.value);
+  if (xClusters.length < minCols) return null;
   const rawX = xClusters.map((c) => c.value);
   const cleanX = removeSpuriousNarrowColumns(rawX);
   return {
@@ -1170,28 +1224,38 @@ function assignItemsToGridCells(items, xLines, yLines) {
     rows[r][c].push(it);
   }
 
-  // La celda se compone de "segmentos". Dos items consecutivos se unen en el MISMO segmento
-  // si están en la misma línea Y, no se solapan en X y su gap horizontal es pequeño
-  // (secuencia izquierda→derecha de una sola oración). Entre segmentos usamos `SEG_SEP`
-  // como marcador sólo cuando los items están en líneas Y distintas O se solapan en X
-  // (texto apilado verticalmente dentro de una misma celda del grid). Cuando están en la
-  // misma línea pero con un gap grande, se unen con espacio simple.
-  const isSameLine = (a, b) => {
+  // Dentro de una celda del grid los items pueden aparecer como:
+  //  a) Continuación horizontal de una misma línea de texto (mismo Y, en secuencia izq→der).
+  //  b) Texto envuelto en múltiples líneas verticales dentro de UNA sola celda lógica
+  //     (distinta Y pero misma X de inicio, separados por el interlineado típico).
+  //  c) Dos o más items APILADOS en el mismo X y casi la misma Y (capas de texto
+  //     superpuestas — p. ej. dos exámenes distintos que el PDF dibuja encima uno de otro).
+  //
+  // Solo el caso (c) debe producir un marcador `SEG_SEP` que luego divida la fila en
+  // sub-filas. Los casos (a) y (b) se unen con espacio simple (mismo valor de celda).
+  const isOverlappingLayer = (a, b) => {
+    // Mismo Y (dentro de tolerancia) y solape significativo en X → capas superpuestas.
     if (Math.abs(a.y - b.y) > ROW_Y_TOL) return false;
-    // Si se solapan significativamente en X, no son la misma línea: son dos items apilados
-    // verticalmente en posiciones X muy parecidas.
     const overlap = Math.min(a.x2, b.x2) - Math.max(a.x, b.x);
     const minW = Math.min(a.x2 - a.x, b.x2 - b.x);
-    if (minW > 0 && overlap > minW * 0.3) return false;
-    return true;
+    return minW > 0 && overlap > minW * 0.3;
   };
+
+  // Dos items que caen en la misma celda del grid pero con un gap en Y mucho mayor al
+  // interlineado típico pertenecen a filas lógicas distintas atrapadas por una fila del
+  // grid demasiado alta (p. ej. una cabecera que engloba una fila de metadatos).
+  const isDistinctRowInCell = (a, b) => {
+    const yDiff = Math.abs(a.y - b.y);
+    if (yDiff <= ROW_Y_TOL) return false;
+    const avgLineH = ((a.h || 6) + (b.h || 6)) / 2;
+    return yDiff > avgLineH * 2;
+  };
+
+  const isSameLine = (a, b) => Math.abs(a.y - b.y) <= ROW_Y_TOL && !isOverlappingLayer(a, b);
 
   return rows.map((row) =>
     row.map((cellItems) => {
       if (!cellItems.length) return '';
-      // Orden estable: primero por X ascendente (permite merge inline izq→der), usando el
-      // índice original como desempate para conservar el orden de lectura cuando dos items
-      // están al mismo X pero en distintas líneas Y.
       const indexed = cellItems.map((it, idx) => ({ it, idx }));
       indexed.sort((a, b) => (a.it.x - b.it.x) || (a.idx - b.idx));
       const sorted = indexed.map((e) => e.it);
@@ -1219,7 +1283,13 @@ function assignItemsToGridCells(items, xLines, yLines) {
       for (let i = 1; i < clean.length; i++) {
         const prev = clean[i - 1];
         const nx = clean[i];
-        out += isSameLine(prev, nx) ? ' ' + nx.str : SEG_SEP + nx.str;
+        // Emitimos SEG_SEP cuando los segmentos son capas superpuestas en X (mismo Y y
+        // solape en X) o cuando el gap vertical entre items supera claramente el
+        // interlineado (distintas filas lógicas capturadas por una fila del grid
+        // demasiado alta). Para texto envuelto en múltiples líneas o items en la misma
+        // línea con gap grande, usamos espacio simple — sigue siendo una sola celda.
+        const splitHere = isOverlappingLayer(prev, nx) || isDistinctRowInCell(prev, nx);
+        out += splitHere ? SEG_SEP + nx.str : ' ' + nx.str;
       }
       return out;
     })
@@ -1422,6 +1492,59 @@ function isGroupHeaderRow(matrix, rowAt, rowOther, labelCol = 0) {
  *
  * La función solo recorta desde los extremos hacia adentro; nunca borra filas del medio.
  */
+/**
+ * Filtra los items de texto que no están geométricamente contenidos dentro de ningún
+ * rectángulo "tipo celda" de la tabla. El criterio:
+ *
+ *   1. Se consideran rectángulos útiles aquellos con ancho ≤ 85% del grid y alto ≤ 70%
+ *      del grid (descarta marcos globales, fondos de cabecera enormes y líneas-eje).
+ *   2. Un ítem se mantiene si al menos un rect útil lo contiene (con una pequeña tolerancia).
+ *   3. Si no hay rects útiles, no se filtra nada (fallback seguro).
+ *
+ * Esto descarta overlays de página como sellos de versión, fechas de codificación o
+ * encabezados de documento superpuestos a la tabla, sin necesidad de ningún patrón de
+ * texto hardcodeado.
+ */
+function filterItemsInsideCellRects(items, rects, xLines, yLines, options = {}) {
+  if (!Array.isArray(items) || !items.length) return items;
+  if (!Array.isArray(rects) || !rects.length) return items;
+  const sortedX = [...xLines].sort((a, b) => a - b);
+  const sortedY = [...yLines].sort((a, b) => b - a);
+  if (sortedX.length < 2 || sortedY.length < 2) return items;
+  const totalWidth = sortedX[sortedX.length - 1] - sortedX[0];
+  const totalHeight = sortedY[0] - sortedY[sortedY.length - 1];
+  const minCellW = options.minCellWidth ?? 6;
+  const minCellH = options.minCellHeight ?? 6;
+  const maxW = totalWidth * 0.85;
+  const maxH = totalHeight * 0.7;
+  const useful = rects.filter(
+    (r) => r.w >= minCellW && r.h >= minCellH && r.w <= maxW && r.h <= maxH
+  );
+  if (!useful.length) return items;
+  const TOL = 1.0;
+  const itemCx = (it) => (it.x + (it.x2 ?? it.x)) / 2;
+  const itemCy = (it) => it.y;
+  return items.filter((it) => {
+    const cx = itemCx(it);
+    const cy = itemCy(it);
+    const x1 = it.x - TOL;
+    const x2 = (it.x2 ?? it.x) + TOL;
+    const y1 = it.y - TOL;
+    const y2 = it.y + (it.h || 0) + TOL;
+    for (const r of useful) {
+      const rx1 = Math.min(r.x1, r.x2);
+      const rx2 = Math.max(r.x1, r.x2);
+      const ryTop = Math.max(r.y1, r.y2);
+      const ryBot = Math.min(r.y1, r.y2);
+      // El centro del item debe caer dentro del rect y su caja debe solapar mayormente con él.
+      if (cx >= rx1 - TOL && cx <= rx2 + TOL && cy >= ryBot - TOL && cy <= ryTop + TOL) {
+        return true;
+      }
+    }
+    return false;
+  });
+}
+
 function clearCellsOutsideTableRects(matrix, xLines, yLines, rects, options = {}) {
   const minCellW = options.minCellWidth ?? 6;
   const minCellH = options.minCellHeight ?? 6;
@@ -1463,7 +1586,20 @@ function clearCellsOutsideTableRects(matrix, xLines, yLines, rects, options = {}
   const lowThreshold = Math.max(1, Math.floor(median * 0.25));
 
   const textCount = matrix.map((row) => row.filter((v) => normalizeCell(v)).length);
-  const isOutsideRow = (j) => rectsPerRow[j] <= lowThreshold && textCount[j] <= 2;
+  // Una fila "fuera" debe tener, a la vez, poquísimos rects que la respalden y poco texto
+  // relativo al ancho de la tabla. Escalamos el tope de texto con el número de columnas
+  // para no recortar filas legítimas de tablas pequeñas (una tabla 3×N tiene filas de datos
+  // con sólo dos celdas pobladas).
+  const textOutsideMax = Math.max(1, Math.floor(nCols * 0.2));
+  // Para tablas con pocas filas (≤4) — p. ej. mini-tabla "PERSONAL DE LIMPIEZA TODAS LAS
+  // SEDES / AUDIOMETRIA | x" — una fila de cabecera con 1 sola celda válida no es "fuera"
+  // de la tabla: es una cabecera fusionada. Exigimos que esté vacía (textCount=0) o que
+  // no tenga ni rects ni texto, para no perder filas de cabecera.
+  const strictTrim = nRows <= 4;
+  const isOutsideRow = (j) => {
+    if (strictTrim) return rectsPerRow[j] === 0 && textCount[j] === 0;
+    return rectsPerRow[j] <= lowThreshold && textCount[j] <= textOutsideMax;
+  };
 
   let top = 0;
   while (top < nRows && isOutsideRow(top)) top += 1;
@@ -1570,6 +1706,14 @@ function expandValuesAcrossMergedRects(matrix, xLines, yLines, rects, options = 
     }
     if (values.length !== 1) continue;
     const filled = values[0];
+    // No propagar marcas tipo "x"/"✓" a través de múltiples columnas de una misma fila:
+    // aunque el rect que las encierra sea un merge visual (celda ancha que contiene una
+    // sola marca), duplicar la marca en cada sub-columna del grid enmascara la columna
+    // verdadera a la que pertenece (p. ej. VACUNAS: la fila "BK ESPUTO | x" aparecería
+    // como "BK ESPUTO | x | x | x | x | x | x" contaminando las columnas de HEPATITIS B).
+    // Las marcas no son etiquetas agrupadoras; solo propagamos merges verticales (rowspan)
+    // o celdas de texto reales.
+    if (isColspanCand && /^(x|✓|✔)$/i.test(filled)) continue;
     for (let rr = rowFrom; rr <= rowTo; rr++) {
       for (let cc = colFrom; cc <= colTo; cc++) {
         if (!out[rr]) continue;
@@ -1733,15 +1877,27 @@ function chooseBorderTableBlocks(matrixByBorders, yLines, textBlocks, options = 
   return pick.length ? pick : [matrixByBorders];
 }
 
-const ANCHOR_Y_PAD = 10;
-const ANCHOR_MIN_SEP = 36;
-const ANCHOR_MIN_BAND_HEIGHT = 28;
-const ANCHOR_SLICE_MIN_ITEMS = 4;
+const ANCHOR_Y_PAD = 1;
+// Separación mínima entre anclas consecutivas para generar una banda. Antes era 36, lo
+// que eliminaba las mini-tablas (ANEXO 05 "CONDICIONALES" 2 filas, NOTA 1..7, etc.) cuya
+// distancia entre anclas vecinas es de apenas 8-15 pt. El filtro principal real sigue
+// siendo `ANCHOR_MIN_BAND_HEIGHT`; esto sólo evita bandas degeneradas.
+const ANCHOR_MIN_SEP = 5;
+// Banda mínima muy corta: una tabla de 1-2 filas ocupa ~8-12 pt. No bajar de 6, o entran
+// saltos entre párrafos como "tablas".
+const ANCHOR_MIN_BAND_HEIGHT = 8;
+// Aceptamos bandas con apenas 2 items (p. ej. "Trabajos en altura" + "Electrocardiograma").
+const ANCHOR_SLICE_MIN_ITEMS = 2;
 
 function textItemVerticalBBox(it) {
-  const h = Math.max(6, Math.abs(it.h || 0));
-  const yTop = Math.max(it.y, it.y + (it.h >= 0 ? h * 0.2 : -h * 0.2));
-  const yBot = Math.min(it.y, it.y - h);
+  // La altura reportada por pdf.js suele incluir interlineado ascendente/descendente
+  // (ascender + descender). Para detección de anclas nos interesa la caja "apretada"
+  // al glifo, porque si no, la caja invade el interlineado y come items de la fila
+  // inmediatamente inferior. Usamos 70 % de la altura reportada con un mínimo robusto.
+  const hRaw = Math.max(6, Math.abs(it.h || 0));
+  const h = hRaw * 0.7;
+  const yTop = it.y + h * 0.2;
+  const yBot = it.y - h * 0.8;
   return { yTop, yBot };
 }
 
@@ -1778,6 +1934,9 @@ function detectSemanticAnchors(items) {
   for (const it of items) {
     if (!isSemanticAnchorString(it.str)) continue;
     const { yTop, yBot } = textItemVerticalBBox(it);
+    if (process.env.DEBUG_ANCHORS) {
+      console.error('[anchor] raw y=', it.y.toFixed(2), 'h=', it.h.toFixed(2), 'yTop=', yTop.toFixed(2), 'yBot=', yBot.toFixed(2), 'str=', it.str.slice(0, 60));
+    }
     out.push({
       yTop,
       yBot,
@@ -1827,7 +1986,12 @@ function buildSemanticYBands(anchors, items) {
   if (last.yBot - ANCHOR_Y_PAD > yMin + ANCHOR_MIN_BAND_HEIGHT) {
     bands.push({ yLo: yMin - 50, yHi: last.yBot - ANCHOR_Y_PAD, kind: 'below-last-anchor' });
   }
-  return bands.filter((b) => b.yHi - b.yLo >= ANCHOR_MIN_BAND_HEIGHT);
+  const kept = bands.filter((b) => b.yHi - b.yLo >= ANCHOR_MIN_BAND_HEIGHT);
+  if (process.env.DEBUG_BANDS) {
+    console.error('[bands] total anchors=', anchors.length, 'bands=', kept.length);
+    for (const b of kept) console.error('  band yLo=', b.yLo.toFixed(2), 'yHi=', b.yHi.toFixed(2), 'h=', (b.yHi - b.yLo).toFixed(2), 'kind=', b.kind);
+  }
+  return kept;
 }
 
 function itemYInBand(it, yLo, yHi) {
@@ -1859,6 +2023,9 @@ function buildSemanticSlicesOrFull(items, rects) {
   const slices = [];
   for (const b of bands) {
     const { items: si, rects: sr } = sliceItemsAndRectsByBand(items, rects, b.yLo, b.yHi);
+    if (process.env.DEBUG_SLICES) {
+      console.error('[slice-band] yLo=', b.yLo.toFixed(1), 'yHi=', b.yHi.toFixed(1), 'items=', si.length, 'rects=', sr.length, 'kept=', si.length >= ANCHOR_SLICE_MIN_ITEMS);
+    }
     if (si.length < ANCHOR_SLICE_MIN_ITEMS) continue;
     slices.push({ items: si, rects: sr, anchorMode: true, band: b });
   }
@@ -1876,7 +2043,28 @@ async function extractTablesFromItemRectSlice(items, rects, debug, options = {})
   const grid = tryBuildGridFromRectangles(rects);
   if (grid) {
     const rowBuckets = bucketRows(items);
-    const yLinesFromBorders = [...grid.yLines].sort((a, b) => b - a);
+    let yLinesFromBorders = [...grid.yLines].sort((a, b) => b - a);
+    // Si el grid heredó líneas Y de rects que se asomaron a esta banda pero pertenecen a
+    // tablas vecinas, esas líneas caen muy por fuera del rango vertical real de los items
+    // de esta rebanada y provocan filas "mamut" vacías que luego engañan al recortador.
+    // Las descartamos si están fuera del bbox de los items (con un margen razonable).
+    if (items && items.length && yLinesFromBorders.length >= 2) {
+      let itYTop = -Infinity;
+      let itYBot = Infinity;
+      for (const it of items) {
+        const { yTop, yBot } = textItemVerticalBBox(it);
+        if (yTop > itYTop) itYTop = yTop;
+        if (yBot < itYBot) itYBot = yBot;
+      }
+      if (isFinite(itYTop) && isFinite(itYBot) && itYTop > itYBot) {
+        const margin = Math.max(10, (itYTop - itYBot) * 0.15);
+        const upper = itYTop + margin;
+        const lower = itYBot - margin;
+        const pruned = yLinesFromBorders.filter((y) => y <= upper && y >= lower);
+        // Solo aplicamos la poda si conservamos al menos 2 líneas (1 fila) tras filtrar.
+        if (pruned.length >= 2) yLinesFromBorders = pruned;
+      }
+    }
     const assignedMatrix = assignItemsToGridCells(items, grid.xLines, yLinesFromBorders);
     const { matrix: trimmedMatrix, yLines: trimmedYLines } = clearCellsOutsideTableRects(
       assignedMatrix,
@@ -1894,19 +2082,36 @@ async function extractTablesFromItemRectSlice(items, rects, debug, options = {})
     const textBlocks = splitRowBlocksByVerticalGaps(textRows);
     const blocks = chooseBorderTableBlocks(matrixByBorders, trimmedYLines, textBlocks, { anchorMode });
     tables = blocks.map((celdas, i) => {
+      const dbg = (tag, m) => {
+        if (!process.env.DEBUG_PIPE2) return;
+        const s = m.find((r) => (r[1] || '').toString().startsWith('BK ESPUTO'));
+        if (s) console.error('[pipe2]', tag, JSON.stringify(s));
+      };
+      dbg('block', celdas);
       const split = splitRowsByMultiSegmentColumn(celdas, LEFT_COLS);
+      dbg('split', split);
       const cleanedBase = stabilizeLeftColumns(removeCompletelyEmptyRows(trimTrailingEmptyRows(split)));
+      dbg('stab', cleanedBase);
       const cleanedFilled = forwardFillLeftColumns(cleanedBase, LEFT_COLS);
+      dbg('filled', cleanedFilled);
       const cleanedMergedHeaders = expandMergedHeadersAndSpans(cleanedFilled, LEFT_COLS);
+      dbg('merged', cleanedMergedHeaders);
       const normalizedSubrows = normalizeMergedSubrows(cleanedMergedHeaders, LEFT_COLS);
+      dbg('subrows', normalizedSubrows);
       const collapsed = collapseStandaloneLargeRows(normalizedSubrows, LEFT_COLS);
+      dbg('collapsed', collapsed);
       const sectioned = propagateSectionHeaders(collapsed, LEFT_COLS);
+      dbg('sectioned', sectioned);
       const aligned = alignLeftColumnsByStructure(sectioned, LEFT_COLS);
+      dbg('aligned', aligned);
       const stripped = stripExamenesGeneralesDecoration(fillGroupByVerticalContinuity(aligned, LEFT_COLS));
+      dbg('stripped', stripped);
       const cleanedRaw = clearLeftCellsBeforePrecioInRow(
         rebalanceSingleLeftCellToDominantColumn(stripped, LEFT_COLS)
       );
+      dbg('cleanedRaw', cleanedRaw);
       const cleaned = collapseSegmentSeparators(cleanedRaw);
+      dbg('cleaned', cleaned);
       const hierarchy = buildLeftHierarchy(cleaned, LEFT_COLS);
       return {
         id: i + 1,
@@ -1967,6 +2172,18 @@ async function extractTablesFromItemRectSlice(items, rects, debug, options = {})
     }
   }
 
+  if (process.env.DEBUG_SLICE_TABLES) {
+    console.error('[slice] items=', items.length, 'rects=', rects.length, 'tables=', tables.length);
+    if (items.length < 20) {
+      for (const it of items) console.error('    item y=', it.y.toFixed(2), 'x=', it.x.toFixed(2), 'str=', JSON.stringify(it.str));
+    }
+    for (const t of tables) {
+      console.error('  pre-filter name=', t.nombre, 'filas=', t.filas, 'cols=', t.columnas);
+      for (let i = 0; i < Math.min(5, t.celdas.length); i++) {
+        console.error('    row', i, JSON.stringify(t.celdas[i]).slice(0, 200));
+      }
+    }
+  }
   tables = tables.filter(
     (t) => Array.isArray(t.celdas) && t.celdas.length > 0 && (t.columnas || maxColsOf(t.celdas)) > 1
   );
@@ -1991,13 +2208,34 @@ function tableDataCellCount(t) {
   return n;
 }
 
+function tableMarkCellCount(table) {
+  const celdas = table && Array.isArray(table.celdas) ? table.celdas : [];
+  let count = 0;
+  for (const row of celdas) {
+    if (!Array.isArray(row)) continue;
+    for (const v of row) {
+      const s = normalizeCell(v);
+      if (!s) continue;
+      // Marcas típicas de tablas de exámenes: 'x', 'X', '✓', 'S/.n', 'NO APLICA'.
+      if (/^x$/i.test(s) || /^[✓✔]$/.test(s) || /^no\s*aplica$/i.test(s)) count += 1;
+    }
+  }
+  return count;
+}
+
+function tableHasMarkCells(table) {
+  return tableMarkCellCount(table) >= 1;
+}
+
 function filterOutTinyMetadataTables(tables) {
   if (!Array.isArray(tables) || tables.length <= 1) return tables;
   const sizes = tables.map(tableDataCellCount);
   const maxSize = sizes.reduce((m, v) => (v > m ? v : m), 0);
   if (maxSize < 30) return tables;
   const minAbs = 10;
-  return tables.filter((t, i) => sizes[i] >= minAbs);
+  // Conservamos también las tablas con al menos una celda-marca (p. ej. ANEXOS
+  // chicos: "AUDIOMETRIA | x" tiene 2 celdas útiles pero es una tabla real, no metadatos).
+  return tables.filter((t, i) => sizes[i] >= minAbs || tableHasMarkCells(t));
 }
 
 async function extractPerfilPdfTablesFromBuffer(buffer, options = {}) {
@@ -2036,6 +2274,9 @@ async function extractPerfilPdfTablesFromBuffer(buffer, options = {}) {
         continue;
       }
       const deltaY = computeStackDeltaY(mergedItems, rawItems, stackGap);
+      if (process.env.DEBUG_STACK) {
+        console.error('[stack] page', i + 1, 'deltaY=', deltaY.toFixed(2), 'rawItems=', rawItems.length);
+      }
       for (const it of rawItems) mergedItems.push({ ...it, y: it.y + deltaY });
       for (const r of rawRects) mergedRects.push({ ...r, y1: r.y1 + deltaY, y2: r.y2 + deltaY });
     }
@@ -2052,6 +2293,9 @@ async function extractPerfilPdfTablesFromBuffer(buffer, options = {}) {
         debug,
         { anchorMode: !!slice.anchorMode }
       );
+      if (process.env.DEBUG_SLICES) {
+        console.error('[slice->tables] band yHi=', slice.band ? slice.band.yHi.toFixed(1) : 'null', 'items=', slice.items.length, 'emitted=', part.length);
+      }
       tables.push(...part);
       if (debug && d) {
         sliceDebugs.push({
