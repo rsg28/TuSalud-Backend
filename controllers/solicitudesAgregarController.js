@@ -267,9 +267,14 @@ const actualizarEstado = async (req, res) => {
         }
         itemsComplementaria.get(examen_id).cantidad += cantidadTotal;
 
+        // Item de tipo EXAMEN (las solicitudes-agregar sólo trabajan con exámenes
+        // sueltos por ahora). UNIQUE (pedido_id, item_key) consolida duplicados.
         await connection.execute(
-          'INSERT INTO pedido_examenes (pedido_id, examen_id, cantidad, precio_base) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE cantidad = cantidad + ?, precio_base = ?',
-          [pedido_id, examen_id, cantidadTotal, precio_base, cantidadTotal, precio_base]
+          `INSERT INTO pedido_items
+             (pedido_id, tipo_item, perfil_id, tipo_emo, examen_id, cantidad, precio_base)
+           VALUES (?, 'EXAMEN', NULL, NULL, ?, ?, ?)
+           ON DUPLICATE KEY UPDATE cantidad = cantidad + VALUES(cantidad), precio_base = VALUES(precio_base)`,
+          [pedido_id, examen_id, cantidadTotal, precio_base]
         );
 
         let targetPacienteIds = [];

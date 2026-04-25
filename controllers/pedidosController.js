@@ -36,7 +36,26 @@ async function adjuntarCotizacionesALista(pedidos) {
   }));
 }
 
-// Nuevo esquema: pedidos, pedido_examenes, historial_pedido, pedido_pacientes, etc.
+// Esquema Fase 2: pedidos, pedido_items (HÍBRIDO PERFIL|EXAMEN), historial_pedido, pedido_pacientes, etc.
+
+// Detecta el tipo de item según los campos provistos. Mantiene BC con clientes
+// que sólo mandan `examen_id`.
+const TIPOS_EMO_VALIDOS = new Set(['PREOC', 'ANUAL', 'RETIRO', 'VISITA']);
+function normalizePedidoItem(it) {
+  const explicito = typeof it.tipo_item === 'string' ? it.tipo_item.toUpperCase() : null;
+  const tipo_item = explicito || (it.perfil_id ? 'PERFIL' : 'EXAMEN');
+  const cantidad = Math.max(1, Number(it.cantidad) || 1);
+  if (tipo_item === 'PERFIL') {
+    if (!it.perfil_id) throw new Error('Item PERFIL requiere perfil_id');
+    const tipo_emo = it.tipo_emo ? String(it.tipo_emo).toUpperCase() : null;
+    if (!tipo_emo || !TIPOS_EMO_VALIDOS.has(tipo_emo)) {
+      throw new Error('Item PERFIL requiere tipo_emo (PREOC|ANUAL|RETIRO|VISITA)');
+    }
+    return { tipo_item: 'PERFIL', perfil_id: Number(it.perfil_id), tipo_emo, examen_id: null, nombre: it.nombre || null, cantidad };
+  }
+  if (!it.examen_id) throw new Error('Item EXAMEN requiere examen_id');
+  return { tipo_item: 'EXAMEN', perfil_id: null, tipo_emo: null, examen_id: Number(it.examen_id), nombre: it.nombre || null, cantidad };
+}
 
 const generarNumeroPedido = async () => {
   const [rows] = await pool.execute('SELECT COALESCE(MAX(id), 0) + 1 AS n FROM pedidos');
@@ -261,10 +280,15 @@ const obtenerPedido = async (req, res) => {
     const pedido = pedidos[0];
 
     const [examenes] = await pool.execute(
-      `SELECT pe.*, ex.nombre AS examen_nombre
-       FROM pedido_examenes pe
-       LEFT JOIN examenes ex ON pe.examen_id = ex.id
-       WHERE pe.pedido_id = ?`,
+      `SELECT pi.id, pi.pedido_id, pi.tipo_item, pi.perfil_id, pi.tipo_emo, pi.examen_id,
+              pi.nombre, pi.cantidad, pi.precio_base, pi.created_at,
+              ex.nombre AS examen_nombre,
+              pf.nombre AS perfil_nombre
+       FROM pedido_items pi
+       LEFT JOIN examenes ex   ON pi.examen_id = ex.id
+       LEFT JOIN emo_perfiles pf ON pi.perfil_id = pf.id
+       WHERE pi.pedido_id = ?
+       ORDER BY pi.id`,
       [pedido_id]
     );
 
@@ -395,7 +419,7 @@ const crearPedido = async (req, res) => {
   try {
     await connection.beginTransaction();
 
-    const { empresa_id, sede_id, cliente_usuario_id, observaciones, condiciones_pago, fecha_vencimiento, examenes, empleados, total_empleados: totalEmpleadosBody, totalEmpleados: totalEmpleadosCamel } = req.body;
+    const { empresa_id, sede_id, cliente_usuario_id, observaciones, condiciones_pago, fecha_vencimiento, examenes, items, empleados, total_empleados: totalEmpleadosBody, totalEmpleados: totalEmpleadosCamel } = req.body;
     const rolUsuario = normalizarRol(req.user?.rol);
     const vendedor_id = (rolUsuario === 'vendedor' || rolUsuario === 'manager') ? req.user.id : null;
     const toPositiveUserId = (v) => {
@@ -451,23 +475,51 @@ const crearPedido = async (req, res) => {
       );
     }
 
+    // Items del pedido: acepta tanto `items` (híbrido nuevo) como `examenes` (legacy
+    // con sólo examen_id). Si vienen ambos, se concatenan.
     const pedidoExamenIds = new Set();
-    if (examenes && Array.isArray(examenes) && examenes.length > 0) {
-      for (const item of examenes) {
-        const examen_id = item.examen_id;
-        const cantidad = Math.max(1, parseInt(item.cantidad) || 1);
-        pedidoExamenIds.add(examen_id);
+    const itemsRaw = [
+      ...(Array.isArray(items) ? items : []),
+      ...(Array.isArray(examenes) ? examenes : []),
+    ];
+    for (const raw of itemsRaw) {
+      const it = normalizePedidoItem(raw);
 
-        const [precio] = await connection.execute(
-          `SELECT precio FROM examen_precio WHERE examen_id = ? AND (sede_id = ? OR sede_id IS NULL) AND (vigente_hasta IS NULL OR vigente_hasta >= CURDATE()) ORDER BY sede_id IS NOT NULL DESC LIMIT 1`,
-          [examen_id, sede_id]
-        );
-        const precio_base = precio.length > 0 ? Number(precio[0].precio) : 0;
+      let precio_base = Number(raw.precio_base);
+      if (!Number.isFinite(precio_base) || precio_base <= 0) {
+        if (it.tipo_item === 'EXAMEN') {
+          const [precio] = await connection.execute(
+            `SELECT precio FROM examen_precio
+             WHERE examen_id = ? AND (sede_id = ? OR sede_id IS NULL)
+               AND (vigente_hasta IS NULL OR vigente_hasta >= CURDATE())
+             ORDER BY sede_id IS NOT NULL DESC LIMIT 1`,
+            [it.examen_id, sede_id]
+          );
+          precio_base = precio.length > 0 ? Number(precio[0].precio) : 0;
+        } else {
+          // PERFIL: jerarquía empresa+sede → empresa → global
+          const [precio] = await connection.execute(
+            `SELECT precio FROM emo_perfil_precio
+             WHERE perfil_id = ? AND tipo_emo = ?
+               AND (empresa_id = ? OR empresa_id IS NULL)
+               AND (sede_id = ? OR sede_id IS NULL)
+             ORDER BY (empresa_id IS NOT NULL) DESC, (sede_id IS NOT NULL) DESC
+             LIMIT 1`,
+            [it.perfil_id, it.tipo_emo, empresa_id, sede_id]
+          );
+          precio_base = precio.length > 0 ? Number(precio[0].precio) : 0;
+        }
+      }
 
-        await connection.execute(
-          'INSERT INTO pedido_examenes (pedido_id, examen_id, cantidad, precio_base) VALUES (?, ?, ?, ?)',
-          [pedido_id, examen_id, cantidad, precio_base]
-        );
+      await connection.execute(
+        `INSERT INTO pedido_items
+           (pedido_id, tipo_item, perfil_id, tipo_emo, examen_id, nombre, cantidad, precio_base)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [pedido_id, it.tipo_item, it.perfil_id, it.tipo_emo, it.examen_id, it.nombre, it.cantidad, precio_base]
+      );
+
+      if (it.tipo_item === 'EXAMEN') {
+        pedidoExamenIds.add(it.examen_id);
       }
     }
 
@@ -523,32 +575,62 @@ const crearPedido = async (req, res) => {
 const agregarExamen = async (req, res) => {
   try {
     const { pedido_id } = req.params;
-    const { examen_id, cantidad } = req.body;
+    const body = req.body || {};
 
-    const [pedido] = await pool.execute('SELECT id, estado, sede_id FROM pedidos WHERE id = ?', [pedido_id]);
+    const [pedido] = await pool.execute('SELECT id, estado, sede_id, empresa_id FROM pedidos WHERE id = ?', [pedido_id]);
     if (pedido.length === 0) {
       return res.status(404).json({ error: 'Pedido no encontrado' });
     }
     if (pedido[0].estado !== 'PENDIENTE' && pedido[0].estado !== 'ESPERA_COTIZACION') {
-      return res.status(400).json({ error: 'Solo se pueden agregar exámenes a pedidos en espera de cotización' });
+      return res.status(400).json({ error: 'Solo se pueden agregar items a pedidos en espera de cotización' });
     }
 
-    const cant = Math.max(1, parseInt(cantidad) || 1);
-    const [precio] = await pool.execute(
-      `SELECT precio FROM examen_precio WHERE examen_id = ? AND (sede_id = ? OR sede_id IS NULL) AND (vigente_hasta IS NULL OR vigente_hasta >= CURDATE()) ORDER BY sede_id IS NOT NULL DESC LIMIT 1`,
-      [examen_id, pedido[0].sede_id]
-    );
-    const precio_base = precio.length > 0 ? Number(precio[0].precio) : 0;
+    let it;
+    try {
+      it = normalizePedidoItem(body);
+    } catch (e) {
+      return res.status(400).json({ error: e.message });
+    }
 
+    let precio_base = Number(body.precio_base);
+    if (!Number.isFinite(precio_base) || precio_base <= 0) {
+      if (it.tipo_item === 'EXAMEN') {
+        const [precio] = await pool.execute(
+          `SELECT precio FROM examen_precio
+           WHERE examen_id = ? AND (sede_id = ? OR sede_id IS NULL)
+             AND (vigente_hasta IS NULL OR vigente_hasta >= CURDATE())
+           ORDER BY sede_id IS NOT NULL DESC LIMIT 1`,
+          [it.examen_id, pedido[0].sede_id]
+        );
+        precio_base = precio.length > 0 ? Number(precio[0].precio) : 0;
+      } else {
+        const [precio] = await pool.execute(
+          `SELECT precio FROM emo_perfil_precio
+           WHERE perfil_id = ? AND tipo_emo = ?
+             AND (empresa_id = ? OR empresa_id IS NULL)
+             AND (sede_id = ? OR sede_id IS NULL)
+           ORDER BY (empresa_id IS NOT NULL) DESC, (sede_id IS NOT NULL) DESC
+           LIMIT 1`,
+          [it.perfil_id, it.tipo_emo, pedido[0].empresa_id, pedido[0].sede_id]
+        );
+        precio_base = precio.length > 0 ? Number(precio[0].precio) : 0;
+      }
+    }
+
+    // ON DUPLICATE KEY UPDATE usa el UNIQUE (pedido_id, item_key) → si el mismo
+    // ítem ya existe, suma la cantidad y refresca precio_base.
     await pool.execute(
-      'INSERT INTO pedido_examenes (pedido_id, examen_id, cantidad, precio_base) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE cantidad = cantidad + ?, precio_base = ?',
-      [pedido_id, examen_id, cant, precio_base, cant, precio_base]
+      `INSERT INTO pedido_items
+         (pedido_id, tipo_item, perfil_id, tipo_emo, examen_id, nombre, cantidad, precio_base)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE cantidad = cantidad + VALUES(cantidad), precio_base = VALUES(precio_base)`,
+      [pedido_id, it.tipo_item, it.perfil_id, it.tipo_emo, it.examen_id, it.nombre, it.cantidad, precio_base]
     );
 
-    res.json({ message: 'Examen agregado' });
+    res.json({ message: 'Item agregado' });
   } catch (error) {
-    console.error('Error al agregar examen:', error);
-    res.status(500).json({ error: 'Error al agregar examen' });
+    console.error('Error al agregar item al pedido:', error);
+    res.status(500).json({ error: 'Error al agregar item' });
   }
 };
 
@@ -564,9 +646,9 @@ const marcarListoParaCotizacion = async (req, res) => {
       return res.status(400).json({ error: 'Solo pedidos a la espera de cotización pueden marcarse listos' });
     }
 
-    const [tieneExamenes] = await pool.execute('SELECT 1 FROM pedido_examenes WHERE pedido_id = ? LIMIT 1', [pedido_id]);
-    if (tieneExamenes.length === 0) {
-      return res.status(400).json({ error: 'El pedido debe tener al menos un examen' });
+    const [tieneItems] = await pool.execute('SELECT 1 FROM pedido_items WHERE pedido_id = ? LIMIT 1', [pedido_id]);
+    if (tieneItems.length === 0) {
+      return res.status(400).json({ error: 'El pedido debe tener al menos un item (examen o perfil)' });
     }
 
     await pool.execute("UPDATE pedidos SET estado = 'LISTO_PARA_COTIZACION' WHERE id = ?", [pedido_id]);
@@ -758,7 +840,13 @@ const cargarEmpleados = async (req, res) => {
       return res.status(400).json({ error: 'El pedido debe tener cotización aprobada para cargar empleados' });
     }
 
-    const [examenesPedido] = await connection.execute('SELECT examen_id FROM pedido_examenes WHERE pedido_id = ?', [pedido_id]);
+    // Solo se consideran exámenes "sueltos" del pedido para asignación directa.
+    // Los items de tipo PERFIL se resuelven a través de pedido_pacientes.emo_perfil_id
+    // + emo_perfil_examenes (filtrado por sexo/edad/condicional).
+    const [examenesPedido] = await connection.execute(
+      "SELECT examen_id FROM pedido_items WHERE pedido_id = ? AND tipo_item = 'EXAMEN' AND examen_id IS NOT NULL",
+      [pedido_id]
+    );
     const examenIds = new Set(examenesPedido.map(e => e.examen_id));
 
     let agregados = 0;
@@ -884,7 +972,7 @@ const cancelarPedido = async (req, res) => {
     await connection.execute('UPDATE cotizaciones SET cotizacion_base_id = NULL WHERE pedido_id = ?', [pedido_id]);
     await connection.execute('DELETE FROM cotizaciones WHERE pedido_id = ?', [pedido_id]);
 
-    // 6. Borrar el pedido (CASCADE: pedido_examenes, pedido_pacientes, paciente_examen_*)
+    // 6. Borrar el pedido (CASCADE: pedido_items, pedido_pacientes, paciente_examen_*)
     await connection.execute('DELETE FROM pedidos WHERE id = ?', [pedido_id]);
 
     await connection.commit();

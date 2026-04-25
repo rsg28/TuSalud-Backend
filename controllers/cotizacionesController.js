@@ -4,7 +4,61 @@ const { validationResult } = require('express-validator');
 // Estados válidos de cotización. El manager solo aprueba (APROBADA_POR_MANAGER), no rechaza.
 const ESTADOS_COTIZACION = ['BORRADOR', 'ENVIADA', 'ENVIADA_AL_CLIENTE', 'ENVIADA_AL_MANAGER', 'APROBADA_POR_MANAGER', 'APROBADA', 'RECHAZADA'];
 
-// Nuevo esquema: cotizaciones por pedido_id, cotizacion_items (nombre, cantidad, precio_base, precio_final, variacion_pct)
+// Items HÍBRIDOS:
+//   tipo_item = 'EXAMEN' → fila con examen_id (perfil_id/tipo_emo NULL).
+//   tipo_item = 'PERFIL' → fila con perfil_id + tipo_emo (examen_id NULL),
+//                          cantidad = nº de pacientes que recibirán ese perfil.
+// Detecta el tipo automáticamente según qué campo viene en el body para
+// mantener BC con clientes que sólo mandan examen_id.
+const TIPOS_EMO_VALIDOS = new Set(['PREOC', 'ANUAL', 'RETIRO', 'VISITA']);
+function normalizeItem(it) {
+  const explicito = typeof it.tipo_item === 'string' ? it.tipo_item.toUpperCase() : null;
+  const tipo_item = explicito || (it.perfil_id ? 'PERFIL' : 'EXAMEN');
+  const cantidad = Math.max(1, Number(it.cantidad) || 1);
+  const precio_base = Number(it.precio_base ?? it.precio_final ?? 0) || 0;
+  const precio_final = Number(it.precio_final ?? precio_base) || 0;
+  const variacion_pct = precio_base !== 0 ? ((precio_final - precio_base) / precio_base) * 100 : 0;
+  const subtotal = precio_final * cantidad;
+
+  if (tipo_item === 'PERFIL') {
+    if (!it.perfil_id) throw new Error('Item PERFIL requiere perfil_id');
+    const tipo_emo = it.tipo_emo ? String(it.tipo_emo).toUpperCase() : null;
+    if (!tipo_emo || !TIPOS_EMO_VALIDOS.has(tipo_emo)) {
+      throw new Error('Item PERFIL requiere tipo_emo (PREOC|ANUAL|RETIRO|VISITA)');
+    }
+    return {
+      tipo_item: 'PERFIL',
+      perfil_id: Number(it.perfil_id),
+      tipo_emo,
+      examen_id: null,
+      nombre: it.nombre || 'Perfil',
+      cantidad, precio_base, precio_final, variacion_pct, subtotal,
+    };
+  }
+
+  if (!it.examen_id) throw new Error('Item EXAMEN requiere examen_id');
+  return {
+    tipo_item: 'EXAMEN',
+    perfil_id: null,
+    tipo_emo: null,
+    examen_id: Number(it.examen_id),
+    nombre: it.nombre || 'Examen',
+    cantidad, precio_base, precio_final, variacion_pct, subtotal,
+  };
+}
+
+// SELECT estándar de cotizacion_items (resuelve nombre desde catálogo si falta).
+const SELECT_ITEMS_SQL = `
+  SELECT ci.id, ci.cotizacion_id, ci.tipo_item, ci.perfil_id, ci.tipo_emo, ci.examen_id,
+         ci.nombre, ci.cantidad, ci.precio_base, ci.precio_final, ci.variacion_pct, ci.subtotal,
+         ex.nombre AS examen_nombre,
+         pf.nombre AS perfil_nombre
+  FROM cotizacion_items ci
+  LEFT JOIN examenes ex   ON ci.examen_id = ex.id
+  LEFT JOIN emo_perfiles pf ON ci.perfil_id = pf.id
+  WHERE ci.cotizacion_id = ?
+  ORDER BY ci.id
+`;
 
 const generarNumeroCotizacion = async () => {
   const [rows] = await pool.query('SELECT COALESCE(MAX(id), 0) + 1 AS nextId FROM cotizaciones');
@@ -26,10 +80,8 @@ const crearCotizacionComplementariaConConnection = async (connection, opts) => {
   }
   const tipo = (creador_tipo === 'CLIENTE' ? 'CLIENTE' : 'VENDEDOR');
   const numero_cotizacion = await generarNumeroCotizacionComplementaria();
-  let total = 0;
-  for (const it of items) {
-    total += (it.precio_final ?? it.precio_base ?? 0) * (it.cantidad || 0);
-  }
+  const itemsNorm = items.map(normalizeItem);
+  const total = itemsNorm.reduce((acc, it) => acc + it.subtotal, 0);
   const [result] = await connection.execute(
     `INSERT INTO cotizaciones (
       numero_cotizacion, pedido_id, cotizacion_base_id, es_complementaria,
@@ -38,24 +90,16 @@ const crearCotizacionComplementariaConConnection = async (connection, opts) => {
     [numero_cotizacion, pedido_id, cotizacion_base_id, tipo, creador_id ?? null, total]
   );
   const cotizacionId = result.insertId;
-  for (const it of items) {
-    const precio_base = it.precio_base ?? it.precio_final ?? 0;
-    const precio_final = it.precio_final ?? precio_base;
-    const variacion_pct = precio_base !== 0 ? ((precio_final - precio_base) / precio_base) * 100 : 0;
-    const subtotal = precio_final * (it.cantidad || 0);
+  for (const it of itemsNorm) {
     await connection.execute(
       `INSERT INTO cotizacion_items (
-        cotizacion_id, examen_id, nombre, cantidad, precio_base, precio_final, variacion_pct, subtotal
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        cotizacion_id, tipo_item, perfil_id, tipo_emo, examen_id,
+        nombre, cantidad, precio_base, precio_final, variacion_pct, subtotal
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         cotizacionId,
-        it.examen_id,
-        it.nombre || 'Examen',
-        it.cantidad || 1,
-        precio_base,
-        precio_final,
-        variacion_pct,
-        subtotal
+        it.tipo_item, it.perfil_id, it.tipo_emo, it.examen_id,
+        it.nombre, it.cantidad, it.precio_base, it.precio_final, it.variacion_pct, it.subtotal,
       ]
     );
   }
@@ -171,7 +215,7 @@ const getCotizacionById = async (req, res) => {
         `SELECT 1 FROM pedidos p
          WHERE p.id = ? AND (
            p.cliente_usuario_id = ? OR
-           p.empresa_id IN (SELECT empresa_id FROM usuario_empresa WHERE usuario_id = ?)
+           p.empresa_id = (SELECT empresa_id FROM usuarios WHERE id = ?)
          )`,
         [cot.pedido_id, userId, userId]
       );
@@ -180,13 +224,7 @@ const getCotizacionById = async (req, res) => {
       }
     }
 
-    const [items] = await pool.execute(
-      `SELECT ci.*, ex.nombre AS examen_nombre
-       FROM cotizacion_items ci
-       LEFT JOIN examenes ex ON ci.examen_id = ex.id
-       WHERE ci.cotizacion_id = ?`,
-      [id]
-    );
+    const [items] = await pool.execute(SELECT_ITEMS_SQL, [id]);
 
     res.json({
       cotizacion: cotizaciones[0],
@@ -228,15 +266,7 @@ const getCotizacionItems = async (req, res) => {
       }
     }
 
-    const [items] = await pool.execute(
-      `SELECT ci.id, ci.cotizacion_id, ci.examen_id, ci.nombre, ci.cantidad, ci.precio_base, ci.precio_final, ci.variacion_pct, ci.subtotal,
-        ex.nombre AS examen_nombre
-       FROM cotizacion_items ci
-       LEFT JOIN examenes ex ON ci.examen_id = ex.id
-       WHERE ci.cotizacion_id = ?
-       ORDER BY ci.id`,
-      [id]
-    );
+    const [items] = await pool.execute(SELECT_ITEMS_SQL, [id]);
     res.json({ items });
   } catch (error) {
     console.error('Error al obtener ítems de cotización:', error);
@@ -276,10 +306,8 @@ const createCotizacion = async (req, res) => {
 
     try {
       const numero_cotizacion = await generarNumeroCotizacion();
-      let total = 0;
-      for (const it of items) {
-        total += (it.precio_final || 0) * (it.cantidad || 0);
-      }
+      const itemsNorm = items.map(normalizeItem);
+      const total = itemsNorm.reduce((acc, it) => acc + it.subtotal, 0);
 
       const [result] = await connection.execute(
         `INSERT INTO cotizaciones (
@@ -299,27 +327,16 @@ const createCotizacion = async (req, res) => {
 
       const cotizacionId = result.insertId;
 
-      for (const it of items) {
-        const precio_base = it.precio_base ?? it.precio_final ?? 0;
-        const precio_final = it.precio_final ?? precio_base;
-        const variacion_pct = precio_base !== 0
-          ? ((precio_final - precio_base) / precio_base) * 100
-          : 0;
-        const subtotal = precio_final * (it.cantidad || 0);
-
+      for (const it of itemsNorm) {
         await connection.execute(
           `INSERT INTO cotizacion_items (
-            cotizacion_id, examen_id, nombre, cantidad, precio_base, precio_final, variacion_pct, subtotal
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            cotizacion_id, tipo_item, perfil_id, tipo_emo, examen_id,
+            nombre, cantidad, precio_base, precio_final, variacion_pct, subtotal
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             cotizacionId,
-            it.examen_id,
-            it.nombre || 'Examen',
-            it.cantidad || 1,
-            precio_base,
-            precio_final,
-            variacion_pct,
-            subtotal
+            it.tipo_item, it.perfil_id, it.tipo_emo, it.examen_id,
+            it.nombre, it.cantidad, it.precio_base, it.precio_final, it.variacion_pct, it.subtotal,
           ]
         );
       }
@@ -384,13 +401,7 @@ const createCotizacionComplementaria = async (req, res) => {
       const { cotizacionId, numero_cotizacion } = await crearCotizacionComplementariaConConnection(connection, {
         pedido_id,
         cotizacion_base_id: baseId,
-        items: items.map((it) => ({
-          examen_id: it.examen_id,
-          nombre: it.nombre || 'Examen',
-          cantidad: it.cantidad ?? 1,
-          precio_base: it.precio_base ?? it.precio_final ?? 0,
-          precio_final: it.precio_final ?? it.precio_base ?? 0,
-        })),
+        items,
         creador_id: userId,
         creador_tipo: creadorTipo,
       });
@@ -538,17 +549,19 @@ const updateCotizacion = async (req, res) => {
       const puedeActualizarItems = ['BORRADOR', 'ENVIADA', 'ENVIADA_AL_MANAGER'].includes(existing[0].estado);
       if (items && Array.isArray(items) && puedeActualizarItems) {
         await connection.execute('DELETE FROM cotizacion_items WHERE cotizacion_id = ?', [id]);
-        let total = 0;
-        for (const it of items) {
-          const precio_base = it.precio_base ?? it.precio_final ?? 0;
-          const precio_final = it.precio_final ?? precio_base;
-          const variacion_pct = precio_base !== 0 ? ((precio_final - precio_base) / precio_base) * 100 : 0;
-          const subtotal = precio_final * (it.cantidad || 0);
-          total += subtotal;
+        const itemsNorm = items.map(normalizeItem);
+        const total = itemsNorm.reduce((acc, it) => acc + it.subtotal, 0);
+        for (const it of itemsNorm) {
           await connection.execute(
-            `INSERT INTO cotizacion_items (cotizacion_id, examen_id, nombre, cantidad, precio_base, precio_final, variacion_pct, subtotal)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-            [id, it.examen_id, it.nombre || 'Examen', it.cantidad || 1, precio_base, precio_final, variacion_pct, subtotal]
+            `INSERT INTO cotizacion_items (
+              cotizacion_id, tipo_item, perfil_id, tipo_emo, examen_id,
+              nombre, cantidad, precio_base, precio_final, variacion_pct, subtotal
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+              id,
+              it.tipo_item, it.perfil_id, it.tipo_emo, it.examen_id,
+              it.nombre, it.cantidad, it.precio_base, it.precio_final, it.variacion_pct, it.subtotal,
+            ]
           );
         }
         await connection.execute('UPDATE cotizaciones SET total = ? WHERE id = ?', [total, id]);

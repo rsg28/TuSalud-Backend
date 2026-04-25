@@ -65,9 +65,14 @@ const getFacturaById = async (req, res) => {
     );
 
     const [detalles] = await pool.execute(
-      `SELECT fd.*, e.nombre AS examen_nombre FROM factura_detalle fd
-       LEFT JOIN examenes e ON fd.examen_id = e.id
-       WHERE fd.factura_id = ?`,
+      `SELECT fd.*,
+              e.nombre AS examen_nombre,
+              pf.nombre AS perfil_nombre
+       FROM factura_detalle fd
+       LEFT JOIN examenes e   ON fd.examen_id = e.id
+       LEFT JOIN emo_perfiles pf ON fd.perfil_id = pf.id
+       WHERE fd.factura_id = ?
+       ORDER BY fd.id`,
       [id]
     );
 
@@ -147,9 +152,11 @@ const createFactura = async (req, res) => {
         );
       }
 
-      // Rellenar factura_detalle desde cotizacion_items de las cotizaciones incluidas
+      // Rellenar factura_detalle desde cotizacion_items (preservando tipo_item / perfil / examen).
       const [items] = await connection.execute(
-        `SELECT ci.examen_id, ci.nombre AS descripcion, ci.cantidad, ci.precio_final AS precio_unitario,
+        `SELECT ci.tipo_item, ci.perfil_id, ci.tipo_emo, ci.examen_id,
+                ci.nombre AS descripcion, ci.cantidad,
+                ci.precio_final AS precio_unitario,
                 (ci.cantidad * ci.precio_final) AS subtotal
          FROM cotizacion_items ci
          WHERE ci.cotizacion_id IN (${cotizacionesParaFacturar.map(c => '?').join(',')})`,
@@ -157,8 +164,12 @@ const createFactura = async (req, res) => {
       );
       for (const it of items) {
         await connection.execute(
-          'INSERT INTO factura_detalle (factura_id, examen_id, descripcion, cantidad, precio_unitario, subtotal) VALUES (?, ?, ?, ?, ?, ?)',
-          [factura_id, it.examen_id, it.descripcion, it.cantidad, it.precio_unitario, it.subtotal]
+          `INSERT INTO factura_detalle
+             (factura_id, tipo_item, perfil_id, tipo_emo, examen_id,
+              descripcion, cantidad, precio_unitario, subtotal)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [factura_id, it.tipo_item, it.perfil_id, it.tipo_emo, it.examen_id,
+           it.descripcion, it.cantidad, it.precio_unitario, it.subtotal]
         );
       }
 

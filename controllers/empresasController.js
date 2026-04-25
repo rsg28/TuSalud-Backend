@@ -198,7 +198,10 @@ const updateEmpresa = async (req, res) => {
   }
 };
 
-// Quitar una empresa de la lista del usuario (usuario_empresa). No borra la empresa, solo la asociación.
+// Desvincular la empresa del usuario actual (usuarios.empresa_id = NULL).
+// Antes existía una tabla N:N usuario_empresa; con el rediseño Fase 1 un cliente
+// pertenece a una sola empresa (usuarios.empresa_id), así que esta operación
+// ahora "desvincula" al cliente de su empresa actual sin borrar la empresa.
 const quitarEmpresaDeUsuario = async (req, res) => {
   try {
     if (!req.user || !req.user.id) {
@@ -208,17 +211,17 @@ const quitarEmpresaDeUsuario = async (req, res) => {
     if (!Number.isInteger(empresaId) || empresaId <= 0) {
       return res.status(400).json({ error: 'ID de empresa no válido' });
     }
-    const [deleted] = await pool.execute(
-      'DELETE FROM usuario_empresa WHERE usuario_id = ? AND empresa_id = ?',
+    const [updated] = await pool.execute(
+      'UPDATE usuarios SET empresa_id = NULL WHERE id = ? AND empresa_id = ?',
       [req.user.id, empresaId]
     );
-    if (deleted.affectedRows === 0) {
-      return res.status(404).json({ error: 'La empresa no estaba asociada a tu usuario' });
+    if (updated.affectedRows === 0) {
+      return res.status(404).json({ error: 'La empresa no estaba vinculada a tu usuario' });
     }
-    res.json({ message: 'Empresa quitada de tu lista' });
+    res.json({ message: 'Empresa desvinculada de tu usuario' });
   } catch (error) {
-    console.error('Error al quitar empresa del usuario:', error);
-    res.status(500).json({ error: 'Error al quitar empresa' });
+    console.error('Error al desvincular empresa del usuario:', error);
+    res.status(500).json({ error: 'Error al desvincular empresa' });
   }
 };
 
