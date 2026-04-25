@@ -21,5 +21,8 @@ router.delete('/:perfilId', authenticateToken, requireRole('manager', 'vendedor'
 // Resolve set base por (perfilNombre + emoTipo) para una sede (cualquier rol autenticado)
 router.get('/resolve', authenticateToken, emoController.resolve);
 
+// Precio resuelto para (perfilId + tipo_emo + opcional empresa_id + sede_id).
+router.get('/:perfilId/precio', authenticateToken, emoController.precio);
+
 module.exports = router;
 

@@ -217,6 +217,88 @@ exports.eliminarPerfil = async (req, res) => {
   }
 };
 
+// Resolver precio para (perfil_id, tipo_emo, [empresa_id], [sede_id]).
+// Prioridad: (empresa, sede) > (empresa, NULL) > (NULL, sede) > (NULL, NULL).
+// Si no hay precio configurado, devuelve la suma de precios base de los exámenes del perfil.
+exports.precio = async (req, res) => {
+  try {
+    const perfilId = parseInt(String(req.params?.perfilId ?? ''), 10);
+    const tipoEmoRaw = String(req.query?.tipo_emo ?? '').trim().toUpperCase();
+    const empresaId = req.query?.empresa_id ? parseInt(String(req.query.empresa_id), 10) : null;
+    const sedeId = req.query?.sede_id ? parseInt(String(req.query.sede_id), 10) : null;
+
+    if (!Number.isInteger(perfilId) || perfilId <= 0) return res.status(400).json({ error: 'perfilId inválido' });
+    if (!EMO_TIPOS_VALIDOS.includes(tipoEmoRaw)) return res.status(400).json({ error: 'tipo_emo inválido' });
+
+    const [perfilRows] = await pool.execute('SELECT id, nombre FROM emo_perfiles WHERE id = ?', [perfilId]);
+    if (perfilRows.length === 0) return res.status(404).json({ error: 'Perfil no encontrado' });
+
+    // Buscamos el precio más específico disponible.
+    const candidatos = [];
+    if (empresaId && sedeId) candidatos.push({ empresa_id: empresaId, sede_id: sedeId, prioridad: 1 });
+    if (empresaId) candidatos.push({ empresa_id: empresaId, sede_id: null, prioridad: 2 });
+    if (sedeId) candidatos.push({ empresa_id: null, sede_id: sedeId, prioridad: 3 });
+    candidatos.push({ empresa_id: null, sede_id: null, prioridad: 4 });
+
+    let precio = null;
+    let origen = null;
+    for (const c of candidatos) {
+      const [rows] = await pool.execute(
+        `SELECT precio FROM emo_perfil_precio
+         WHERE perfil_id = ? AND tipo_emo = ?
+           AND ((? IS NULL AND empresa_id IS NULL) OR empresa_id = ?)
+           AND ((? IS NULL AND sede_id IS NULL) OR sede_id = ?)
+         LIMIT 1`,
+        [perfilId, tipoEmoRaw, c.empresa_id, c.empresa_id, c.sede_id, c.sede_id]
+      );
+      if (rows.length > 0 && rows[0].precio != null) {
+        precio = Number(rows[0].precio);
+        origen = c.empresa_id && c.sede_id
+          ? 'empresa_sede'
+          : c.empresa_id
+            ? 'empresa'
+            : c.sede_id
+              ? 'sede'
+              : 'global';
+        break;
+      }
+    }
+
+    // Fallback: suma de precios base de los exámenes del perfil para esa sede (o global).
+    let precio_sugerido = null;
+    if (precio == null) {
+      const [sumRows] = await pool.execute(
+        `SELECT COALESCE(SUM(COALESCE(ep.precio, ep_general.precio, 0)), 0) AS suma
+         FROM emo_perfil_examenes mpe
+         LEFT JOIN examen_precio ep
+           ON ep.examen_id = mpe.examen_id
+          AND ep.sede_id = ?
+          AND (ep.vigente_hasta IS NULL OR ep.vigente_hasta >= CURDATE())
+         LEFT JOIN examen_precio ep_general
+           ON ep_general.examen_id = mpe.examen_id
+          AND ep_general.sede_id IS NULL
+          AND (ep_general.vigente_hasta IS NULL OR ep_general.vigente_hasta >= CURDATE())
+         WHERE mpe.perfil_id = ? AND mpe.tipo_emo = ?`,
+        [sedeId, perfilId, tipoEmoRaw]
+      );
+      precio_sugerido = Number(sumRows[0]?.suma ?? 0);
+    }
+
+    return res.json({
+      perfil_id: perfilId,
+      tipo_emo: tipoEmoRaw,
+      empresa_id: empresaId,
+      sede_id: sedeId,
+      precio,
+      origen,
+      precio_sugerido,
+    });
+  } catch (error) {
+    console.error('Error al resolver precio del perfil:', error);
+    res.status(500).json({ error: 'Error al resolver precio del perfil', details: error.message });
+  }
+};
+
 // Resolve: retorna el set de exámenes base por (perfilNombre + emoTipo)
 exports.resolve = async (req, res) => {
   try {
