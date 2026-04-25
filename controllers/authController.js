@@ -17,7 +17,19 @@ function generarCodigoReset() {
   return String(n).padStart(6, '0');
 }
 
-// Registro de usuario
+/**
+ * Registro de usuario público.
+ *
+ * Roles permitidos: 'cliente' (default) | 'paciente'.
+ * Roles internos (vendedor/manager) se crean por administración, no aquí.
+ *
+ * Datos demográficos opcionales: dni, fecha_nacimiento, sexo, direccion.
+ * Para rol = 'paciente', dni es obligatorio (link con pedido_pacientes).
+ *
+ * Si rol = 'cliente' y se envía RUC, se intenta enlazar a una empresa
+ * existente con ese RUC (no se crea automáticamente; el cliente puede
+ * pedir crearla luego).
+ */
 const register = async (req, res) => {
   try {
     const errors = validationResult(req);
@@ -25,7 +37,20 @@ const register = async (req, res) => {
       return res.status(400).json({ errors: errors.array() });
     }
 
-    const { nombre_usuario, email, password, nombre_completo, telefono, ruc, tipo_ruc } = req.body;
+    const {
+      nombre_usuario,
+      email,
+      password,
+      nombre_completo,
+      telefono,
+      dni,
+      ruc,
+      tipo_ruc,
+      fecha_nacimiento,
+      sexo,
+      direccion,
+    } = req.body;
+    const rolSolicitado = req.body.rol === 'paciente' ? 'paciente' : 'cliente';
 
     // Verificar si el usuario o email ya existen
     const [existingUsers] = await pool.execute(
@@ -37,20 +62,70 @@ const register = async (req, res) => {
       return res.status(400).json({ error: 'El nombre de usuario o email ya está en uso' });
     }
 
+    // Si se envió DNI, evitar duplicados (un usuario por DNI).
+    const dniNorm = dni ? String(dni).trim() : null;
+    if (dniNorm) {
+      const [byDni] = await pool.execute(
+        'SELECT id FROM usuarios WHERE dni = ? LIMIT 1',
+        [dniNorm]
+      );
+      if (byDni.length > 0) {
+        return res.status(400).json({ error: 'Ya existe un usuario registrado con ese DNI' });
+      }
+    }
+
+    // Si rol = cliente y se envió RUC, intentar enlazar empresa existente.
+    let empresaId = null;
+    const rucNorm = ruc ? String(ruc).trim() : null;
+    if (rolSolicitado === 'cliente' && rucNorm) {
+      const [empresas] = await pool.execute(
+        'SELECT id FROM empresas WHERE ruc = ? LIMIT 1',
+        [rucNorm]
+      );
+      if (empresas.length > 0) {
+        empresaId = empresas[0].id;
+      }
+    }
+
     // Hash de la contraseña
     const saltRounds = 10;
     const password_hash = await bcrypt.hash(password, saltRounds);
 
+    // Normalizar campos demográficos (cadena vacía -> NULL)
+    const fechaNacNorm = fecha_nacimiento && String(fecha_nacimiento).trim() ? String(fecha_nacimiento).trim() : null;
+    const sexoNorm = sexo && ['HOMBRE', 'MUJER'].includes(String(sexo).toUpperCase()) ? String(sexo).toUpperCase() : null;
+    const direccionNorm = direccion && String(direccion).trim() ? String(direccion).trim() : null;
+    const tipoRucNorm = (rolSolicitado === 'cliente' && rucNorm)
+      ? (tipo_ruc && ['NINGUNO', 'RUC10', 'RUC20'].includes(String(tipo_ruc)) ? String(tipo_ruc) : 'NINGUNO')
+      : 'NINGUNO';
+
     // Insertar nuevo usuario
     const [result] = await pool.execute(
-      `INSERT INTO usuarios (nombre_usuario, email, password_hash, nombre_completo, telefono, ruc, tipo_ruc, rol, activo)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 'cliente', TRUE)`,
-      [nombre_usuario, email, password_hash, nombre_completo, telefono || null, ruc || null, tipo_ruc || 'NINGUNO']
+      `INSERT INTO usuarios
+         (nombre_usuario, email, password_hash, nombre_completo, telefono,
+          dni, ruc, tipo_ruc, fecha_nacimiento, sexo, direccion,
+          rol, activo, empresa_id)
+       VALUES (?, ?, ?, ?, ?,  ?, ?, ?, ?, ?, ?,  ?, TRUE, ?)`,
+      [
+        nombre_usuario,
+        email,
+        password_hash,
+        nombre_completo,
+        telefono || null,
+        dniNorm,
+        rolSolicitado === 'cliente' ? rucNorm : null,
+        tipoRucNorm,
+        fechaNacNorm,
+        sexoNorm,
+        direccionNorm,
+        rolSolicitado,
+        rolSolicitado === 'cliente' ? empresaId : null,
+      ]
     );
 
     // Generar token JWT (sin expiración)
     const token = jwt.sign(
-      { userId: result.insertId, email, rol: 'cliente' },
+      { userId: result.insertId, email, rol: rolSolicitado },
       process.env.JWT_SECRET
     );
 
@@ -63,9 +138,14 @@ const register = async (req, res) => {
         email,
         nombre_completo,
         telefono: telefono || null,
-        ruc: ruc || null,
-        tipo_ruc: tipo_ruc || 'NINGUNO',
-        rol: 'cliente'
+        dni: dniNorm,
+        ruc: rolSolicitado === 'cliente' ? rucNorm : null,
+        tipo_ruc: tipoRucNorm,
+        fecha_nacimiento: fechaNacNorm,
+        sexo: sexoNorm,
+        direccion: direccionNorm,
+        rol: rolSolicitado,
+        empresa_id: rolSolicitado === 'cliente' ? empresaId : null,
       }
     });
   } catch (error) {
@@ -86,7 +166,10 @@ const login = async (req, res) => {
 
     // Buscar usuario por email
     const [users] = await pool.execute(
-      'SELECT id, nombre_usuario, email, password_hash, nombre_completo, telefono, ruc, tipo_ruc, rol, activo FROM usuarios WHERE email = ?',
+      `SELECT id, nombre_usuario, email, password_hash, nombre_completo, telefono,
+              dni, ruc, tipo_ruc, fecha_nacimiento, sexo, direccion,
+              rol, activo, empresa_id
+         FROM usuarios WHERE email = ?`,
       [email]
     );
 
@@ -122,9 +205,14 @@ const login = async (req, res) => {
         email: user.email,
         nombre_completo: user.nombre_completo,
         telefono: user.telefono,
+        dni: user.dni,
         ruc: user.ruc,
         tipo_ruc: user.tipo_ruc,
-        rol: user.rol
+        fecha_nacimiento: user.fecha_nacimiento,
+        sexo: user.sexo,
+        direccion: user.direccion,
+        rol: user.rol,
+        empresa_id: user.empresa_id,
       }
     });
   } catch (error) {
@@ -291,7 +379,10 @@ const resetPassword = async (req, res) => {
 const getCurrentUser = async (req, res) => {
   try {
     const [users] = await pool.execute(
-      'SELECT id, nombre_usuario, email, nombre_completo, telefono, ruc, tipo_ruc, rol, activo, created_at FROM usuarios WHERE id = ?',
+      `SELECT id, nombre_usuario, email, nombre_completo, telefono,
+              dni, ruc, tipo_ruc, fecha_nacimiento, sexo, direccion,
+              rol, activo, empresa_id, created_at
+         FROM usuarios WHERE id = ?`,
       [req.user.id]
     );
 
