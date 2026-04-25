@@ -357,10 +357,11 @@ exports.resolve = async (req, res) => {
       `SELECT 
           e.id AS examen_id,
           e.nombre AS nombre_examen,
-          e.categoria AS examen_principal,
+          ec.nombre AS examen_principal,
           COALESCE(MIN(ep.precio), MIN(ep_general.precio), 0) AS precio
        FROM emo_perfil_examenes mpe
        JOIN examenes e ON e.id = mpe.examen_id
+       LEFT JOIN emo_categorias ec ON ec.id = e.categoria_id
        LEFT JOIN examen_precio ep 
          ON ep.examen_id = mpe.examen_id 
         AND ep.sede_id = ?
@@ -372,7 +373,7 @@ exports.resolve = async (req, res) => {
        WHERE mpe.perfil_id = ?
          AND mpe.tipo_emo = ?
          AND e.activo = 1
-       GROUP BY e.id, e.nombre, e.categoria
+       GROUP BY e.id, e.nombre, ec.nombre
        ORDER BY e.nombre ASC`,
       [sede_id, perfil_id, emoTipoRaw]
     );
