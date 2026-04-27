@@ -18,11 +18,12 @@ const {
   pickExamen,
 } = require('./importDatosPruebaCatalogo');
 
+/** Cols 9-12: PREOC, ANUAL, RETIRO, VISITA (plantilla Hochschild datos_correctos_1). */
 function marcarEmo(row, flags) {
-  row.getCell(9).value = flags.visita ? 'x' : '';
-  row.getCell(10).value = flags.retiro ? 'x' : '';
-  row.getCell(11).value = flags.preoc ? 'x' : '';
-  row.getCell(12).value = flags.anual ? 'x' : '';
+  row.getCell(9).value = flags.preoc ? 'x' : '';
+  row.getCell(10).value = flags.anual ? 'x' : '';
+  row.getCell(11).value = flags.retiro ? 'x' : '';
+  row.getCell(12).value = flags.visita ? 'x' : '';
 }
 
 function borrarFilasDatos(ws, desde, hasta) {
@@ -92,9 +93,9 @@ async function main() {
     row.getCell(3).value = p.puesto;
     row.getCell(4).value = p.puesto;
     row.getCell(5).value = p.puesto;
-    row.getCell(6).value = p.nombre;
+    row.getCell(6).value = pickPerfil(cat, p.perfil_key || 'exacto');
     row.getCell(7).value = String(p.dni);
-    row.getCell(8).value = pickPerfil(cat, p.perfil_key || 'exacto');
+    row.getCell(8).value = p.nombre;
 
     marcarEmo(row, {
       visita: !!p.emo_visita,

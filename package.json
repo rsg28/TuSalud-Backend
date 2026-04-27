@@ -9,6 +9,7 @@
     "test": "echo \"Error: no test specified\" && exit 1",
     "pdf-perfil-tablas": "node scripts/pdf-perfil-tablas-cli.js",
     "excel-import-prueba": "node scripts/generarExcelImportPrueba.js",
+    "excel-hochschild-rds": "node scripts/generarExcelHochschildDesdeRds.js",
     "push:luisa": "git add . && git commit -m \"luisa\" && git push"
   },
   "keywords": [
