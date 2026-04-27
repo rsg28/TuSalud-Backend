@@ -11,6 +11,14 @@
  *   node scripts/generarExcelHochschildDesdeRds.js
  *   node scripts/generarExcelHochschildDesdeRds.js [plantilla] [salida] [mín. filas]
  *
+ * Salida por defecto: <raíz TuSalud-Backend>/datos_hochschild_rds_60.xlsx (no el cwd),
+ * para poder ejecutar con ruta absoluta al script y dejar el archivo siempre en el repo.
+ *
+ * En EC2 (una línea, sin cd):
+ *   node /home/ubuntu/app/TuSalud-Backend/scripts/generarExcelHochschildDesdeRds.js
+ *
+ * O:  bash scripts/hochschild-rds-excel.sh
+ *
  * Env:
  *   IMPORT_EXCEL_PLANTILLA — plantilla (default: scripts/fixtures/plantilla_hochschild_datos_correctos_1.xlsx)
  *   IMPORT_EXCEL_SALIDA
@@ -39,10 +47,11 @@ function marcarEmoHochschild(row, tipo) {
   row.getCell(12).value = x('VISITA');
 }
 
-function borrarFilasDatos(ws, desde) {
-  for (let r = desde; r <= ws.rowCount; r++) {
+function borrarFilasDatos(ws, desde, hasta) {
+  const end = Math.min(hasta, ws.rowCount);
+  for (let r = desde; r <= end; r += 1) {
     const row = ws.getRow(r);
-    for (let c = 2; c <= 14; c++) {
+    for (let c = 2; c <= 14; c += 1) {
       row.getCell(c).value = null;
     }
   }
@@ -54,14 +63,31 @@ function borrarFilasDatos(ws, desde) {
  *   resumen: { pacientesReales: number, sintetico: number }
  * }>}
  */
+const SQL_PERFIL_TIPO = `SELECT DISTINCT p.nombre AS perfil_nombre, m.tipo_emo
+   FROM emo_perfiles p
+   INNER JOIN emo_perfil_examenes m ON m.perfil_id = p.id
+   WHERE p.tipo = 'PERFIL'
+   ORDER BY p.id, m.tipo_emo`;
+
+const SQL_PACS = `SELECT
+   pp.dni,
+   pp.nombre_completo,
+   NULLIF(TRIM(pp.cargo), '') AS cargo,
+   ep.nombre AS perfil_nombre,
+   pp.emo_tipo AS emo_tipo
+  FROM pedido_pacientes pp
+  INNER JOIN emo_perfiles ep ON ep.id = pp.emo_perfil_id AND ep.tipo = 'PERFIL'
+  WHERE TRIM(pp.dni) <> ''
+  ORDER BY pp.id DESC`;
+
 async function recopilarPlan(pool, minFilas) {
-  const [paresJoin] = await pool.query(
-    `SELECT DISTINCT p.nombre AS perfil_nombre, m.tipo_emo
-     FROM emo_perfiles p
-     INNER JOIN emo_perfil_examenes m ON m.perfil_id = p.id
-     WHERE p.tipo = 'PERFIL'
-     ORDER BY p.id, m.tipo_emo`
-  );
+  const [paresJoin, queryPacs] = await Promise.all([
+    pool.query(SQL_PERFIL_TIPO).then((r) => r[0]),
+    pool
+      .query(SQL_PACS)
+      .then((r) => r[0])
+      .catch(() => []),
+  ]);
 
   let pares = paresJoin.map((row) => ({
     perfil_nombre: String(row.perfil_nombre).trim(),
@@ -85,23 +111,11 @@ async function recopilarPlan(pool, minFilas) {
     throw new Error('No hay perfiles catálogo (emo_perfiles tipo PERFIL) en RDS.');
   }
 
-  let queryPacs = [];
-  try {
-    const [rowsPacs] = await pool.query(
-      `SELECT
-         pp.dni,
-         pp.nombre_completo,
-         NULLIF(TRIM(pp.cargo), '') AS cargo,
-         ep.nombre AS perfil_nombre,
-         pp.emo_tipo AS emo_tipo
-       FROM pedido_pacientes pp
-       INNER JOIN emo_perfiles ep ON ep.id = pp.emo_perfil_id AND ep.tipo = 'PERFIL'
-       WHERE TRIM(pp.dni) <> ''
-       ORDER BY pp.id DESC`
-    );
-    queryPacs = rowsPacs;
-  } catch {
-    queryPacs = [];
+  const tipoPorPerfil = new Map();
+  for (const p of pares) {
+    if (!tipoPorPerfil.has(p.perfil_nombre)) {
+      tipoPorPerfil.set(p.perfil_nombre, p.tipo_emo);
+    }
   }
 
   const dniVistos = new Set();
@@ -120,8 +134,8 @@ async function recopilarPlan(pool, minFilas) {
     const puesto = String(row.cargo ?? '').trim() || perfilNombre;
     let tipo = String(row.emo_tipo ?? '').trim().toUpperCase();
     if (!TIPOS_EMO.includes(/** @type {string} */ (tipo))) {
-      const p = pares.find((q) => q.perfil_nombre === perfilNombre) || pares[0];
-      tipo = p.tipo_emo;
+      const t = tipoPorPerfil.get(perfilNombre) ?? pares[0].tipo_emo;
+      tipo = t;
     }
     if (!TIPOS_EMO.includes(/** @type {string} */ (tipo))) tipo = 'PREOC';
     filas.push({
@@ -165,6 +179,7 @@ async function recopilarPlan(pool, minFilas) {
 }
 
 async function main() {
+  const backRoot = path.join(__dirname, '..');
   const defPlantilla = path.join(
     __dirname,
     'fixtures',
@@ -175,7 +190,7 @@ async function main() {
   const salida =
     process.argv[3] ||
     process.env.IMPORT_EXCEL_SALIDA ||
-    path.join(process.cwd(), 'datos_hochschild_rds_60.xlsx');
+    path.join(backRoot, 'datos_hochschild_rds_60.xlsx');
   const minArg = process.argv[4] ?? process.env.HOCHSCHILD_MIN_FILAS;
   const minFilas = Math.max(
     1,
@@ -197,6 +212,7 @@ async function main() {
     database: process.env.DB_NAME,
     port: Number(process.env.DB_PORT) || 3306,
     connectTimeout: 20000,
+    connectionLimit: 2,
   });
 
   let pares;
@@ -217,7 +233,11 @@ async function main() {
     process.exit(1);
   }
 
-  borrarFilasDatos(ws, PRIMERA_FILA_DATOS);
+  const maxLimpiar = Math.min(
+    ws.rowCount,
+    PRIMERA_FILA_DATOS + Math.max(minFilas, pares.length) + 5
+  );
+  borrarFilasDatos(ws, PRIMERA_FILA_DATOS, maxLimpiar);
 
   for (let i = 0; i < pares.length; i += 1) {
     const p = pares[i];

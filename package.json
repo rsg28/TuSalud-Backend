@@ -10,6 +10,7 @@
     "pdf-perfil-tablas": "node scripts/pdf-perfil-tablas-cli.js",
     "excel-import-prueba": "node scripts/generarExcelImportPrueba.js",
     "excel-hochschild-rds": "node scripts/generarExcelHochschildDesdeRds.js",
+    "hochschild:excel": "node scripts/generarExcelHochschildDesdeRds.js",
     "push:luisa": "git add . && git commit -m \"luisa\" && git push"
   },
   "keywords": [
