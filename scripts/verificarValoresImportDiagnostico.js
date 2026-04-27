@@ -52,7 +52,10 @@ function parseArgs(argv) {
 async function findPerfiles(conn, terms) {
   const rows = [];
   for (const t of terms) {
-    if (t.length < 2) continue;
+    if (t.length < 2) {
+      rows.push({ busqueda: t, filas: [] });
+      continue;
+    }
     const [r] = await conn.query(
       `SELECT id, nombre, tipo
        FROM emo_perfiles
@@ -100,7 +103,10 @@ async function listarExamenesDePerfil(conn, perfilId) {
 async function findExamenes(conn, terms) {
   const rows = [];
   for (const t of terms) {
-    if (t.length < 2) continue;
+    if (t.length < 2) {
+      rows.push({ busqueda: t, filas: [] });
+      continue;
+    }
     const [r] = await conn.query(
       `SELECT e.id, e.nombre, e.codigo, e.activo
        FROM examenes e
@@ -165,7 +171,7 @@ async function main() {
   try {
     console.log('==== PERFILES (emo_perfiles) — búsqueda por subcadena (mismo criterio general que resolución) ====\n');
     for (const t of perfiles) {
-      const r = (await findPerfiles(conn, [t]))[0];
+      const r = (await findPerfiles(conn, [t]))[0] ?? { busqueda: t, filas: [] };
       if (!r.filas.length) {
         console.log(`  [${t}]  → 0 filas (no existe o no coincide con INSTR/LOWER)\n`);
       } else {
@@ -177,8 +183,8 @@ async function main() {
 
     const idsRelevantes = new Set();
     for (const t of perfiles) {
-      const r = (await findPerfiles(conn, [t]))[0];
-      r.filas.forEach((f) => idsRelevantes.add(f.id));
+      const r = (await findPerfiles(conn, [t]))[0] ?? { filas: [] };
+      (r.filas || []).forEach((f) => idsRelevantes.add(f.id));
     }
     if (idsRelevantes.size) {
       const ids = [...idsRelevantes];
@@ -226,7 +232,7 @@ async function main() {
         console.log(`  Subcadenas probadas: ${sub.map((x) => `«${x}»`).join(', ')}`);
       }
       for (const s of sub) {
-        const r = (await findExamenes(conn, [s]))[0].filas;
+        const r = (await findExamenes(conn, [s]))[0]?.filas || [];
         for (const f of r) {
           if (seen.has(f.id)) continue;
           seen.add(f.id);
