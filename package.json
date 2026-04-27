@@ -8,6 +8,7 @@
     "dev": "nodemon server.js",
     "test": "echo \"Error: no test specified\" && exit 1",
     "pdf-perfil-tablas": "node scripts/pdf-perfil-tablas-cli.js",
+    "sync:test-catalog": "node scripts/sync-test-catalog-from-db.js",
     "push:luisa": "git add . && git commit -m \"luisa\" && git push"
   },
   "keywords": [
