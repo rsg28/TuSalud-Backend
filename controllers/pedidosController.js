@@ -57,6 +57,16 @@ function normalizePedidoItem(it) {
   return { tipo_item: 'EXAMEN', perfil_id: null, tipo_emo: null, examen_id: Number(it.examen_id), nombre: it.nombre || null, cantidad };
 }
 
+/** Examen desde número o objeto `{ id }`; el JSON del cliente puede traer strings. */
+function parseExamenIdRef(raw) {
+  if (raw == null || raw === '') return null;
+  const n =
+    typeof raw === 'object' && raw !== null && raw.id != null && raw.id !== ''
+      ? Number(raw.id)
+      : Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
 const generarNumeroPedido = async () => {
   const [rows] = await pool.execute('SELECT COALESCE(MAX(id), 0) + 1 AS n FROM pedidos');
   const year = new Date().getFullYear();
@@ -519,7 +529,25 @@ const crearPedido = async (req, res) => {
       );
 
       if (it.tipo_item === 'EXAMEN') {
-        pedidoExamenIds.add(it.examen_id);
+        pedidoExamenIds.add(Number(it.examen_id));
+      }
+    }
+
+    // Incluir exámenes declarados por paciente (import / UI) y validar contra catálogo.
+    // Evita filas vacías en paciente_examen_asignado por desajuste ítems↔empleados o tipos string/number.
+    const idsDesdePacientes = new Set();
+    for (const emp of empleadosList) {
+      for (const raw of Array.isArray(emp.examenes) ? emp.examenes : []) {
+        const id = parseExamenIdRef(raw);
+        if (id != null) idsDesdePacientes.add(id);
+      }
+    }
+    if (idsDesdePacientes.size > 0) {
+      const arrIds = [...idsDesdePacientes];
+      const ph = arrIds.map(() => '?').join(',');
+      const [existRows] = await connection.execute(`SELECT id FROM examenes WHERE id IN (${ph})`, arrIds);
+      for (const row of existRows) {
+        pedidoExamenIds.add(Number(row.id));
       }
     }
 
@@ -527,9 +555,17 @@ const crearPedido = async (req, res) => {
       const dni = String(emp.dni ?? '').trim();
       const nombre_completo = String(emp.nombre_completo ?? 'Sin nombre').trim();
       if (!dni) continue;
+      let perfilesJson = null;
+      if (Array.isArray(emp.perfiles_aplicados) && emp.perfiles_aplicados.length > 0) {
+        try {
+          perfilesJson = JSON.stringify(emp.perfiles_aplicados);
+        } catch (_) {
+          perfilesJson = null;
+        }
+      }
       const [insPac] = await connection.execute(
-        `INSERT INTO pedido_pacientes (pedido_id, dni, nombre_completo, cargo, area, emo_tipo, emo_perfil_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO pedido_pacientes (pedido_id, dni, nombre_completo, cargo, area, emo_tipo, emo_perfil_id, perfiles_aplicados_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           pedido_id,
           dni,
@@ -538,12 +574,14 @@ const crearPedido = async (req, res) => {
           emp.area ?? null,
           emp.emo_tipo ?? null,
           emp.emo_perfil_id ?? null,
+          perfilesJson,
         ]
       );
       const paciente_id = insPac.insertId;
       const examenesEmp = Array.isArray(emp.examenes) ? emp.examenes : [];
-      for (const examen_id of examenesEmp) {
-        if (!pedidoExamenIds.has(examen_id)) continue;
+      for (const rawEx of examenesEmp) {
+        const examen_id = parseExamenIdRef(rawEx);
+        if (examen_id == null || !pedidoExamenIds.has(examen_id)) continue;
         await connection.execute(
           'INSERT IGNORE INTO paciente_examen_asignado (paciente_id, examen_id) VALUES (?, ?)',
           [paciente_id, examen_id]
@@ -847,23 +885,33 @@ const cargarEmpleados = async (req, res) => {
       "SELECT examen_id FROM pedido_items WHERE pedido_id = ? AND tipo_item = 'EXAMEN' AND examen_id IS NOT NULL",
       [pedido_id]
     );
-    const examenIds = new Set(examenesPedido.map(e => e.examen_id));
+    const examenIds = new Set(examenesPedido.map((e) => Number(e.examen_id)));
 
     let agregados = 0;
     for (const emp of empleados || []) {
-      const { dni, nombre_completo, cargo, area, examenes, emo_tipo, emo_perfil_id } = emp;
+      const { dni, nombre_completo, cargo, area, examenes, emo_tipo, emo_perfil_id, perfiles_aplicados } = emp;
       if (!dni || !nombre_completo) continue;
 
+      let perfilesJson = null;
+      if (Array.isArray(perfiles_aplicados) && perfiles_aplicados.length > 0) {
+        try {
+          perfilesJson = JSON.stringify(perfiles_aplicados);
+        } catch (_) {
+          perfilesJson = null;
+        }
+      }
+
       await connection.execute(
-        `INSERT INTO pedido_pacientes (pedido_id, dni, nombre_completo, cargo, area, emo_tipo, emo_perfil_id) 
-         VALUES (?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO pedido_pacientes (pedido_id, dni, nombre_completo, cargo, area, emo_tipo, emo_perfil_id, perfiles_aplicados_json) 
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
          ON DUPLICATE KEY UPDATE 
            nombre_completo = VALUES(nombre_completo),
            cargo = VALUES(cargo),
            area = VALUES(area),
            emo_tipo = VALUES(emo_tipo),
-           emo_perfil_id = VALUES(emo_perfil_id)`,
-        [pedido_id, dni, nombre_completo, cargo || null, area || null, emo_tipo ?? null, emo_perfil_id ?? null]
+           emo_perfil_id = VALUES(emo_perfil_id),
+           perfiles_aplicados_json = VALUES(perfiles_aplicados_json)`,
+        [pedido_id, dni, nombre_completo, cargo || null, area || null, emo_tipo ?? null, emo_perfil_id ?? null, perfilesJson]
       );
 
       const [ex] = await connection.execute('SELECT id FROM pedido_pacientes WHERE pedido_id = ? AND dni = ?', [pedido_id, dni]);
@@ -871,8 +919,9 @@ const cargarEmpleados = async (req, res) => {
       if (!pacienteId) continue;
 
       const examenesToAssign = Array.isArray(examenes) && examenes.length > 0 ? examenes : [...examenIds];
-      for (const examen_id of examenesToAssign) {
-        if (!examenIds.has(examen_id)) continue;
+      for (const raw of examenesToAssign) {
+        const examen_id = parseExamenIdRef(raw);
+        if (examen_id == null || !examenIds.has(examen_id)) continue;
         await connection.execute(
           'INSERT IGNORE INTO paciente_examen_asignado (paciente_id, examen_id) VALUES (?, ?)',
           [pacienteId, examen_id]

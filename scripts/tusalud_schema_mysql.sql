@@ -493,6 +493,7 @@ CREATE TABLE `pedido_pacientes` (
   `area` varchar(150) DEFAULT NULL,
   `emo_tipo` enum('PREOC','ANUAL','RETIRO','VISITA') DEFAULT NULL,
   `emo_perfil_id` int DEFAULT NULL,
+  `perfiles_aplicados_json` json DEFAULT NULL COMMENT 'Perfiles catálogo aplicados por paciente [{emo_perfil_id, perfil_nombre, emo_tipo}]',
   `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
   UNIQUE KEY `pedido_id` (`pedido_id`,`dni`),
