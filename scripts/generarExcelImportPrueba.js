@@ -5,11 +5,11 @@
  *
  * Requiere una plantilla Excel (copiar una vez datos_correctos_3.xlsx al servidor).
  *
- * Uso:
- *   node scripts/generarExcelImportPrueba.js /ruta/plantilla.xlsx /ruta/salida.xlsx
+ * Uso (en el servidor, con .env y una plantilla Hochschild, p. ej. datos_correctos_3.xlsx):
+ *   node scripts/generarExcelImportPrueba.js ~/plantilla.xlsx ./datos_import_prueba.xlsx
  *
- * O variables de entorno:
- *   IMPORT_EXCEL_PLANTILLA  IMPORT_EXCEL_SALIDA
+ * Variables: IMPORT_EXCEL_PLANTILLA, IMPORT_EXCEL_SALIDA
+ * La hoja rellenada solo usa nombres reales de la BD; no incluye perfiles ni exámenes inexistentes.
  */
 require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') });
 const fs = require('fs');
@@ -17,7 +17,13 @@ const path = require('path');
 const mysql = require('mysql2/promise');
 const ExcelJS = require('exceljs');
 
-/** Mismos casos de prueba que antes (perfil/examen desde BD sustituyen los *_exacto). */
+/**
+ * Nombres de empleado solo para trazabilidad. Perfil y exámenes se rellenan con la 1.ª
+ * fila real de `emo_perfiles` + `examenes` (mismo criterio que al generar al vuelo).
+ * Tipos EMO: solo PREOC/ANUAL si en tu BD el perfil no tiene RETIRO/VISITA mapeados
+ * (evita avisos "perfil sin exámenes" por datos incompletos).
+ * Para pruebas negativas (perfil o examen inexistente) use otra hoja o edite a mano.
+ */
 const PACIENTES_BASE = [
   {
     puesto: 'Soldador',
@@ -43,32 +49,32 @@ const PACIENTES_BASE = [
   },
   {
     puesto: 'Seguridad',
-    nombre: 'Prueba Delta, Sin perfil BD',
+    nombre: 'Prueba Delta, Mismo Perfil',
     dni: '40001004',
     emo_preoc: true,
-    perfil_key: 'inexistente',
+    perfil_key: 'exacto',
   },
   {
     puesto: 'Supervisor',
-    nombre: 'Prueba Echo, Adicionales mixtos',
+    nombre: 'Prueba Echo, Adicionales',
     dni: '40001005',
     emo_preoc: true,
     perfil_key: 'exacto',
-    adicionales: ['exacto', 'variante', 'inexistente'],
+    adicionales: ['exacto', 'variante'],
   },
   {
     puesto: 'Administración',
-    nombre: 'Prueba Foxtrot Retiro',
+    nombre: 'Prueba Foxtrot Preoc',
     dni: '40001006',
-    emo_retiro: true,
+    emo_preoc: true,
     perfil_key: 'exacto',
     adicionales: ['variante'],
   },
   {
     puesto: 'Campo',
-    nombre: 'Prueba Golf Visita',
+    nombre: 'Prueba Golf Anual',
     dni: '40001007',
-    emo_visita: true,
+    emo_anual: true,
     perfil_key: 'espacios',
   },
 ];
