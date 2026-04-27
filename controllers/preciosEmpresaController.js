@@ -68,7 +68,7 @@ exports.buscarExamenes = async (req, res) => {
     if (!term || term.length < 2) {
       return res.json({ examenes: [] });
     }
-    const like = `%${term}%`;
+    // INSTR(s, sub) evita que `_` y `%` en el término se interpreten como comodines de SQL LIKE.
     const [examenes] = await pool.query(
       `SELECT 
         e.id AS examen_id,
@@ -79,11 +79,14 @@ exports.buscarExamenes = async (req, res) => {
       LEFT JOIN examen_precio ep ON e.id = ep.examen_id AND ep.sede_id = ? AND (ep.vigente_hasta IS NULL OR ep.vigente_hasta >= CURDATE())
       LEFT JOIN examen_precio ep_general ON e.id = ep_general.examen_id AND ep_general.sede_id IS NULL AND (ep_general.vigente_hasta IS NULL OR ep_general.vigente_hasta >= CURDATE())
       WHERE e.activo = 1
-        AND (e.nombre LIKE ? OR e.codigo LIKE ?)
+        AND (
+          INSTR(LOWER(e.nombre), LOWER(?)) > 0
+          OR INSTR(LOWER(IFNULL(e.codigo, '')), LOWER(?)) > 0
+        )
       GROUP BY e.id, e.nombre, e.categoria
       ORDER BY e.nombre
       LIMIT 30`,
-      [sede_id, like, like]
+      [sede_id, term, term]
     );
     res.json({ examenes });
   } catch (error) {
