@@ -55,7 +55,9 @@ exports.obtenerMatrizArticulos = async (req, res) => {
   }
 };
 
-// Buscar exámenes por texto (nombre o código) con precio para la sede
+// Buscar exámenes por texto (nombre o código) en el catálogo activo.
+// Nota: para validación de importación se debe comprobar existencia en BD,
+// no solo exámenes con tarifa vigente.
 exports.buscarExamenes = async (req, res) => {
   try {
     const { sede_id, q } = req.query;
@@ -72,13 +74,12 @@ exports.buscarExamenes = async (req, res) => {
         e.id AS examen_id,
         e.nombre AS nombre_examen,
         e.categoria AS examen_principal,
-        COALESCE(MIN(ep.precio), MIN(ep_general.precio)) AS precio
+        COALESCE(MIN(ep.precio), MIN(ep_general.precio), 0) AS precio
       FROM examenes e
       LEFT JOIN examen_precio ep ON e.id = ep.examen_id AND ep.sede_id = ? AND (ep.vigente_hasta IS NULL OR ep.vigente_hasta >= CURDATE())
       LEFT JOIN examen_precio ep_general ON e.id = ep_general.examen_id AND ep_general.sede_id IS NULL AND (ep_general.vigente_hasta IS NULL OR ep_general.vigente_hasta >= CURDATE())
       WHERE e.activo = 1
         AND (e.nombre LIKE ? OR e.codigo LIKE ?)
-        AND (ep.id IS NOT NULL OR ep_general.id IS NOT NULL)
       GROUP BY e.id, e.nombre, e.categoria
       ORDER BY e.nombre
       LIMIT 30`,

@@ -320,30 +320,10 @@ exports.resolve = async (req, res) => {
       match = perfiles.find((p) => normalizarNombrePerfilCompacto(p.nombre) === perfilNombreCompact);
       if (match) coincidenciaLaxa = true;
     }
-    /** Si aún no hay match: subcadena (archivo contenido en nombre BD o al revés, con longitud mínima). */
-    let coincidenciaParcial = false;
-    if (!match && perfilNombreNorm.length >= 3) {
-      const porContieneArchivo = perfiles.filter((p) =>
-        normalizarNombrePerfil(p.nombre).includes(perfilNombreNorm)
-      );
-      if (porContieneArchivo.length === 1) {
-        match = porContieneArchivo[0];
-        coincidenciaParcial = true;
-      } else if (porContieneArchivo.length > 1) {
-        porContieneArchivo.sort(
-          (a, b) => normalizarNombrePerfil(a.nombre).length - normalizarNombrePerfil(b.nombre).length
-        );
-        match = porContieneArchivo[0];
-        coincidenciaParcial = true;
-      }
-    }
-    if (!match && perfilNombreNorm.length >= 5) {
-      match = perfiles.find((p) => {
-        const pn = normalizarNombrePerfil(p.nombre);
-        return pn.length >= 5 && perfilNombreNorm.includes(pn);
-      });
-      if (match) coincidenciaParcial = true;
-    }
+    // Importación: validar contra perfil real en BD.
+    // Se permite exacto normalizado y coincidencia compacta (sin espacios),
+    // pero no coincidencia parcial por contención para evitar falsos positivos.
+    const coincidenciaParcial = false;
     if (!match) return res.status(404).json({ error: 'Perfil EMO no encontrado' });
     const perfil_id = match.id;
     const nombrePerfilBd = String(match.nombre || '').trim();
