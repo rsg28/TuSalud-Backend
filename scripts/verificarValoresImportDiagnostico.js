@@ -35,6 +35,15 @@ function parseListArg(s) {
     .filter(Boolean);
 }
 
+/**
+ * `[]` es truthy en JS: no usar `arr || default` o un env vacío vacía el listado y pisa DEFAULT_*.
+ */
+function terminosElegidos(cli, envList, fallbacks) {
+  if (cli && cli.length > 0) return cli;
+  if (envList && envList.length > 0) return envList;
+  return fallbacks;
+}
+
 function parseArgs(argv) {
   const out = { perfiles: null, examenes: null };
   for (let i = 0; i < argv.length; i++) {
@@ -141,14 +150,24 @@ async function main() {
     process.exit(0);
   }
 
-  const perfiles =
-    args.perfiles ||
-    (process.env.TUSALUD_VERIF_PERFILES || '').split('|').map((x) => x.trim()).filter(Boolean) ||
-    DEFAULT_PERFILES;
-  const examenes =
-    args.examenes ||
-    (process.env.TUSALUD_VERIF_EXAMENES || '').split('|').map((x) => x.trim()).filter(Boolean) ||
-    DEFAULT_EXAMENES;
+  const envP = (process.env.TUSALUD_VERIF_PERFILES || '')
+    .split('|')
+    .map((x) => x.trim())
+    .filter(Boolean);
+  const envE = (process.env.TUSALUD_VERIF_EXAMENES || '')
+    .split('|')
+    .map((x) => x.trim())
+    .filter(Boolean);
+  const perfiles = terminosElegidos(
+    args.perfiles && args.perfiles.length > 0 ? args.perfiles : null,
+    envP,
+    DEFAULT_PERFILES
+  );
+  const examenes = terminosElegidos(
+    args.examenes && args.examenes.length > 0 ? args.examenes : null,
+    envE,
+    DEFAULT_EXAMENES
+  );
 
   const config = {
     host: process.env.DB_HOST || 'localhost',
@@ -159,6 +178,7 @@ async function main() {
   };
 
   console.log(`Conectando a ${config.database}@${config.host}:${config.port} (usuario: ${config.user})…\n`);
+  console.log(`Buscando ${perfiles.length} perfil(es) y ${examenes.length} término(s) de examen.\n`);
 
   let conn;
   try {
