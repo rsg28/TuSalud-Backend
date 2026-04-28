@@ -1,6 +1,33 @@
 const pool = require('../config/database');
 const { validationResult } = require('express-validator');
 
+/**
+ * Adjunta a cada empresa el array `grupos: [{id, nombre}]` consultando
+ * `empresa_grupo`. Mutación in-place sobre `empresas`.
+ */
+async function adjuntarGruposEmpresariales(empresas) {
+  if (!Array.isArray(empresas) || empresas.length === 0) return;
+  const ids = empresas.map((e) => e.id);
+  const placeholders = ids.map(() => '?').join(',');
+  const [rows] = await pool.execute(
+    `SELECT eg.empresa_id, g.id, g.nombre
+       FROM empresa_grupo eg
+       JOIN grupos_empresariales g ON g.id = eg.grupo_id
+      WHERE eg.empresa_id IN (${placeholders})
+   ORDER BY g.nombre ASC`,
+    ids
+  );
+  const byEmpresa = new Map();
+  rows.forEach((r) => {
+    const arr = byEmpresa.get(r.empresa_id) || [];
+    arr.push({ id: r.id, nombre: r.nombre });
+    byEmpresa.set(r.empresa_id, arr);
+  });
+  empresas.forEach((e) => {
+    e.grupos = byEmpresa.get(e.id) || [];
+  });
+}
+
 // Obtener todas las empresas
 const getAllEmpresas = async (req, res) => {
   try {
@@ -27,6 +54,7 @@ const getAllEmpresas = async (req, res) => {
     query += ' ORDER BY created_at DESC';
 
     const [empresas] = await pool.execute(query, params);
+    await adjuntarGruposEmpresariales(empresas);
     res.json({ empresas });
   } catch (error) {
     console.error('Error al obtener empresas:', error);
@@ -45,6 +73,7 @@ const getMisEmpresas = async (req, res) => {
       return res.json({ empresas: [] });
     }
     const [empresas] = await pool.execute('SELECT * FROM empresas WHERE id = ?', [users[0].empresa_id]);
+    await adjuntarGruposEmpresariales(empresas);
     res.json({ empresas });
   } catch (error) {
     console.error('Error al obtener mis empresas:', error);
@@ -61,7 +90,7 @@ const getEmpresaById = async (req, res) => {
     if (empresas.length === 0) {
       return res.status(404).json({ error: 'Empresa no encontrada' });
     }
-
+    await adjuntarGruposEmpresariales(empresas);
     res.json({ empresa: empresas[0] });
   } catch (error) {
     console.error('Error al obtener empresa:', error);
@@ -78,11 +107,12 @@ const createEmpresa = async (req, res) => {
     }
 
     const {
-      codigo, ruc, razon_social, grupo_empresarial, tipo_persona, tipo_documento, dni,
+      codigo, ruc, razon_social, tipo_persona, tipo_documento, dni,
       ap_paterno, ap_materno, nombres_completos, direccion, celular,
       contacto, email, actividad_empresa, ubigeo, ciudad, condicion, departamento, estado,
       nombre_responsable_pagos, telefono_responsable_pagos, correo_responsable_pagos,
-      direccion_oficina_pagos, fecha_presentacion_facturas
+      direccion_oficina_pagos, fecha_presentacion_facturas,
+      grupo_ids,
     } = req.body;
 
     // Verificar si ya existe una empresa con la misma razón social (sin distinguir mayúsculas)
@@ -107,15 +137,14 @@ const createEmpresa = async (req, res) => {
 
     const [result] = await pool.execute(
       `INSERT INTO empresas (
-        codigo, ruc, razon_social, grupo_empresarial, tipo_persona, tipo_documento, dni,
+        codigo, ruc, razon_social, tipo_persona, tipo_documento, dni,
         ap_paterno, ap_materno, nombres_completos, direccion, celular,
         contacto, email, actividad_empresa, ubigeo, ciudad, condicion, departamento, estado,
         nombre_responsable_pagos, telefono_responsable_pagos, correo_responsable_pagos,
         direccion_oficina_pagos, fecha_presentacion_facturas
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
-        codigo || null, ruc || null, razon_social, grupo_empresarial || null,
-        tipo_persona || null, tipo_documento || null, dni || null,
+        codigo || null, ruc || null, razon_social, tipo_persona || null, tipo_documento || null, dni || null,
         ap_paterno || null, ap_materno || null, nombres_completos || null, direccion || null, celular || null,
         contacto || null, email || null, actividad_empresa || null, ubigeo || null, ciudad || null,
         condicion || null, departamento || null, estado || null, nombre_responsable_pagos || null, telefono_responsable_pagos || null,
@@ -128,7 +157,16 @@ const createEmpresa = async (req, res) => {
     if (req.user && req.user.rol === 'cliente') {
       await pool.execute('UPDATE usuarios SET empresa_id = ? WHERE id = ?', [empresaId, req.user.id]);
     }
+    // Vincular grupos empresariales si vinieron en el body
+    if (Array.isArray(grupo_ids) && grupo_ids.length > 0) {
+      const ids = [...new Set(grupo_ids.map(Number).filter((n) => Number.isInteger(n) && n > 0))];
+      if (ids.length > 0) {
+        const values = ids.map((gid) => [empresaId, gid]);
+        await pool.query('INSERT IGNORE INTO empresa_grupo (empresa_id, grupo_id) VALUES ?', [values]);
+      }
+    }
     const [newEmpresa] = await pool.execute('SELECT * FROM empresas WHERE id = ?', [empresaId]);
+    await adjuntarGruposEmpresariales(newEmpresa);
     res.status(201).json({ message: 'Empresa creada exitosamente', empresa: newEmpresa[0] });
   } catch (error) {
     console.error('Error al crear empresa:', error);
@@ -149,11 +187,12 @@ const updateEmpresa = async (req, res) => {
 
     const { id } = req.params;
     const {
-      codigo, ruc, razon_social, grupo_empresarial, tipo_persona, tipo_documento, dni,
+      codigo, ruc, razon_social, tipo_persona, tipo_documento, dni,
       ap_paterno, ap_materno, nombres_completos, direccion, celular,
       contacto, email, actividad_empresa, ubigeo, ciudad, condicion, departamento, estado,
       nombre_responsable_pagos, telefono_responsable_pagos, correo_responsable_pagos,
-      direccion_oficina_pagos, fecha_presentacion_facturas
+      direccion_oficina_pagos, fecha_presentacion_facturas,
+      grupo_ids,
     } = req.body;
 
     // Verificar si la empresa existe
@@ -172,14 +211,14 @@ const updateEmpresa = async (req, res) => {
 
     await pool.execute(
       `UPDATE empresas SET
-        codigo = ?, ruc = ?, razon_social = ?, grupo_empresarial = ?, tipo_persona = ?, tipo_documento = ?, dni = ?,
+        codigo = ?, ruc = ?, razon_social = ?, tipo_persona = ?, tipo_documento = ?, dni = ?,
         ap_paterno = ?, ap_materno = ?, nombres_completos = ?, direccion = ?, celular = ?,
         contacto = ?, email = ?, actividad_empresa = ?, ubigeo = ?, ciudad = ?, condicion = ?, departamento = ?, estado = ?,
         nombre_responsable_pagos = ?, telefono_responsable_pagos = ?, correo_responsable_pagos = ?,
         direccion_oficina_pagos = ?, fecha_presentacion_facturas = ?
       WHERE id = ?`,
       [
-        codigo || null, ruc || null, razon_social, grupo_empresarial || null,
+        codigo || null, ruc || null, razon_social,
         tipo_persona || null, tipo_documento || null, dni || null,
         ap_paterno || null, ap_materno || null, nombres_completos || null, direccion || null, celular || null,
         contacto || null, email || null, actividad_empresa || null, ubigeo || null, ciudad || null,
@@ -189,7 +228,22 @@ const updateEmpresa = async (req, res) => {
       ]
     );
 
+    // Sincroniza grupos solo si vinieron explícitamente en el body (undefined = no tocar).
+    if (typeof grupo_ids !== 'undefined') {
+      const ids = [
+        ...new Set(
+          (Array.isArray(grupo_ids) ? grupo_ids : []).map(Number).filter((n) => Number.isInteger(n) && n > 0)
+        ),
+      ];
+      await pool.execute('DELETE FROM empresa_grupo WHERE empresa_id = ?', [id]);
+      if (ids.length > 0) {
+        const values = ids.map((gid) => [id, gid]);
+        await pool.query('INSERT IGNORE INTO empresa_grupo (empresa_id, grupo_id) VALUES ?', [values]);
+      }
+    }
+
     const [updatedEmpresa] = await pool.execute('SELECT * FROM empresas WHERE id = ?', [id]);
+    await adjuntarGruposEmpresariales(updatedEmpresa);
     res.json({ message: 'Empresa actualizada exitosamente', empresa: updatedEmpresa[0] });
   } catch (error) {
     console.error('Error al actualizar empresa:', error);

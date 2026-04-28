@@ -23,22 +23,247 @@ function normalizarNombrePerfilCompacto(s) {
   return normalizarNombrePerfil(s).replace(/\s/g, '');
 }
 
+/**
+ * Normaliza los IDs numéricos enviados desde el body (acepta arrays con strings)
+ * y elimina duplicados / valores no positivos.
+ */
+function normalizarIdsArray(arr) {
+  return [
+    ...new Set(
+      (Array.isArray(arr) ? arr : [])
+        .map(Number)
+        .filter((n) => Number.isInteger(n) && n > 0)
+    ),
+  ];
+}
+
+const VISIBILIDADES_VALIDAS = ['GLOBAL', 'PRIVADO'];
+
 exports.crearPerfil = async (req, res) => {
   try {
     const nombre = String(req.body?.nombre ?? '').trim();
     if (!nombre) return res.status(400).json({ error: 'nombre es requerido' });
 
-    const [exists] = await pool.execute('SELECT id FROM emo_perfiles WHERE LOWER(nombre) = LOWER(?) LIMIT 1', [nombre]);
+    const visibilidadRaw = String(req.body?.visibilidad ?? 'GLOBAL').trim().toUpperCase();
+    const visibilidad = VISIBILIDADES_VALIDAS.includes(visibilidadRaw) ? visibilidadRaw : 'GLOBAL';
+    const empresaIds = normalizarIdsArray(req.body?.empresa_ids);
+    const grupoIds = normalizarIdsArray(req.body?.grupo_ids);
+
+    // Coherencia: si se piden asignaciones (empresas o grupos) el perfil debe ser PRIVADO.
+    const visibilidadFinal =
+      empresaIds.length > 0 || grupoIds.length > 0 ? 'PRIVADO' : visibilidad;
+
+    const [exists] = await pool.execute(
+      'SELECT id FROM emo_perfiles WHERE LOWER(nombre) = LOWER(?) LIMIT 1',
+      [nombre]
+    );
     if (exists.length > 0) {
       return res.status(409).json({ error: 'Ya existe un perfil con ese nombre' });
     }
 
-    const [result] = await pool.execute('INSERT INTO emo_perfiles (nombre) VALUES (?)', [nombre]);
-    const [rows] = await pool.execute('SELECT id, nombre FROM emo_perfiles WHERE id = ?', [result.insertId]);
-    return res.status(201).json({ perfil: rows[0] });
+    const conn = await pool.getConnection();
+    try {
+      await conn.beginTransaction();
+      const [result] = await conn.execute(
+        'INSERT INTO emo_perfiles (nombre, visibilidad) VALUES (?, ?)',
+        [nombre, visibilidadFinal]
+      );
+      const perfilId = result.insertId;
+
+      if (empresaIds.length > 0) {
+        const values = empresaIds.map((empresaId) => [perfilId, empresaId]);
+        await conn.query(
+          'INSERT IGNORE INTO emo_perfil_asignacion (perfil_id, empresa_id) VALUES ?',
+          [values]
+        );
+      }
+      if (grupoIds.length > 0) {
+        const values = grupoIds.map((grupoId) => [perfilId, grupoId]);
+        await conn.query(
+          'INSERT IGNORE INTO emo_perfil_grupo_asignacion (perfil_id, grupo_id) VALUES ?',
+          [values]
+        );
+      }
+      await conn.commit();
+
+      const [rows] = await pool.execute(
+        'SELECT id, nombre, visibilidad FROM emo_perfiles WHERE id = ?',
+        [perfilId]
+      );
+      return res.status(201).json({ perfil: rows[0] });
+    } catch (err) {
+      await conn.rollback();
+      throw err;
+    } finally {
+      conn.release();
+    }
   } catch (error) {
     console.error('Error al crear perfil EMO:', error);
     res.status(500).json({ error: 'Error al crear perfil EMO', details: error.message });
+  }
+};
+
+/**
+ * Sincroniza la visibilidad y asignaciones (empresas y grupos) de un perfil.
+ * PUT /api/emo-perfiles/:perfilId/visibilidad
+ * Body: { visibilidad: 'GLOBAL'|'PRIVADO', empresa_ids?: number[], grupo_ids?: number[] }
+ *
+ * Si se envían `empresa_ids` o `grupo_ids` con valores → fuerza visibilidad PRIVADO
+ * (independiente de lo enviado) para mantener invariante "PRIVADO ⇔ tiene asignaciones".
+ */
+exports.actualizarVisibilidad = async (req, res) => {
+  const conn = await pool.getConnection();
+  try {
+    const perfilId = parseInt(String(req.params?.perfilId ?? ''), 10);
+    if (!Number.isInteger(perfilId) || perfilId <= 0) {
+      conn.release();
+      return res.status(400).json({ error: 'perfilId inválido' });
+    }
+    const visibilidadRaw = String(req.body?.visibilidad ?? '').trim().toUpperCase();
+    if (!VISIBILIDADES_VALIDAS.includes(visibilidadRaw)) {
+      conn.release();
+      return res.status(400).json({ error: 'visibilidad inválida (GLOBAL|PRIVADO)' });
+    }
+    const empresaIds = normalizarIdsArray(req.body?.empresa_ids);
+    const grupoIds = normalizarIdsArray(req.body?.grupo_ids);
+    const visibilidadFinal =
+      visibilidadRaw === 'GLOBAL' && empresaIds.length === 0 && grupoIds.length === 0
+        ? 'GLOBAL'
+        : 'PRIVADO';
+
+    await conn.beginTransaction();
+    const [perfil] = await conn.execute('SELECT id FROM emo_perfiles WHERE id = ?', [perfilId]);
+    if (perfil.length === 0) {
+      await conn.rollback();
+      return res.status(404).json({ error: 'Perfil no encontrado' });
+    }
+
+    await conn.execute('UPDATE emo_perfiles SET visibilidad = ? WHERE id = ?', [visibilidadFinal, perfilId]);
+    await conn.execute('DELETE FROM emo_perfil_asignacion WHERE perfil_id = ?', [perfilId]);
+    await conn.execute('DELETE FROM emo_perfil_grupo_asignacion WHERE perfil_id = ?', [perfilId]);
+
+    if (visibilidadFinal === 'PRIVADO') {
+      if (empresaIds.length > 0) {
+        const values = empresaIds.map((empresaId) => [perfilId, empresaId]);
+        await conn.query(
+          'INSERT IGNORE INTO emo_perfil_asignacion (perfil_id, empresa_id) VALUES ?',
+          [values]
+        );
+      }
+      if (grupoIds.length > 0) {
+        const values = grupoIds.map((grupoId) => [perfilId, grupoId]);
+        await conn.query(
+          'INSERT IGNORE INTO emo_perfil_grupo_asignacion (perfil_id, grupo_id) VALUES ?',
+          [values]
+        );
+      }
+    }
+
+    await conn.commit();
+    res.json({
+      message: 'Visibilidad actualizada',
+      perfil_id: perfilId,
+      visibilidad: visibilidadFinal,
+      empresa_ids: empresaIds,
+      grupo_ids: grupoIds,
+    });
+  } catch (error) {
+    await conn.rollback();
+    console.error('Error al actualizar visibilidad de perfil EMO:', error);
+    res.status(500).json({ error: 'Error al actualizar visibilidad', details: error.message });
+  } finally {
+    conn.release();
+  }
+};
+
+/**
+ * Lista los perfiles visibles para una empresa, según las reglas:
+ *   - GLOBAL              → todos
+ *   - PRIVADO + asignación directa empresa  → incluido
+ *   - PRIVADO + asignación a grupo del que la empresa es miembro → incluido
+ *
+ * Cada perfil se devuelve UNA sola vez aunque coincida por más de una vía;
+ * `origenes` indica todas las razones por las que es visible
+ * ('GLOBAL', 'EMPRESA', 'GRUPO:<nombre>').
+ *
+ * GET /api/emo-perfiles/visibles-para-empresa/:empresaId
+ */
+exports.listarVisiblesParaEmpresa = async (req, res) => {
+  try {
+    const empresaId = parseInt(String(req.params?.empresaId ?? ''), 10);
+    if (!Number.isInteger(empresaId) || empresaId <= 0) {
+      return res.status(400).json({ error: 'empresaId inválido' });
+    }
+
+    const [emp] = await pool.execute('SELECT id FROM empresas WHERE id = ?', [empresaId]);
+    if (emp.length === 0) return res.status(404).json({ error: 'Empresa no encontrada' });
+
+    const qRaw = req.query?.q ?? req.query?.buscar ?? '';
+    const q = String(qRaw).trim();
+    const tipoEmoRaw = req.query?.tipo_emo ? String(req.query.tipo_emo).trim().toUpperCase() : null;
+    const filtrarPorTipo = tipoEmoRaw && EMO_TIPOS_VALIDOS.includes(tipoEmoRaw);
+
+    const filtros = [];
+    const params = [empresaId, empresaId];
+    if (q) {
+      filtros.push('LOWER(p.nombre) LIKE LOWER(?)');
+      params.push(`%${q}%`);
+    }
+    if (filtrarPorTipo) {
+      filtros.push(
+        `EXISTS (SELECT 1 FROM emo_perfil_examenes mpe
+                  WHERE mpe.perfil_id = p.id AND mpe.tipo_emo = ?)`
+      );
+      params.push(tipoEmoRaw);
+    }
+    const whereExtra = filtros.length > 0 ? ` AND (${filtros.join(' AND ')})` : '';
+
+    // Trae perfiles + indicadores de origen para esa empresa.
+    const [rows] = await pool.execute(
+      `SELECT p.id, p.nombre, p.visibilidad,
+              CASE WHEN p.visibilidad = 'GLOBAL' THEN 1 ELSE 0 END AS es_global,
+              CASE WHEN epa.empresa_id IS NOT NULL THEN 1 ELSE 0 END AS asignado_empresa,
+              GROUP_CONCAT(DISTINCT g.nombre ORDER BY g.nombre SEPARATOR '|') AS grupos_nombres
+         FROM emo_perfiles p
+    LEFT JOIN emo_perfil_asignacion epa
+           ON epa.perfil_id = p.id AND epa.empresa_id = ?
+    LEFT JOIN emo_perfil_grupo_asignacion epga
+           ON epga.perfil_id = p.id
+    LEFT JOIN empresa_grupo eg
+           ON eg.grupo_id = epga.grupo_id AND eg.empresa_id = ?
+    LEFT JOIN grupos_empresariales g
+           ON g.id = epga.grupo_id AND eg.empresa_id IS NOT NULL
+        WHERE (p.visibilidad = 'GLOBAL'
+           OR epa.empresa_id IS NOT NULL
+           OR eg.empresa_id IS NOT NULL)
+           ${whereExtra}
+     GROUP BY p.id, p.nombre, p.visibilidad
+     ORDER BY p.nombre ASC`,
+      params
+    );
+
+    const perfiles = rows.map((r) => {
+      const origenes = [];
+      if (r.es_global) origenes.push('GLOBAL');
+      if (r.asignado_empresa) origenes.push('EMPRESA');
+      if (r.grupos_nombres) {
+        String(r.grupos_nombres)
+          .split('|')
+          .filter(Boolean)
+          .forEach((g) => origenes.push(`GRUPO:${g}`));
+      }
+      return {
+        id: r.id,
+        nombre: r.nombre,
+        visibilidad: r.visibilidad,
+        origenes,
+      };
+    });
+
+    res.json({ empresa_id: empresaId, perfiles });
+  } catch (error) {
+    console.error('Error al listar perfiles visibles para empresa:', error);
+    res.status(500).json({ error: 'Error al listar perfiles para empresa', details: error.message });
   }
 };
 
@@ -53,7 +278,7 @@ exports.listarPerfiles = async (req, res) => {
     const filtrarPorTipo = tipoEmoRaw && EMO_TIPOS_VALIDOS.includes(tipoEmoRaw) ? true : false;
 
     // Base de perfiles: si hay búsqueda y/o filtro por tipo, se reduce en BD.
-    let sql = 'SELECT id, nombre FROM emo_perfiles';
+    let sql = 'SELECT id, nombre, visibilidad FROM emo_perfiles';
     const params = [];
     const wheres = [];
     if (q) {
@@ -91,7 +316,12 @@ exports.listarPerfiles = async (req, res) => {
 
     const perfilesMap = new Map();
     rows.forEach((p) => {
-      perfilesMap.set(p.id, { id: p.id, nombre: p.nombre, examenes_por_tipo: { PREOC: [], ANUAL: [], RETIRO: [], VISITA: [] } });
+      perfilesMap.set(p.id, {
+        id: p.id,
+        nombre: p.nombre,
+        visibilidad: p.visibilidad,
+        examenes_por_tipo: { PREOC: [], ANUAL: [], RETIRO: [], VISITA: [] },
+      });
     });
     mapeos.forEach((m) => {
       const perfil = perfilesMap.get(m.perfil_id);

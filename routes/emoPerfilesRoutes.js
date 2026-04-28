@@ -24,5 +24,11 @@ router.get('/resolve', authenticateToken, emoController.resolve);
 // Precio resuelto para (perfilId + tipo_emo + opcional empresa_id + sede_id).
 router.get('/:perfilId/precio', authenticateToken, emoController.precio);
 
+// Visibilidad y asignaciones del perfil (a empresas y/o grupos).
+router.put('/:perfilId/visibilidad', authenticateToken, requireRole('manager', 'vendedor'), emoController.actualizarVisibilidad);
+
+// Lista de perfiles visibles para una empresa (catálogo del cliente al armar pedido).
+router.get('/visibles-para-empresa/:empresaId', authenticateToken, emoController.listarVisiblesParaEmpresa);
+
 module.exports = router;
 
