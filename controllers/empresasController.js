@@ -78,7 +78,7 @@ const createEmpresa = async (req, res) => {
     }
 
     const {
-      codigo, ruc, razon_social, tipo_persona, tipo_documento, dni,
+      codigo, ruc, razon_social, grupo_empresarial, tipo_persona, tipo_documento, dni,
       ap_paterno, ap_materno, nombres_completos, direccion, celular,
       contacto, email, actividad_empresa, ubigeo, ciudad, condicion, departamento, estado,
       nombre_responsable_pagos, telefono_responsable_pagos, correo_responsable_pagos,
@@ -107,14 +107,15 @@ const createEmpresa = async (req, res) => {
 
     const [result] = await pool.execute(
       `INSERT INTO empresas (
-        codigo, ruc, razon_social, tipo_persona, tipo_documento, dni,
+        codigo, ruc, razon_social, grupo_empresarial, tipo_persona, tipo_documento, dni,
         ap_paterno, ap_materno, nombres_completos, direccion, celular,
         contacto, email, actividad_empresa, ubigeo, ciudad, condicion, departamento, estado,
         nombre_responsable_pagos, telefono_responsable_pagos, correo_responsable_pagos,
         direccion_oficina_pagos, fecha_presentacion_facturas
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
-        codigo || null, ruc || null, razon_social, tipo_persona || null, tipo_documento || null, dni || null,
+        codigo || null, ruc || null, razon_social, grupo_empresarial || null,
+        tipo_persona || null, tipo_documento || null, dni || null,
         ap_paterno || null, ap_materno || null, nombres_completos || null, direccion || null, celular || null,
         contacto || null, email || null, actividad_empresa || null, ubigeo || null, ciudad || null,
         condicion || null, departamento || null, estado || null, nombre_responsable_pagos || null, telefono_responsable_pagos || null,
@@ -148,7 +149,7 @@ const updateEmpresa = async (req, res) => {
 
     const { id } = req.params;
     const {
-      codigo, ruc, razon_social, tipo_persona, tipo_documento, dni,
+      codigo, ruc, razon_social, grupo_empresarial, tipo_persona, tipo_documento, dni,
       ap_paterno, ap_materno, nombres_completos, direccion, celular,
       contacto, email, actividad_empresa, ubigeo, ciudad, condicion, departamento, estado,
       nombre_responsable_pagos, telefono_responsable_pagos, correo_responsable_pagos,
@@ -171,14 +172,15 @@ const updateEmpresa = async (req, res) => {
 
     await pool.execute(
       `UPDATE empresas SET
-        codigo = ?, ruc = ?, razon_social = ?, tipo_persona = ?, tipo_documento = ?, dni = ?,
+        codigo = ?, ruc = ?, razon_social = ?, grupo_empresarial = ?, tipo_persona = ?, tipo_documento = ?, dni = ?,
         ap_paterno = ?, ap_materno = ?, nombres_completos = ?, direccion = ?, celular = ?,
         contacto = ?, email = ?, actividad_empresa = ?, ubigeo = ?, ciudad = ?, condicion = ?, departamento = ?, estado = ?,
         nombre_responsable_pagos = ?, telefono_responsable_pagos = ?, correo_responsable_pagos = ?,
         direccion_oficina_pagos = ?, fecha_presentacion_facturas = ?
       WHERE id = ?`,
       [
-        codigo || null, ruc || null, razon_social, tipo_persona || null, tipo_documento || null, dni || null,
+        codigo || null, ruc || null, razon_social, grupo_empresarial || null,
+        tipo_persona || null, tipo_documento || null, dni || null,
         ap_paterno || null, ap_materno || null, nombres_completos || null, direccion || null, celular || null,
         contacto || null, email || null, actividad_empresa || null, ubigeo || null, ciudad || null,
         condicion || null, departamento || null, estado || null, nombre_responsable_pagos || null, telefono_responsable_pagos || null,
