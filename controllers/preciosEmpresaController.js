@@ -184,44 +184,67 @@ exports.listarPerfilesConPrecio = async (req, res) => {
          p.visibilidad,
          (SELECT COUNT(DISTINCT examen_id) FROM emo_perfil_examenes WHERE perfil_id = p.id) AS total_examenes
        FROM emo_perfiles p
-       ORDER BY p.nombre`
+       ORDER BY p.visibilidad DESC, p.nombre`
     );
     if (perfiles.length === 0) {
       return res.json({ perfiles: [] });
     }
     const ids = perfiles.map((p) => p.perfil_id);
-    // Trae todos los precios relevantes (sede o global) para los perfiles
-    // listados, en una sola query para evitar N+1.
     const placeholders = ids.map(() => '?').join(',');
+
+    // Precios (sede explícita gana sobre global)
     const [precios] = await pool.query(
-      `SELECT
-         pp.perfil_id,
-         pp.tipo_emo,
-         pp.sede_id,
-         pp.precio
+      `SELECT pp.perfil_id, pp.tipo_emo, pp.sede_id, pp.precio
        FROM emo_perfil_precio pp
        WHERE pp.empresa_id IS NULL
          AND (pp.sede_id = ? OR pp.sede_id IS NULL)
          AND pp.perfil_id IN (${placeholders})`,
       [sede_id, ...ids]
     );
+
+    // Empresas asignadas directamente (emo_perfil_asignacion)
+    const [empresasAsig] = await pool.query(
+      `SELECT pa.perfil_id, e.id AS empresa_id, e.razon_social AS nombre
+       FROM emo_perfil_asignacion pa
+       JOIN empresas e ON e.id = pa.empresa_id
+       WHERE pa.perfil_id IN (${placeholders})
+       ORDER BY e.razon_social`,
+      [...ids]
+    );
+
+    // Grupos asignados (emo_perfil_grupo_asignacion)
+    const [gruposAsig] = await pool.query(
+      `SELECT pga.perfil_id, g.id AS grupo_id, g.nombre
+       FROM emo_perfil_grupo_asignacion pga
+       JOIN grupos_empresariales g ON g.id = pga.grupo_id
+       WHERE pga.perfil_id IN (${placeholders})
+       ORDER BY g.nombre`,
+      [...ids]
+    );
+
     const TIPOS = ['PREOC', 'ANUAL', 'RETIRO', 'VISITA'];
     const indexPerfil = new Map();
     for (const p of perfiles) {
       const tipos = TIPOS.map((t) => ({ tipo_emo: t, precio: null, origen: null }));
-      indexPerfil.set(p.perfil_id, { perfil: p, tipos });
+      indexPerfil.set(p.perfil_id, { perfil: p, tipos, empresas: [], grupos: [] });
     }
     for (const row of precios) {
       const entry = indexPerfil.get(row.perfil_id);
       if (!entry) continue;
       const slot = entry.tipos.find((t) => t.tipo_emo === row.tipo_emo);
       if (!slot) continue;
-      // sede explícita gana sobre global
       const esSede = row.sede_id != null;
-      const yaSede = slot.origen === 'SEDE';
-      if (yaSede && !esSede) continue;
+      if (slot.origen === 'SEDE' && !esSede) continue;
       slot.precio = row.precio != null ? Number(row.precio) : null;
       slot.origen = esSede ? 'SEDE' : 'GLOBAL';
+    }
+    for (const row of empresasAsig) {
+      const entry = indexPerfil.get(row.perfil_id);
+      if (entry) entry.empresas.push({ empresa_id: row.empresa_id, nombre: row.nombre });
+    }
+    for (const row of gruposAsig) {
+      const entry = indexPerfil.get(row.perfil_id);
+      if (entry) entry.grupos.push({ grupo_id: row.grupo_id, nombre: row.nombre });
     }
     const out = perfiles.map((p) => {
       const entry = indexPerfil.get(p.perfil_id);
@@ -230,9 +253,11 @@ exports.listarPerfilesConPrecio = async (req, res) => {
         nombre: p.nombre,
         tipo: p.tipo,
         descripcion: p.descripcion,
-        visibilidad: p.visibilidad,
+        visibilidad: p.visibilidad ?? 'GLOBAL',
         total_examenes: Number(p.total_examenes ?? 0),
         precios: entry?.tipos ?? [],
+        empresas: entry?.empresas ?? [],
+        grupos: entry?.grupos ?? [],
       };
     });
     res.json({ perfiles: out });

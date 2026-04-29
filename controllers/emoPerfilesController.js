@@ -374,8 +374,60 @@ exports.listarPerfiles = async (req, res) => {
 
     const [rows] = await pool.execute(sql, params);
 
+    /**
+     * Adjunta empresas y grupos asignados a cada perfil. Se hace siempre que
+     * haya perfiles para listar, sea o no `include_examenes`, porque la UI
+     * necesita los chips de visibilidad/asignaciones siempre.
+     */
+    const perfilIds = rows.map((r) => r.id);
+    const empresasPorPerfil = new Map();
+    const gruposPorPerfil = new Map();
+    if (perfilIds.length > 0) {
+      const placeholders = perfilIds.map(() => '?').join(',');
+      const [filasEmpresas] = await pool.query(
+        `SELECT epa.perfil_id, e.id AS empresa_id, e.razon_social AS nombre, e.ruc
+         FROM emo_perfil_asignacion epa
+         JOIN empresas e ON e.id = epa.empresa_id
+         WHERE epa.perfil_id IN (${placeholders})
+         ORDER BY e.razon_social ASC`,
+        perfilIds
+      );
+      filasEmpresas.forEach((row) => {
+        if (!empresasPorPerfil.has(row.perfil_id)) empresasPorPerfil.set(row.perfil_id, []);
+        empresasPorPerfil.get(row.perfil_id).push({
+          empresa_id: row.empresa_id,
+          nombre: row.nombre,
+          ruc: row.ruc,
+        });
+      });
+      const [filasGrupos] = await pool.query(
+        `SELECT epga.perfil_id, g.id AS grupo_id, g.nombre,
+                COALESCE((SELECT COUNT(*) FROM empresa_grupo eg WHERE eg.grupo_id = g.id), 0) AS empresas_count
+         FROM emo_perfil_grupo_asignacion epga
+         JOIN grupos_empresariales g ON g.id = epga.grupo_id
+         WHERE epga.perfil_id IN (${placeholders})
+         ORDER BY g.nombre ASC`,
+        perfilIds
+      );
+      filasGrupos.forEach((row) => {
+        if (!gruposPorPerfil.has(row.perfil_id)) gruposPorPerfil.set(row.perfil_id, []);
+        gruposPorPerfil.get(row.perfil_id).push({
+          grupo_id: row.grupo_id,
+          nombre: row.nombre,
+          empresas_count: Number(row.empresas_count) || 0,
+        });
+      });
+    }
+
     if (!includeExamenes) {
-      return res.json({ perfiles: rows });
+      const perfilesConAsig = rows.map((p) => ({
+        id: p.id,
+        nombre: p.nombre,
+        visibilidad: p.visibilidad,
+        empresas: empresasPorPerfil.get(p.id) || [],
+        grupos: gruposPorPerfil.get(p.id) || [],
+      }));
+      return res.json({ perfiles: perfilesConAsig });
     }
 
     // Incluye exámenes por tipo para que UI pueda mostrar/usar sin resolver uno a uno.
@@ -397,6 +449,8 @@ exports.listarPerfiles = async (req, res) => {
         id: p.id,
         nombre: p.nombre,
         visibilidad: p.visibilidad,
+        empresas: empresasPorPerfil.get(p.id) || [],
+        grupos: gruposPorPerfil.get(p.id) || [],
         examenes_por_tipo: { PREOC: [], ANUAL: [], RETIRO: [], VISITA: [] },
       });
     });
