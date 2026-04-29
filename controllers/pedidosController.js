@@ -1,5 +1,8 @@
 const pool = require('../config/database');
 const { normalizarRol } = require('../middleware/auth');
+const {
+  helpers: { emitirNotificacionAVendedorDePedido },
+} = require('./notificacionesController');
 
 // Asegura que ningún BigInt llegue a res.json() (mysql2 puede devolver BigInt y JSON.stringify falla)
 function sanitizeForJson(obj) {
@@ -595,6 +598,35 @@ const crearPedido = async (req, res) => {
 
     await registrarHistorial(connection, pedido_id, 'CREACION', `Pedido ${numero_pedido} creado`, vendedor_id, null, { usuario_nombre: req.user ? req.user.nombre_completo : null });
     await connection.commit();
+
+    // Notificar al vendedor / managers cuando es el cliente quien crea el pedido.
+    if (rolUsuario === 'cliente') {
+      try {
+        const conn2 = await pool.getConnection();
+        try {
+          await emitirNotificacionAVendedorDePedido(conn2, {
+            pedidoId: pedido_id,
+            tipo: 'MENSAJE',
+            titulo: `Nuevo pedido ${numero_pedido} creado por el cliente`,
+            mensaje: empleadosList.length > 0
+              ? `Se cargaron ${empleadosList.length} empleado(s). Revisa el pedido y prepara la cotización.`
+              : 'El cliente creó un pedido. Revisa los detalles y prepara la cotización.',
+            contextoJson: {
+              evento: 'PEDIDO_CREADO_POR_CLIENTE',
+              pedido_id,
+              numero_pedido,
+              empresa_id,
+              total_empleados: empleadosList.length || totalEmpleadosInicial,
+            },
+            remitenteUsuarioId: req.user ? req.user.id : null,
+          });
+        } finally {
+          conn2.release();
+        }
+      } catch (notifErr) {
+        console.warn('No se pudo emitir notificación de pedido creado:', notifErr?.message);
+      }
+    }
 
     const [newPedido] = await pool.execute('SELECT * FROM pedidos WHERE id = ?', [pedido_id]);
     res.status(201).json({

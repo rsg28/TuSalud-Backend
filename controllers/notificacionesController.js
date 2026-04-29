@@ -75,6 +75,44 @@ async function emitirNotificacionAClientesDeEmpresa(conn, params) {
   return total;
 }
 
+/**
+ * Emite una notificación dirigida al vendedor responsable de un pedido. Si el
+ * pedido no tiene vendedor asignado aún, intenta avisar a todos los managers
+ * activos como fallback. Devuelve la cantidad de filas insertadas.
+ */
+async function emitirNotificacionAVendedorDePedido(conn, params) {
+  const { pedidoId } = params;
+  const [filas] = await conn.execute(
+    'SELECT vendedor_id, empresa_id FROM pedidos WHERE id = ?',
+    [pedidoId]
+  );
+  if (filas.length === 0) return 0;
+  const vendedorId = filas[0].vendedor_id;
+  const empresaId = filas[0].empresa_id;
+  if (vendedorId) {
+    await emitirNotificacion(conn, {
+      ...params,
+      destinatarioUsuarioId: vendedorId,
+      destinatarioEmpresaId: empresaId,
+    });
+    return 1;
+  }
+  // Fallback: notificar a managers activos.
+  const [managers] = await conn.execute(
+    "SELECT id FROM usuarios WHERE rol IN ('manager','vendedor') AND activo = 1"
+  );
+  let total = 0;
+  for (const m of managers) {
+    await emitirNotificacion(conn, {
+      ...params,
+      destinatarioUsuarioId: m.id,
+      destinatarioEmpresaId: empresaId,
+    });
+    total += 1;
+  }
+  return total;
+}
+
 /* ============================================================================
  * Endpoints REST
  * ========================================================================== */
@@ -354,4 +392,5 @@ exports.responder = async (req, res) => {
 module.exports.helpers = {
   emitirNotificacion,
   emitirNotificacionAClientesDeEmpresa,
+  emitirNotificacionAVendedorDePedido,
 };

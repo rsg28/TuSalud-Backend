@@ -1,7 +1,10 @@
 const pool = require('../config/database');
 const { validationResult } = require('express-validator');
 const {
-  helpers: { emitirNotificacionAClientesDeEmpresa },
+  helpers: {
+    emitirNotificacionAClientesDeEmpresa,
+    emitirNotificacionAVendedorDePedido,
+  },
 } = require('./notificacionesController');
 
 // Estados válidos de cotización. El manager solo aprueba (APROBADA_POR_MANAGER), no rechaza.
@@ -716,6 +719,91 @@ const updateEstadoCotizacion = async (req, res) => {
       }
       await connection.commit();
       const [updated] = await pool.execute('SELECT * FROM cotizaciones WHERE id = ?', [id]);
+
+      // Emitir notificaciones según el estado nuevo. Best-effort: cualquier
+      // error aquí solo se loggea, no rompe la respuesta al usuario.
+      try {
+        const cot = updated[0] ?? null;
+        if (cot && cot.pedido_id) {
+          const pedidoId = cot.pedido_id;
+          const numeroCotizacion = cot.numero_cotizacion || `#${cot.id}`;
+          const conn2 = await pool.getConnection();
+          try {
+            const [pedRows] = await conn2.execute(
+              'SELECT empresa_id FROM pedidos WHERE id = ?',
+              [pedidoId]
+            );
+            const empresaIdPedido = pedRows[0]?.empresa_id ?? null;
+
+            if (estado === 'ENVIADA_AL_CLIENTE' && empresaIdPedido) {
+              await emitirNotificacionAClientesDeEmpresa(conn2, {
+                empresaId: empresaIdPedido,
+                tipo: 'COTIZACION_CREADA',
+                titulo: `Cotización ${numeroCotizacion} lista para tu revisión`,
+                mensaje: 'El vendedor te envió una cotización para que la apruebes o rechaces.',
+                contextoJson: {
+                  evento: 'COTIZACION_ENVIADA_AL_CLIENTE',
+                  cotizacion_id: cot.id,
+                  pedido_id: pedidoId,
+                  numero_cotizacion: numeroCotizacion,
+                },
+                remitenteUsuarioId: req.user ? req.user.id : null,
+              });
+            } else if (estado === 'APROBADA') {
+              await emitirNotificacionAVendedorDePedido(conn2, {
+                pedidoId,
+                tipo: 'MENSAJE',
+                titulo: `Cotización ${numeroCotizacion} aprobada por el cliente`,
+                mensaje: 'El cliente aprobó la cotización. Puedes continuar con el pedido.',
+                contextoJson: {
+                  evento: 'COTIZACION_APROBADA',
+                  cotizacion_id: cot.id,
+                  pedido_id: pedidoId,
+                  numero_cotizacion: numeroCotizacion,
+                },
+                remitenteUsuarioId: req.user ? req.user.id : null,
+              });
+            } else if (estado === 'RECHAZADA') {
+              const motivo = mensaje_rechazo && String(mensaje_rechazo).trim()
+                ? `Motivo: ${String(mensaje_rechazo).trim()}`
+                : 'No se indicó motivo.';
+              await emitirNotificacionAVendedorDePedido(conn2, {
+                pedidoId,
+                tipo: 'MENSAJE',
+                titulo: `Cotización ${numeroCotizacion} rechazada por el cliente`,
+                mensaje: motivo,
+                contextoJson: {
+                  evento: 'COTIZACION_RECHAZADA',
+                  cotizacion_id: cot.id,
+                  pedido_id: pedidoId,
+                  numero_cotizacion: numeroCotizacion,
+                  mensaje_rechazo: mensaje_rechazo || null,
+                },
+                remitenteUsuarioId: req.user ? req.user.id : null,
+              });
+            } else if (estado === 'APROBADA_POR_MANAGER') {
+              await emitirNotificacionAVendedorDePedido(conn2, {
+                pedidoId,
+                tipo: 'MENSAJE',
+                titulo: `Cotización ${numeroCotizacion} aprobada por el manager`,
+                mensaje: 'El manager aprobó la cotización. Puedes enviarla al cliente.',
+                contextoJson: {
+                  evento: 'COTIZACION_APROBADA_POR_MANAGER',
+                  cotizacion_id: cot.id,
+                  pedido_id: pedidoId,
+                  numero_cotizacion: numeroCotizacion,
+                },
+                remitenteUsuarioId: req.user ? req.user.id : null,
+              });
+            }
+          } finally {
+            conn2.release();
+          }
+        }
+      } catch (notifErr) {
+        console.warn('No se pudo emitir notificación de cambio de estado:', notifErr?.message);
+      }
+
       res.json({ message: 'Estado actualizado', cotizacion: updated[0] });
     } catch (err) {
       await connection.rollback();
