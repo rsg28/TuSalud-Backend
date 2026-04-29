@@ -1,5 +1,8 @@
 const pool = require('../config/database');
 const { validationResult } = require('express-validator');
+const {
+  helpers: { emitirNotificacionAClientesDeEmpresa },
+} = require('./notificacionesController');
 
 // Estados válidos de cotización. El manager solo aprueba (APROBADA_POR_MANAGER), no rechaza.
 const ESTADOS_COTIZACION = ['BORRADOR', 'ENVIADA', 'ENVIADA_AL_CLIENTE', 'ENVIADA_AL_MANAGER', 'APROBADA_POR_MANAGER', 'APROBADA', 'RECHAZADA'];
@@ -347,6 +350,35 @@ const createCotizacion = async (req, res) => {
         'SELECT * FROM cotizaciones WHERE id = ?',
         [cotizacionId]
       );
+
+      // Notificar a los clientes de la empresa del pedido (best-effort, no rompe la respuesta).
+      try {
+        const empresaIdPedido = pedido[0].empresa_id;
+        const conn2 = await pool.getConnection();
+        try {
+          await emitirNotificacionAClientesDeEmpresa(conn2, {
+            empresaId: empresaIdPedido,
+            tipo: 'COTIZACION_CREADA',
+            titulo: `Nueva cotización ${numero_cotizacion}`,
+            mensaje:
+              `Se creó la cotización ${numero_cotizacion} para tu empresa con ` +
+              `${itemsNorm.length} ítem(s) por un total de S/ ${Number(total).toFixed(2)}.`,
+            contextoJson: {
+              cotizacion_id: cotizacionId,
+              numero_cotizacion,
+              pedido_id,
+              total: Number(total),
+              n_items: itemsNorm.length,
+            },
+            remitenteUsuarioId: req.user ? req.user.id : null,
+          });
+        } finally {
+          conn2.release();
+        }
+      } catch (notifErr) {
+        console.warn('No se pudo emitir notificación de cotización creada:', notifErr?.message);
+      }
+
       res.status(201).json({
         message: 'Cotización creada exitosamente',
         cotizacion: newCot[0]

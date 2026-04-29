@@ -1,6 +1,49 @@
 const pool = require('../config/database');
+const {
+  helpers: { emitirNotificacionAClientesDeEmpresa },
+} = require('./notificacionesController');
 
 const EMO_TIPOS_VALIDOS = ['PREOC', 'ANUAL', 'RETIRO', 'VISITA'];
+
+/**
+ * Notifica a los clientes de cada empresa afectada (directa o vía grupo) que
+ * tienen un nuevo perfil disponible. Los precios se asignan después en el
+ * flujo de cotización; este aviso es solo "tienes acceso a un perfil nuevo".
+ */
+async function notificarAsignacionPerfilAClientes(perfilId, perfilNombre, empresaIds, grupoIds, remitenteUsuarioId) {
+  if ((!empresaIds || empresaIds.length === 0) && (!grupoIds || grupoIds.length === 0)) return;
+  const empresasFinales = new Set();
+  (empresaIds || []).forEach((id) => empresasFinales.add(id));
+  if (grupoIds && grupoIds.length > 0) {
+    const placeholders = grupoIds.map(() => '?').join(',');
+    const [rows] = await pool.query(
+      `SELECT empresa_id FROM empresa_grupo WHERE grupo_id IN (${placeholders})`,
+      grupoIds
+    );
+    rows.forEach((r) => empresasFinales.add(r.empresa_id));
+  }
+  if (empresasFinales.size === 0) return;
+
+  const conn = await pool.getConnection();
+  try {
+    for (const empresaId of empresasFinales) {
+      await emitirNotificacionAClientesDeEmpresa(conn, {
+        empresaId,
+        tipo: 'PERFIL_ASIGNADO',
+        titulo: `Nuevo perfil disponible: ${perfilNombre}`,
+        mensaje: `Se asignó el perfil "${perfilNombre}" a tu empresa. Ya puedes seleccionarlo al armar pedidos.`,
+        contextoJson: {
+          perfil_id: perfilId,
+          perfil_nombre: perfilNombre,
+          empresa_id: empresaId,
+        },
+        remitenteUsuarioId: remitenteUsuarioId || null,
+      });
+    }
+  } finally {
+    conn.release();
+  }
+}
 
 const NORMALIZE_MAP = {
   á: 'a', é: 'e', í: 'i', ó: 'o', ú: 'u', ñ: 'n',
@@ -90,6 +133,22 @@ exports.crearPerfil = async (req, res) => {
         'SELECT id, nombre, visibilidad FROM emo_perfiles WHERE id = ?',
         [perfilId]
       );
+
+      // Notificar a clientes (best-effort).
+      if (visibilidadFinal === 'PRIVADO') {
+        try {
+          await notificarAsignacionPerfilAClientes(
+            perfilId,
+            nombre,
+            empresaIds,
+            grupoIds,
+            req.user ? req.user.id : null
+          );
+        } catch (notifErr) {
+          console.warn('No se pudo emitir notificación de perfil asignado:', notifErr?.message);
+        }
+      }
+
       return res.status(201).json({ perfil: rows[0] });
     } catch (err) {
       await conn.rollback();
@@ -160,6 +219,24 @@ exports.actualizarVisibilidad = async (req, res) => {
     }
 
     await conn.commit();
+
+    // Notificar a clientes (best-effort).
+    if (visibilidadFinal === 'PRIVADO') {
+      try {
+        const [pn] = await pool.execute('SELECT nombre FROM emo_perfiles WHERE id = ?', [perfilId]);
+        const nombrePerfil = pn[0]?.nombre || `Perfil #${perfilId}`;
+        await notificarAsignacionPerfilAClientes(
+          perfilId,
+          nombrePerfil,
+          empresaIds,
+          grupoIds,
+          req.user ? req.user.id : null
+        );
+      } catch (notifErr) {
+        console.warn('No se pudo emitir notificación de visibilidad actualizada:', notifErr?.message);
+      }
+    }
+
     res.json({
       message: 'Visibilidad actualizada',
       perfil_id: perfilId,
