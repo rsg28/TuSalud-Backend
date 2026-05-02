@@ -146,6 +146,233 @@ function parseItems(textContent) {
     });
 }
 
+/**
+ * Recorre el operator list de la página y devuelve las cajas (bbox) y
+ * cadenas aproximadas de los textos que NO son visibles cuando el PDF se
+ * renderiza. Casos cubiertos:
+ *
+ *  1. `setTextRenderingMode 3` — texto invisible (típico en PDFs OCR-over-
+ *     image, pero también lo usan algunos protocolos para “esconder” datos).
+ *  2. Texto con `fillColor` casi blanco (RGB ≥ 250 los 3 canales) — texto
+ *     blanco que sólo se ve sobre fondo oscuro; en una tabla con fondo
+ *     claro queda invisible a la vista.
+ *  3. Texto cubierto por un rectángulo opaco POSTERIOR (mismo color o
+ *     uno suficientemente similar al fillColor del texto). Se evitan
+ *     rectángulos delgados (bordes < 4u) para no falsificar.
+ *
+ *  No depende de ningún texto del documento ni asume su layout. Cuando no
+ *  hay forma fiable de saber, devuelve []. El llamador filtra después los
+ *  text items cuya bbox cae dentro de alguna caja oculta.
+ */
+async function detectHiddenTextBoxes(page, pdfjsLib) {
+  const OPS = pdfjsLib.OPS;
+  const operatorList = await page.getOperatorList();
+  const events = [];
+
+  let fillColor = null; // [r,g,b] (0..255)
+  let textRenderingMode = 0; // 0 = fill (visible). 3 = invisible.
+  let textMatrix = null;
+  let pendingPath = null;
+
+  const cloneColor = (c) =>
+    c && c.length >= 3 ? [Math.round(c[0]), Math.round(c[1]), Math.round(c[2])] : null;
+
+  for (let i = 0; i < operatorList.fnArray.length; i++) {
+    const fn = operatorList.fnArray[i];
+    const args = operatorList.argsArray[i];
+    if (fn === OPS.setFillRGBColor) {
+      const v = args || [];
+      // pdfjs entrega valores 0..255 (Uint8ClampedArray) o 0..1 (Array).
+      const r0 = Number(v[0]) || 0;
+      const g0 = Number(v[1]) || 0;
+      const b0 = Number(v[2]) || 0;
+      const scale = (r0 <= 1 && g0 <= 1 && b0 <= 1) ? 255 : 1;
+      fillColor = [r0 * scale, g0 * scale, b0 * scale];
+    } else if (fn === OPS.setTextMatrix) {
+      textMatrix = args || null;
+    } else if (fn === OPS.setTextRenderingMode) {
+      textRenderingMode = Number(args && args[0]) || 0;
+    } else if (fn === OPS.constructPath) {
+      const subOps = (args && args[0]) || [];
+      const coords = (args && args[1]) || [];
+      let ci = 0;
+      const segs = [];
+      for (const op of subOps) {
+        if (op === OPS.moveTo || op === OPS.lineTo) {
+          ci += 2;
+        } else if (op === OPS.rectangle) {
+          const x = coords[ci++];
+          const y = coords[ci++];
+          const w = coords[ci++];
+          const h = coords[ci++];
+          segs.push({
+            x1: Math.min(x, x + w),
+            x2: Math.max(x, x + w),
+            y1: Math.min(y, y + h),
+            y2: Math.max(y, y + h),
+          });
+        } else if (op === OPS.curveTo) ci += 6;
+        else if (op === OPS.curveTo2 || op === OPS.curveTo3) ci += 4;
+      }
+      pendingPath = segs;
+    } else if (fn === OPS.fill || fn === OPS.eoFill) {
+      if (pendingPath && pendingPath.length) {
+        for (const r of pendingPath) {
+          events.push({
+            kind: 'rect',
+            i,
+            x1: r.x1,
+            x2: r.x2,
+            y1: r.y1,
+            y2: r.y2,
+            fillColor: cloneColor(fillColor),
+          });
+        }
+      }
+      pendingPath = null;
+    } else if (fn === OPS.stroke || fn === OPS.closeStroke) {
+      pendingPath = null;
+    } else if (fn === OPS.showText || fn === OPS.showSpacedText) {
+      const glyphs = (args && args[0]) || [];
+      let str = '';
+      if (Array.isArray(glyphs)) {
+        for (const g of glyphs) {
+          if (g && typeof g === 'object' && typeof g.unicode === 'string') str += g.unicode;
+          else if (typeof g === 'string') str += g;
+        }
+      }
+      if (textMatrix && str.trim()) {
+        events.push({
+          kind: 'text',
+          i,
+          x: Number(textMatrix[4]) || 0,
+          y: Number(textMatrix[5]) || 0,
+          str: str.trim(),
+          fillColor: cloneColor(fillColor),
+          renderMode: textRenderingMode,
+        });
+      }
+    }
+  }
+
+  const colorsApproxEqual = (a, b, tol = 12) => {
+    if (!a || !b) return false;
+    return (
+      Math.abs(a[0] - b[0]) <= tol &&
+      Math.abs(a[1] - b[1]) <= tol &&
+      Math.abs(a[2] - b[2]) <= tol
+    );
+  };
+  const isWhiteish = (c) => c && c.every((v) => v >= 240);
+
+  const textBboxFor = (e) => {
+    const txW = Math.max(4, e.str.length * 5);
+    const txH = 8;
+    return {
+      x1: e.x,
+      x2: e.x + txW,
+      y1: e.y - 1,
+      y2: e.y + txH,
+    };
+  };
+  const rectCoversBbox = (r, b) =>
+    r.x1 <= b.x1 + 0.5 && r.x2 + 0.5 >= b.x2 && r.y1 <= b.y1 + 0.5 && r.y2 + 0.5 >= b.y2;
+
+  const hidden = [];
+  for (let idx = 0; idx < events.length; idx++) {
+    const e = events[idx];
+    if (e.kind !== 'text') continue;
+
+    let oculto = false;
+    let motivo = null;
+
+    // 1) Modo de render invisible (estándar de PDFs OCR-over-image).
+    if (e.renderMode === 3) {
+      oculto = true;
+      motivo = 'render_mode_3';
+    }
+
+    // 2) Texto blanco/casi-blanco: sólo se considera oculto si NO hay un
+    //    rectángulo anterior con color oscuro que pase por el punto de
+    //    origen del texto. Es el típico "título blanco sobre cabecera".
+    //    Verificamos sobre el punto (x, y) y no sobre toda la bbox para
+    //    tolerar rects que se solapan parcialmente con el texto.
+    if (!oculto && isWhiteish(e.fillColor)) {
+      let tieneFondoOscuro = false;
+      for (let j = idx - 1; j >= 0; j--) {
+        const r = events[j];
+        if (r.kind !== 'rect') continue;
+        const rw = r.x2 - r.x1;
+        const rh = r.y2 - r.y1;
+        if (rw < 4 || rh < 4) continue;
+        const punto1 = e.x >= r.x1 - 0.5 && e.x <= r.x2 + 0.5 && e.y >= r.y1 - 0.5 && e.y <= r.y2 + 0.5;
+        const punto2 = e.x + 1 >= r.x1 - 0.5 && e.x + 1 <= r.x2 + 0.5 && e.y + 4 >= r.y1 - 0.5 && e.y + 4 <= r.y2 + 0.5;
+        if (!punto1 && !punto2) continue;
+        if (r.fillColor && !isWhiteish(r.fillColor)) {
+          tieneFondoOscuro = true;
+          break;
+        }
+      }
+      if (!tieneFondoOscuro) {
+        oculto = true;
+        motivo = 'white_text_no_dark_bg';
+      }
+    }
+
+    // 3) Texto cubierto por un rectángulo POSTERIOR (mimetismo de color),
+    //    típico cuando alguien tapa contenido con un fondo del mismo tono.
+    if (!oculto) {
+      const bbox = textBboxFor(e);
+      for (let j = idx + 1; j < events.length; j++) {
+        const r = events[j];
+        if (r.kind !== 'rect') continue;
+        const rw = r.x2 - r.x1;
+        const rh = r.y2 - r.y1;
+        if (rw < 4 || rh < 4) continue;
+        if (!rectCoversBbox(r, bbox)) continue;
+        if (colorsApproxEqual(r.fillColor, e.fillColor)) {
+          oculto = true;
+          motivo = 'covered_by_same_color_rect';
+          break;
+        }
+      }
+    }
+
+    if (oculto) {
+      hidden.push({ x: e.x, y: e.y, str: e.str, motivo });
+    }
+  }
+  return hidden;
+}
+
+/**
+ * Filtra los items de texto que caen dentro de alguna “caja oculta”
+ * detectada por `detectHiddenTextBoxes`. La heurística empareja por
+ * cercanía de la coordenada (x, y) y prefijo de string (los items de
+ * `getTextContent` suelen recortarse a fragmentos más pequeños que los
+ * showText originales). Si en una página no hay items ocultos, devuelve
+ * la lista intacta.
+ */
+function filterOutHiddenItems(items, hiddenBoxes) {
+  if (!Array.isArray(hiddenBoxes) || hiddenBoxes.length === 0) return items;
+  const POS_TOL = 1.5;
+  return items.filter((it) => {
+    for (const h of hiddenBoxes) {
+      // Mismo punto inicial (≈) y misma cadena o el item es subcadena del oculto.
+      const dx = Math.abs(it.x - h.x);
+      const dy = Math.abs(it.y - h.y);
+      if (dx > POS_TOL || dy > POS_TOL) continue;
+      const hStr = (h.str || '').trim();
+      const iStr = (it.str || '').trim();
+      if (!hStr || !iStr) continue;
+      if (hStr === iStr || hStr.startsWith(iStr) || iStr.startsWith(hStr)) {
+        return false;
+      }
+    }
+    return true;
+  });
+}
+
 function bucketRows(items) {
   const sorted = [...items].sort((a, b) => {
     if (Math.abs(a.y - b.y) > ROW_Y_TOL) return b.y - a.y;
@@ -2274,12 +2501,22 @@ async function extractPerfilPdfTablesFromBuffer(buffer, options = {}) {
 
     /** Todas las páginas: texto + rectángulos en un solo eje Y para tablas cortadas entre páginas. */
     const perPage = [];
+    let totalHiddenFiltered = 0;
     for (let pi = 1; pi <= numpages; pi++) {
       const page = await pdf.getPage(pi);
       const textContent = await page.getTextContent({ normalizeWhitespace: false, disableCombineTextItems: false });
-      const pageItems = parseItems(textContent);
+      const pageItemsRaw = parseItems(textContent);
+      const hiddenBoxes = await detectHiddenTextBoxes(page, pdfjsLib).catch(() => []);
+      const pageItems = hiddenBoxes.length > 0
+        ? filterOutHiddenItems(pageItemsRaw, hiddenBoxes)
+        : pageItemsRaw;
+      totalHiddenFiltered += pageItemsRaw.length - pageItems.length;
       const pageRects = await extractRectanglesFromPage(page, pdfjsLib);
       perPage.push({ items: pageItems, rects: pageRects });
+    }
+    if (debug && totalHiddenFiltered > 0) {
+      // No interferimos con stdout normal; sólo reportamos en debug.
+      console.error(`[hidden-text] filtrados ${totalHiddenFiltered} items invisibles`);
     }
 
     const mergedItems = [];
@@ -2362,5 +2599,9 @@ async function extractPerfilPdfTablesFromBuffer(buffer, options = {}) {
   }
 }
 
-module.exports = { extractPerfilPdfTablesFromBuffer };
+module.exports = {
+  extractPerfilPdfTablesFromBuffer,
+  // Exportados sólo para introspección desde scripts de diagnóstico.
+  _detectHiddenTextBoxes: detectHiddenTextBoxes,
+};
 
