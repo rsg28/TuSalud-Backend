@@ -9,6 +9,7 @@ const ExcelJS = require('exceljs');
   }
   const maxRows = Number(process.argv[3] || 30);
   const maxCols = Number(process.argv[4] || 20);
+  const skipEmpty = process.argv.includes('--skip-empty');
   const buf = fs.readFileSync(file);
   const wb = new ExcelJS.Workbook();
   await wb.xlsx.load(buf);
@@ -28,6 +29,7 @@ const ExcelJS = require('exceljs');
         if (v && typeof v === 'object' && 'result' in v) v = v.result;
         values.push(String(v ?? '').replace(/\s+/g, ' ').trim());
       }
+      if (skipEmpty && values.every((v) => v === '')) continue;
       console.log(`R${r}: ${JSON.stringify(values)}`);
     }
     if (ws.rowCount > maxRows) console.log(`  ... ${ws.rowCount - maxRows} filas más`);

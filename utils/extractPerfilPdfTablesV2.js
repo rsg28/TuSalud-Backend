@@ -495,11 +495,104 @@ function maxColsOf(matrix) {
   return matrix.reduce((n, r) => Math.max(n, r.length), 0);
 }
 
+/**
+ * Recopila candidatos a título de la tabla recorriendo TODAS las filas de
+ * cabecera (las que están antes de la primera fila con marcas tipo X / NO
+ * INDICA). Devuelve los textos únicos en orden de aparición, descartando:
+ *
+ *  - cabeceras de columnas evidentes ("N°", "EXAMENES MEDICOS A REALIZAR",
+ *    "EXAMEN DE INGRESO/PERIODICO/RETIRO", "PRE OCUPACIONAL", "ANUAL",
+ *    "RETIRO", "OPERATIVO", "ADMINISTRATIVO", etc.);
+ *  - textos repetidos por colspan dentro de una misma fila.
+ *
+ *  No depende de textos del cliente: sólo elimina vocabulario propio de
+ *  cabeceras de protocolos (todas las palabras en español/genéricas usuales).
+ */
+function extractTableTitleCandidates(cellsMatrix) {
+  if (!Array.isArray(cellsMatrix) || cellsMatrix.length === 0) return [];
+
+  // Primera fila con marca tipo X / NO INDICA — los headers terminan ahí.
+  let firstDataRow = -1;
+  for (let i = 0; i < cellsMatrix.length; i++) {
+    const row = cellsMatrix[i] || [];
+    const hasMark = row.some((v) => {
+      const t = normalizeCell(v);
+      return /^x$/i.test(t) || /^[✓✔]$/.test(t) || /^no\s*indica$/i.test(t) || /^no\s*aplica$/i.test(t);
+    });
+    if (hasMark) {
+      firstDataRow = i;
+      break;
+    }
+  }
+  const headerRows =
+    firstDataRow >= 0
+      ? cellsMatrix.slice(0, firstDataRow)
+      : cellsMatrix.slice(0, Math.min(4, cellsMatrix.length));
+
+  const HEADER_TOKEN_RX = [
+    /^(n\s*[°º.o]?|nro\.?|num\.?|#|item|i?d)$/i,
+    /^examen(es)?(\s+(medicos?|m[eé]dicos?))?(\s+a\s+realizar)?$/i,
+    /^examen\s+(de\s+)?(ingreso|periodic[oa]|peri[oó]dic[oa]|retiro|anual|complementari[oa])$/i,
+    /^(pre\s+ocupacional|preocupacional|pre[\s-]?ingreso|preingreso|peri[oó]dic[oa]|anual|retiro|egreso|empo|emoa|empr|emrp|emr)$/i,
+    /^(operativo|administrativo|administrativ[oa]s?|empleados?)$/i,
+    /^(tipo\s+de\s+examen|grupo\s+ocupacional|descripci[oó]n(\s+de\s+evaluaciones)?|evaluaciones?)$/i,
+    /^(precio\s+sin\s+igv|total|subtotal|adicionales|condicional)$/i,
+    // Errores comunes de fórmulas de Excel exportados al PDF (no son títulos).
+    /^#(¡)?(ref|n\s*\/?\s*a|null|name|value|div\s*\/?\s*0|num)!?\??$/i,
+  ];
+
+  const seen = new Set();
+  const cands = [];
+  for (const row of headerRows) {
+    const dedupCols = new Set();
+    for (const cell of row || []) {
+      const v = normalizeCell(cell);
+      if (!v) continue;
+      // Saltar valores muy cortos (probablemente markers o números).
+      if (v.length < 4) continue;
+      if (dedupCols.has(v)) continue;
+      dedupCols.add(v);
+      const isColumnHeader = HEADER_TOKEN_RX.some((rx) => rx.test(v));
+      if (isColumnHeader) continue;
+      if (seen.has(v)) continue;
+      seen.add(v);
+      cands.push(v);
+    }
+  }
+  return cands;
+}
+
 function tableNameFromBlock(block, fallback) {
-  if (!block.length) return fallback;
-  const first = block[0].cells.slice(0, LEFT_COLS).map(normalizeCell).join(' ').trim();
-  if (!first) return fallback;
-  return first.length > 48 ? fallback : first.replace(/\s+/g, ' ');
+  const cells = (block || []).map((b) => (Array.isArray(b) ? b : b.cells || []));
+  const cands = extractTableTitleCandidates(cells);
+  return cands[0] || fallback;
+}
+
+/**
+ * Post-pase global: si dos tablas comparten un mismo candidato a título
+ * (texto repetido en sus cabeceras, p. ej. "RED + EKG" presente en varias
+ * tablas), elegimos para cada una el primer candidato discriminante. Si
+ * todos los candidatos están compartidos, conservamos `Tabla i`.
+ */
+function assignUniqueTableNames(tables, fallbackPrefix = 'Tabla') {
+  if (!Array.isArray(tables) || tables.length === 0) return tables;
+  const candidatesByTable = tables.map((t) => extractTableTitleCandidates(t.celdas || []));
+  const freq = new Map();
+  for (const cs of candidatesByTable) {
+    const seenInTable = new Set();
+    for (const c of cs) {
+      if (seenInTable.has(c)) continue;
+      seenInTable.add(c);
+      freq.set(c, (freq.get(c) || 0) + 1);
+    }
+  }
+  for (let i = 0; i < tables.length; i++) {
+    const cs = candidatesByTable[i];
+    const unique = cs.find((c) => freq.get(c) === 1);
+    const chosen = unique || cs[0] || `${fallbackPrefix} ${i + 1}`;
+    tables[i].nombre = chosen;
+  }
+  return tables;
 }
 
 /**
@@ -2571,6 +2664,11 @@ async function extractPerfilPdfTablesFromBuffer(buffer, options = {}) {
     tables.forEach((t, idx) => {
       t.id = idx + 1;
     });
+    // Re-asignamos los nombres globalmente: cuando varias tablas comparten
+    // un mismo encabezado superior (típico de PDFs con un “título de
+    // sección” común y un subtítulo único por tabla) el nombre individual
+    // debe ser el subtítulo discriminante, no el común a todas.
+    tables = assignUniqueTableNames(tables);
 
     let debugInfo = null;
     if (debug) {
