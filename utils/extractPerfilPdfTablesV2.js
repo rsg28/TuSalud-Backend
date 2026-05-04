@@ -2569,6 +2569,7 @@ async function extractTablesFromItemRectSlice(items, rects, debug, options = {})
       const startRowIdx = findBlockStartRowInMatrix(matrixByBorders, celdas);
       const geoCtx = collectContextTextAboveTableRow(items, sortedYDesc, startRowIdx);
       const contextoEncima = [anchorContextPref, geoCtx].filter(Boolean).join('\n').trim().slice(0, 950);
+      const geoCtxTrim = String(geoCtx || '').trim();
       const dbg = (tag, m) => {
         if (!process.env.DEBUG_PIPE2) return;
         const s = m.find((r) => (r[1] || '').toString().startsWith('BK ESPUTO'));
@@ -2610,6 +2611,7 @@ async function extractTablesFromItemRectSlice(items, rects, debug, options = {})
         leftHierarchy: hierarchy,
       };
       if (contextoEncima) out.contexto_encima = contextoEncima;
+      if (geoCtxTrim) out.contexto_encima_tipo = geoCtxTrim.slice(0, 900);
       return out;
     });
     if (debug) {
