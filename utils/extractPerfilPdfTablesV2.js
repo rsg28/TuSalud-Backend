@@ -2337,6 +2337,149 @@ function itemYInBand(it, yLo, yHi) {
   return it.y >= yLo && it.y <= yHi;
 }
 
+/** Firma textual de una fila de celdas (para emparejar bloques con la matriz). */
+function rowTextSignature(row) {
+  if (!Array.isArray(row)) return '';
+  return row
+    .map((c) => normalizeCell(c))
+    .filter(Boolean)
+    .slice(0, 12)
+    .join('\u001e');
+}
+
+/**
+ * Localiza la fila de `matrix` donde empieza un `block` (matriz ya partida
+ * pero alineada fila a fila con el origen antes de transformaciones fuertes).
+ */
+function findBlockStartRowInMatrix(matrix, block) {
+  if (!Array.isArray(matrix) || !Array.isArray(block) || !block.length) return 0;
+  const sig0 = rowTextSignature(block[0]);
+  if (!sig0) return 0;
+  const maxCheck = Math.min(block.length, 6);
+  outer: for (let i = 0; i <= matrix.length - maxCheck; i++) {
+    if (rowTextSignature(matrix[i]) !== sig0) continue;
+    for (let k = 1; k < maxCheck; k++) {
+      if (rowTextSignature(matrix[i + k]) !== rowTextSignature(block[k])) continue outer;
+    }
+    return i;
+  }
+  for (let i = 0; i < matrix.length; i++) {
+    if (rowTextSignature(matrix[i]) === sig0) return i;
+  }
+  return 0;
+}
+
+/**
+ * Frase típica de encabezado de protocolo (ANEXO, tipo de EMO, etc.) que a
+ * veces cae en la misma banda Y que la primera fila de la rejilla — no
+ * llega a “flotar” con y estrictamente mayor que el borde superior.
+ * Patrones genéricos, sin clientes concretos.
+ */
+function looksLikeProtocolEmoContextLine(s) {
+  const t = normalizeCell(s);
+  if (!t || t.length > 220) return false;
+  const f = foldForCompare(t);
+  if (/^\s*ANEXO\s*0?\d+/i.test(t)) return true;
+  if (/\bNOTA\s*\d+\s*:/i.test(t) && t.length <= 100) return true;
+  if (/\bEX[ÁA]MEN(ES)?\s+M[EÉ]DICO\b/i.test(t)) return true;
+  if (/\bPREOCUPACIONAL\b/i.test(f)) return true;
+  if (/\bPREOCUPACIONAL\s+O\s+INGRESO\b/i.test(f)) return true;
+  if (/\bINGRESO\b/.test(f) && /\bEX[ÁA]MEN\b/i.test(t)) return true;
+  if (/\bANUAL\b/i.test(f) && /\bEX[ÁA]MEN\b/i.test(t)) return true;
+  if (/\bRETIRO\b/i.test(f) && /\bEX[ÁA]MEN\b/i.test(t)) return true;
+  if (/\bPOST\s+OCUPACIONAL\b/i.test(f)) return true;
+  if (/\bPERI[OÓ]DICO\b/i.test(f) && /\bEX[ÁA]MEN\b/i.test(t)) return true;
+  if (/\bM[EÉ]DICO\s+OCUPACIONAL\b/i.test(f) && t.length <= 160) return true;
+  if (/\bEX[ÁA]MENES\s+CONDICIONALES\b/i.test(f)) return true;
+  return false;
+}
+
+/**
+ * Texto libre que quedó por encima de la primera fila de la rejilla (títulos
+ * de sección, tipo de EMO, ANEXO, etc.) — no entra en las celdas pero es
+ * semánticamente parte de la tabla. Se devuelve como texto plano multilínea.
+ *
+ * `sortedYDesc`: líneas horizontales Y ordenadas de mayor a menor (eje PDF.js).
+ * `startRowIndex`: índice de fila de matriz = banda entre sortedYDesc[i] y sortedYDesc[i+1].
+ */
+function collectContextTextAboveTableRow(items, sortedYDesc, startRowIndex) {
+  if (!Array.isArray(items) || !items.length) return '';
+  if (!Array.isArray(sortedYDesc) || sortedYDesc.length < 2) return '';
+  const si = Math.max(0, Math.min(startRowIndex, sortedYDesc.length - 2));
+  const yTop = sortedYDesc[si];
+  const yBotRow = si + 1 < sortedYDesc.length ? sortedYDesc[si + 1] : yTop - 400;
+  const CTX_Y_MAX = 130;
+  const candidates = items.filter((it) => {
+    const t = normalizeCell(it.str);
+    if (!t || t.length < 3) return false;
+    if (/^[\d.,;:\s]+$/.test(t)) return false;
+    const aboveGrid = it.y > yTop && it.y <= yTop + CTX_Y_MAX;
+    const inFirstGridRow =
+      it.y <= yTop + ROW_Y_TOL * 2.5 && it.y >= yBotRow - ROW_Y_TOL * 2.5;
+    const contextInFirstBand = inFirstGridRow && looksLikeProtocolEmoContextLine(t);
+    return aboveGrid || contextInFirstBand;
+  });
+  if (!candidates.length) return '';
+  candidates.sort((a, b) => b.y - a.y);
+  const lines = [];
+  let cur = [];
+  let curY = null;
+  const flush = () => {
+    if (!cur.length) return;
+    cur.sort((a, b) => a.x - b.x);
+    const txt = cur
+      .map((i) => normalizeCell(i.str))
+      .join(' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (txt.length >= 4) lines.push(txt);
+    cur = [];
+    curY = null;
+  };
+  for (const it of candidates) {
+    if (curY == null || Math.abs(it.y - curY) <= ROW_Y_TOL * 2) {
+      cur.push(it);
+      curY = curY == null ? it.y : curY * 0.55 + it.y * 0.45;
+    } else {
+      flush();
+      cur.push(it);
+      curY = it.y;
+    }
+  }
+  flush();
+  const joined = lines.join('\n').trim().slice(0, 900);
+  return joined;
+}
+
+/**
+ * Textos de anclas semánticas (ANEXO, tipo de EMO, etc.) que quedaron
+ * fuera de la rejilla pero en la misma rebanada vertical que `items`.
+ * En PDF.js, y mayor ≈ más arriba en la página.
+ */
+function sliceAnchorTextsAbove(anchors, items) {
+  if (!Array.isArray(anchors) || !anchors.length || !Array.isArray(items) || !items.length) {
+    return '';
+  }
+  const sliceTopY = Math.max(...items.map((it) => it.y));
+  const span = 220;
+  const above = anchors
+    .filter((a) => a.yTop > sliceTopY && a.yTop < sliceTopY + span)
+    .sort((a, b) => a.yTop - b.yTop);
+  /** Las más cercanas geométricamente a la parte superior del slice. */
+  const closest = above.slice(0, 5);
+  closest.sort((a, b) => b.yTop - a.yTop);
+  const uniq = [];
+  const seen = new Set();
+  for (const a of closest) {
+    const t = normalizeCell(a.text);
+    if (!t || seen.has(t)) continue;
+    seen.add(t);
+    uniq.push(t);
+    if (uniq.length >= 6) break;
+  }
+  return uniq.join('\n');
+}
+
 function rectOverlapsVerticalBand(r, yLo, yHi) {
   const r1 = Math.min(r.y1, r.y2);
   const r2 = Math.max(r.y1, r.y2);
@@ -2377,6 +2520,7 @@ function buildSemanticSlicesOrFull(items, rects) {
  */
 async function extractTablesFromItemRectSlice(items, rects, debug, options = {}) {
   const anchorMode = !!options.anchorMode;
+  const anchorContextPref = normalizeCell(options.anchorContextText || '');
   let tables = [];
   let debugInfo = null;
   const grid = tryBuildGridFromRectangles(rects);
@@ -2420,7 +2564,11 @@ async function extractTablesFromItemRectSlice(items, rects, debug, options = {})
     const textRows = bucketRows(items);
     const textBlocks = splitRowBlocksByVerticalGaps(textRows);
     const blocks = chooseBorderTableBlocks(matrixByBorders, trimmedYLines, textBlocks, { anchorMode });
+    const sortedYDesc = [...trimmedYLines].sort((a, b) => b - a);
     tables = blocks.map((celdas, i) => {
+      const startRowIdx = findBlockStartRowInMatrix(matrixByBorders, celdas);
+      const geoCtx = collectContextTextAboveTableRow(items, sortedYDesc, startRowIdx);
+      const contextoEncima = [anchorContextPref, geoCtx].filter(Boolean).join('\n').trim().slice(0, 950);
       const dbg = (tag, m) => {
         if (!process.env.DEBUG_PIPE2) return;
         const s = m.find((r) => (r[1] || '').toString().startsWith('BK ESPUTO'));
@@ -2453,7 +2601,7 @@ async function extractTablesFromItemRectSlice(items, rects, debug, options = {})
       const cleaned = withoutDates;
       dbg('cleaned', cleaned);
       const hierarchy = buildLeftHierarchy(cleaned, LEFT_COLS);
-      return {
+      const out = {
         id: i + 1,
         nombre: tableNameFromBlock(cleaned.map((cells) => ({ cells })), `Tabla ${i + 1}`),
         filas: cleaned.length,
@@ -2461,6 +2609,8 @@ async function extractTablesFromItemRectSlice(items, rects, debug, options = {})
         celdas: cleaned,
         leftHierarchy: hierarchy,
       };
+      if (contextoEncima) out.contexto_encima = contextoEncima;
+      return out;
     });
     if (debug) {
       debugInfo = {
@@ -2639,11 +2789,12 @@ async function extractPerfilPdfTablesFromBuffer(buffer, options = {}) {
     const sliceDebugs = [];
     let tables = [];
     for (const slice of slices) {
+      const anchorCtx = sliceAnchorTextsAbove(semanticAnchors, slice.items);
       const { tables: part, debugInfo: d } = await extractTablesFromItemRectSlice(
         slice.items,
         slice.rects,
         debug,
-        { anchorMode: !!slice.anchorMode }
+        { anchorMode: !!slice.anchorMode, anchorContextText: anchorCtx }
       );
       if (process.env.DEBUG_SLICES) {
         console.error('[slice->tables] band yHi=', slice.band ? slice.band.yHi.toFixed(1) : 'null', 'items=', slice.items.length, 'emitted=', part.length);
