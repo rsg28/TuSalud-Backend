@@ -12,9 +12,15 @@
  *   - emo_perfil_examenes    (incluye reglas de sexo, edad, condicional)
  *   - emo_perfil_precio      (solo cuando el precio legacy > 0)
  *
+ * IDEMPOTENTE: re-correr el script no duplica datos.
+ *   - examenes:    ON DUPLICATE KEY (identificador único) → no duplica.
+ *   - emo_perfiles: cache por (nombre, tipo, empresa_id) — si ya existe esa
+ *                   combinación en BD, se reusa el perfil_id.
+ *   - asignaciones / perfil_examenes: INSERT IGNORE.
+ *   - precios:     ON DUPLICATE KEY UPDATE.
+ *
  * Prerrequisitos:
- *   - Ejecutar primero scripts/rediseno_schema_v2.sql (deja el catálogo EMO
- *     en estado limpio).
+ *   - Schema base aplicado (scripts/tusalud_schema_mysql.sql ya ejecutado).
  *   - Variables DB_* configuradas en .env (mismo archivo que usa el backend).
  *
  * Uso:
@@ -23,6 +29,8 @@
  *        [--dry-run]
  *
  * Por defecto busca el CSV en el Downloads del usuario actual.
+ * Si el nombre incluye espacios o paréntesis (ej. "cotizacion (2).csv"),
+ * pasalo entre comillas en --csv.
  */
 
 const fs = require('fs');
@@ -48,8 +56,21 @@ for (let i = 0; i < args.length; i++) {
   }
 }
 
-const CSV_PATH = argMap.csv
-  || path.join(process.env.USERPROFILE || process.env.HOME || '.', 'Downloads', 'cotizacion.csv');
+// Auto-detección: si no se pasa --csv, busca primero cotizacion.csv y si no
+// existe prueba con cotizacion (2).csv (nombre típico al re-descargar el dump).
+function autodetectCsv() {
+  const home = process.env.USERPROFILE || process.env.HOME || '.';
+  const candidatos = [
+    path.join(home, 'Downloads', 'cotizacion.csv'),
+    path.join(home, 'Downloads', 'cotizacion (2).csv'),
+  ];
+  for (const c of candidatos) {
+    if (fs.existsSync(c)) return c;
+  }
+  return candidatos[0];
+}
+
+const CSV_PATH = argMap.csv || autodetectCsv();
 const DRY_RUN = argMap['dry-run'] === true || argMap['dry-run'] === 'true';
 
 // -----------------------------------------------------------------------------
@@ -220,6 +241,9 @@ async function main() {
     const sedeCache = new Map();      // clugar_legacy → sede_id
     const categoriaCache = new Map(); // idCola → categoria_id
     const examenCache = new Map();    // codigo legacy → examen_id
+    // Cache idempotente perfil: clave = `${nombre.toUpperCase()}||${tipo}||${empresa_id}` → perfil_id
+    // Permite re-correr el script sin duplicar perfiles/asignaciones existentes.
+    const perfilEmpresaCache = new Map();
 
     const stats = {
       rows: rows.length,
@@ -228,9 +252,13 @@ async function main() {
       empresas_existentes: 0,
       sedes_creadas: 0,
       categorias_creadas: 0,
+      categorias_existentes: 0,
       examenes_creados: 0,
+      examenes_existentes: 0,
       perfiles_creados: 0,
+      perfiles_reusados: 0,
       asignaciones_creadas: 0,
+      asignaciones_existentes: 0,
       perfil_examenes_insertados: 0,
       precios_insertados: 0,
       nombres_ambiguos: [],
@@ -244,6 +272,29 @@ async function main() {
     // Seed de sedes existentes por codigo_legacy
     const [existingSedes] = await conn.query('SELECT id, codigo_legacy FROM sedes WHERE codigo_legacy IS NOT NULL');
     for (const s of existingSedes) sedeCache.set(String(s.codigo_legacy), s.id);
+
+    // Seed de categorías existentes por id_cola
+    const [existingCategorias] = await conn.query(
+      'SELECT id, id_cola FROM emo_categorias WHERE id_cola IS NOT NULL'
+    );
+    for (const c of existingCategorias) categoriaCache.set(c.id_cola, c.id);
+
+    // Seed de exámenes existentes por identificador legacy
+    const [existingExamenes] = await conn.query(
+      'SELECT id, identificador FROM examenes WHERE identificador IS NOT NULL'
+    );
+    for (const e of existingExamenes) examenCache.set(Number(e.identificador), e.id);
+
+    // Seed de perfiles+asignaciones existentes (idempotencia entre corridas)
+    const [existingPerfilEmpresa] = await conn.query(
+      `SELECT p.id AS perfil_id, p.nombre, p.tipo, a.empresa_id
+         FROM emo_perfiles p
+         JOIN emo_perfil_asignacion a ON a.perfil_id = p.id`
+    );
+    for (const r of existingPerfilEmpresa) {
+      const k = `${(r.nombre || '').trim().toUpperCase()}||${r.tipo}||${r.empresa_id}`;
+      perfilEmpresaCache.set(k, r.perfil_id);
+    }
 
     // ---------------------------------------------------------------------
     // Deduplicar filas (nombre, ruc) quedándonos con la más reciente (tfecha mayor).
@@ -351,6 +402,8 @@ async function main() {
           }
           categoriaCache.set(idCola, categoriaId);
           stats.categorias_creadas++;
+        } else {
+          stats.categorias_existentes++;
         }
 
         if (!Array.isArray(cat.datos)) continue;
@@ -362,7 +415,7 @@ async function main() {
             const nombreEx = (ex.nombre || '').trim();
             if (!nombreEx) continue;
 
-            let examenId = examenCache.get(codigo);
+            let examenId = examenCache.get(Number(codigo));
             if (!examenId) {
               if (DRY_RUN) {
                 examenId = -3000 - Number(codigo);
@@ -376,8 +429,10 @@ async function main() {
                 );
                 examenId = res.insertId;
               }
-              examenCache.set(codigo, examenId);
+              examenCache.set(Number(codigo), examenId);
               stats.examenes_creados++;
+            } else {
+              stats.examenes_existentes++;
             }
 
             const reglas = extractReglas(ex);
@@ -393,27 +448,40 @@ async function main() {
         }
       }
 
-      // -------- Perfil + asignación --------
-      let perfilId;
-      if (DRY_RUN) {
-        perfilId = -4000 - stats.perfiles_creados;
+      // -------- Perfil + asignación (idempotente: reusa si ya existe para
+      // la combinación nombre + tipo + empresa) --------
+      const perfilCacheKey = `${nombrePerfil.toUpperCase()}||${tipoPerfil}||${empresaId}`;
+      let perfilId = perfilEmpresaCache.get(perfilCacheKey);
+      let perfilEsNuevo = false;
+      if (!perfilId) {
+        if (DRY_RUN) {
+          perfilId = -4000 - stats.perfiles_creados;
+        } else {
+          const [res] = await conn.query(
+            'INSERT INTO emo_perfiles (nombre, tipo) VALUES (?, ?)',
+            [nombrePerfil, tipoPerfil]
+          );
+          perfilId = res.insertId;
+        }
+        perfilEmpresaCache.set(perfilCacheKey, perfilId);
+        stats.perfiles_creados++;
+        perfilEsNuevo = true;
       } else {
-        const [res] = await conn.query(
-          'INSERT INTO emo_perfiles (nombre, tipo) VALUES (?, ?)',
-          [nombrePerfil, tipoPerfil]
-        );
-        perfilId = res.insertId;
+        stats.perfiles_reusados++;
       }
-      stats.perfiles_creados++;
 
       if (!DRY_RUN) {
-        await conn.query(
-          `INSERT INTO emo_perfil_asignacion (perfil_id, empresa_id, sede_id, clugar_legacy)
+        // INSERT IGNORE: si ya hay (perfil_id, empresa_id, sede_id) no duplica.
+        const [resAsig] = await conn.query(
+          `INSERT IGNORE INTO emo_perfil_asignacion (perfil_id, empresa_id, sede_id, clugar_legacy)
            VALUES (?, ?, ?, ?)`,
           [perfilId, empresaId, sedeId, clugar ? parseInt(clugar, 10) : null]
         );
+        if (resAsig.affectedRows > 0) stats.asignaciones_creadas++;
+        else stats.asignaciones_existentes++;
+      } else if (perfilEsNuevo) {
+        stats.asignaciones_creadas++;
       }
-      stats.asignaciones_creadas++;
 
       // -------- emo_perfil_examenes --------
       if (!DRY_RUN && perfilExamenesBuffer.length > 0) {
@@ -459,14 +527,18 @@ async function main() {
     console.log('='.repeat(70));
     console.log(`Filas CSV leídas:              ${stats.rows}`);
     console.log(`Filas saltadas:                ${stats.skipped}`);
-    console.log(`Filas duplicadas (dedup):      ${stats.duplicados}`);
+    console.log(`Filas duplicadas en CSV:       ${stats.duplicados}`);
     console.log(`Empresas creadas nuevas:       ${stats.empresas_creadas}`);
     console.log(`Empresas ya existentes:        ${stats.empresas_existentes}`);
     console.log(`Sedes creadas (legacy):        ${stats.sedes_creadas}`);
-    console.log(`Categorías creadas:            ${stats.categorias_creadas}`);
-    console.log(`Exámenes creados:              ${stats.examenes_creados}`);
-    console.log(`Perfiles creados:              ${stats.perfiles_creados}`);
+    console.log(`Categorías creadas nuevas:     ${stats.categorias_creadas}`);
+    console.log(`Categorías ya existentes:      ${stats.categorias_existentes}`);
+    console.log(`Exámenes creados nuevos:       ${stats.examenes_creados}`);
+    console.log(`Exámenes ya existentes:        ${stats.examenes_existentes}`);
+    console.log(`Perfiles creados nuevos:       ${stats.perfiles_creados}`);
+    console.log(`Perfiles reusados (dedup DB):  ${stats.perfiles_reusados}`);
     console.log(`Asignaciones creadas:          ${stats.asignaciones_creadas}`);
+    console.log(`Asignaciones ya existentes:    ${stats.asignaciones_existentes}`);
     console.log(`Perfil-exámenes insertados:    ${stats.perfil_examenes_insertados}`);
     console.log(`Precios insertados (>0):       ${stats.precios_insertados}`);
     console.log();

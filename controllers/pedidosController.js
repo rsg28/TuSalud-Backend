@@ -3,6 +3,27 @@ const { normalizarRol } = require('../middleware/auth');
 const {
   helpers: { emitirNotificacionAVendedorDePedido },
 } = require('./notificacionesController');
+const { buildPacienteExamenesSnapshot } = require('../utils/perfilSnapshot');
+
+/**
+ * Tras insertar las filas de paciente_examen_asignado del paciente, congela el
+ * snapshot inmutable y lo guarda en pedido_pacientes.examenes_snapshot_json.
+ * Tolerante a fallos: si algo se rompe, no aborta la operación principal
+ * (el snapshot queda NULL y se puede regenerar después).
+ */
+async function persistirSnapshotPaciente(connection, pacienteId, opts = {}) {
+  if (!pacienteId) return;
+  try {
+    const snap = await buildPacienteExamenesSnapshot(connection, pacienteId, opts);
+    if (!snap) return;
+    await connection.execute(
+      'UPDATE pedido_pacientes SET examenes_snapshot_json = ? WHERE id = ?',
+      [JSON.stringify(snap), pacienteId]
+    );
+  } catch (e) {
+    console.warn('[pedidos] snapshot paciente falló:', e?.message || e);
+  }
+}
 
 // Asegura que ningún BigInt llegue a res.json() (mysql2 puede devolver BigInt y JSON.stringify falla)
 function sanitizeForJson(obj) {
@@ -590,6 +611,14 @@ const crearPedido = async (req, res) => {
           [paciente_id, examen_id]
         );
       }
+
+      // Snapshot inmutable de los exámenes que quedaron asignados a ESTE paciente
+      // en este momento. Si después cambia el catálogo o se reasigna otro perfil,
+      // este JSON sigue reflejando lo que efectivamente le tocó a la persona.
+      await persistirSnapshotPaciente(connection, paciente_id, {
+        perfilId: emp.emo_perfil_id ?? null,
+        tipoEmo: emp.emo_tipo ?? null,
+      });
     }
 
     if (empleadosList.length > 0) {
@@ -959,6 +988,14 @@ const cargarEmpleados = async (req, res) => {
           [pacienteId, examen_id]
         );
       }
+
+      // Snapshot inmutable: se regenera cada vez que se reasigna el paciente
+      // (ON DUPLICATE KEY actualizó el perfil o los exámenes). Refleja la
+      // configuración exacta de la última carga.
+      await persistirSnapshotPaciente(connection, pacienteId, {
+        perfilId: emo_perfil_id ?? null,
+        tipoEmo: emo_tipo ?? null,
+      });
       agregados++;
     }
 

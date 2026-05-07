@@ -6,6 +6,7 @@ const {
     emitirNotificacionAVendedorDePedido,
   },
 } = require('./notificacionesController');
+const { buildPerfilSnapshot } = require('../utils/perfilSnapshot');
 
 // Estados válidos de cotización. El manager solo aprueba (APROBADA_POR_MANAGER), no rechaza.
 const ESTADOS_COTIZACION = ['BORRADOR', 'ENVIADA', 'ENVIADA_AL_CLIENTE', 'ENVIADA_AL_MANAGER', 'APROBADA_POR_MANAGER', 'APROBADA', 'RECHAZADA'];
@@ -57,6 +58,7 @@ function normalizeItem(it) {
 const SELECT_ITEMS_SQL = `
   SELECT ci.id, ci.cotizacion_id, ci.tipo_item, ci.perfil_id, ci.tipo_emo, ci.examen_id,
          ci.nombre, ci.cantidad, ci.precio_base, ci.precio_final, ci.variacion_pct, ci.subtotal,
+         ci.examenes_snapshot_json,
          ex.nombre AS examen_nombre,
          pf.nombre AS perfil_nombre
   FROM cotizacion_items ci
@@ -65,6 +67,39 @@ const SELECT_ITEMS_SQL = `
   WHERE ci.cotizacion_id = ?
   ORDER BY ci.id
 `;
+
+/**
+ * Inserta una fila en cotizacion_items y, si es PERFIL, congela el snapshot
+ * inmutable del perfil al momento (definición de exámenes, reglas, código
+ * legacy). Esto permite que cambios futuros del catálogo no falsifiquen los
+ * registros históricos. Para items tipo EXAMEN no se guarda snapshot.
+ */
+async function insertarCotizacionItem(connection, cotizacionId, it) {
+  let snapshotJson = null;
+  if (it.tipo_item === 'PERFIL' && it.perfil_id && it.tipo_emo) {
+    try {
+      const snap = await buildPerfilSnapshot(connection, it.perfil_id, it.tipo_emo);
+      if (snap) snapshotJson = JSON.stringify(snap);
+    } catch (e) {
+      // Snapshot fallido no debe romper la cotización; queda NULL.
+      console.warn('[cotizaciones] snapshot perfil falló:', e?.message || e);
+    }
+  }
+
+  await connection.execute(
+    `INSERT INTO cotizacion_items (
+      cotizacion_id, tipo_item, perfil_id, tipo_emo, examen_id,
+      nombre, cantidad, precio_base, precio_final, variacion_pct, subtotal,
+      examenes_snapshot_json
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      cotizacionId,
+      it.tipo_item, it.perfil_id, it.tipo_emo, it.examen_id,
+      it.nombre, it.cantidad, it.precio_base, it.precio_final, it.variacion_pct, it.subtotal,
+      snapshotJson,
+    ]
+  );
+}
 
 const generarNumeroCotizacion = async () => {
   const [rows] = await pool.query('SELECT COALESCE(MAX(id), 0) + 1 AS nextId FROM cotizaciones');
@@ -97,17 +132,7 @@ const crearCotizacionComplementariaConConnection = async (connection, opts) => {
   );
   const cotizacionId = result.insertId;
   for (const it of itemsNorm) {
-    await connection.execute(
-      `INSERT INTO cotizacion_items (
-        cotizacion_id, tipo_item, perfil_id, tipo_emo, examen_id,
-        nombre, cantidad, precio_base, precio_final, variacion_pct, subtotal
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        cotizacionId,
-        it.tipo_item, it.perfil_id, it.tipo_emo, it.examen_id,
-        it.nombre, it.cantidad, it.precio_base, it.precio_final, it.variacion_pct, it.subtotal,
-      ]
-    );
+    await insertarCotizacionItem(connection, cotizacionId, it);
   }
   return { cotizacionId, numero_cotizacion };
 };
@@ -334,17 +359,7 @@ const createCotizacion = async (req, res) => {
       const cotizacionId = result.insertId;
 
       for (const it of itemsNorm) {
-        await connection.execute(
-          `INSERT INTO cotizacion_items (
-            cotizacion_id, tipo_item, perfil_id, tipo_emo, examen_id,
-            nombre, cantidad, precio_base, precio_final, variacion_pct, subtotal
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [
-            cotizacionId,
-            it.tipo_item, it.perfil_id, it.tipo_emo, it.examen_id,
-            it.nombre, it.cantidad, it.precio_base, it.precio_final, it.variacion_pct, it.subtotal,
-          ]
-        );
+        await insertarCotizacionItem(connection, cotizacionId, it);
       }
 
       await connection.commit();
@@ -587,17 +602,7 @@ const updateCotizacion = async (req, res) => {
         const itemsNorm = items.map(normalizeItem);
         const total = itemsNorm.reduce((acc, it) => acc + it.subtotal, 0);
         for (const it of itemsNorm) {
-          await connection.execute(
-            `INSERT INTO cotizacion_items (
-              cotizacion_id, tipo_item, perfil_id, tipo_emo, examen_id,
-              nombre, cantidad, precio_base, precio_final, variacion_pct, subtotal
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            [
-              id,
-              it.tipo_item, it.perfil_id, it.tipo_emo, it.examen_id,
-              it.nombre, it.cantidad, it.precio_base, it.precio_final, it.variacion_pct, it.subtotal,
-            ]
-          );
+          await insertarCotizacionItem(connection, id, it);
         }
         await connection.execute('UPDATE cotizaciones SET total = ? WHERE id = ?', [total, id]);
       }

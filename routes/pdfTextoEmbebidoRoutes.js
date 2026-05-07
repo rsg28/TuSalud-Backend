@@ -1,6 +1,7 @@
 const express = require('express');
 const multer = require('multer');
 const { authenticateToken } = require('../middleware/auth');
+const { auditarUploadMiddleware } = require('../middleware/auditarUpload');
 const { extraerPdfTextoEmbebido } = require('../controllers/pdfTextoEmbebidoController');
 const { extraerPdfPerfilTablas } = require('../controllers/pdfPerfilTablasController');
 
@@ -55,7 +56,22 @@ function parsePdfBody(req, res, next) {
   });
 }
 
-router.post('/pdf-texto-embebido', authenticateToken, parsePdfBody, extraerPdfTextoEmbebido);
-router.post('/pdf-perfil-tablas', authenticateToken, parsePdfBody, extraerPdfPerfilTablas);
+// El middleware de auditoría va DESPUÉS del parser y ANTES del controlador:
+// así ya tiene el archivo en req.file/req.body.file_base64 y puede registrar
+// la fila + lanzar el upload a S3 en background sin bloquear el parseo.
+router.post(
+  '/pdf-texto-embebido',
+  authenticateToken,
+  parsePdfBody,
+  auditarUploadMiddleware('import.pdf-texto-embebido'),
+  extraerPdfTextoEmbebido
+);
+router.post(
+  '/pdf-perfil-tablas',
+  authenticateToken,
+  parsePdfBody,
+  auditarUploadMiddleware('import.pdf-perfil-tablas'),
+  extraerPdfPerfilTablas
+);
 
 module.exports = router;

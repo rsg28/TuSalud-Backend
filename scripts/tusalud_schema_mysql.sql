@@ -12,6 +12,7 @@
 SET NAMES utf8mb4;
 SET FOREIGN_KEY_CHECKS = 0;
 
+DROP TABLE IF EXISTS archivos_subidos;
 DROP TABLE IF EXISTS historial_pedido;
 DROP TABLE IF EXISTS solicitud_agregar_examenes;
 DROP TABLE IF EXISTS solicitud_agregar_paciente;
@@ -360,6 +361,7 @@ CREATE TABLE `cotizacion_items` (
   `precio_final` decimal(12,2) NOT NULL,
   `variacion_pct` decimal(8,2) DEFAULT '0.00',
   `subtotal` decimal(14,2) NOT NULL,
+  `examenes_snapshot_json` json DEFAULT NULL COMMENT 'Snapshot inmutable del perfil al momento de la cotización (tipo_item=PERFIL).',
   `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
   KEY `idx_cot_items_cotizacion` (`cotizacion_id`),
@@ -494,6 +496,7 @@ CREATE TABLE `pedido_pacientes` (
   `emo_tipo` enum('PREOC','ANUAL','RETIRO','VISITA') DEFAULT NULL,
   `emo_perfil_id` int DEFAULT NULL,
   `perfiles_aplicados_json` json DEFAULT NULL COMMENT 'Perfiles catálogo aplicados por paciente [{emo_perfil_id, perfil_nombre, emo_tipo}]',
+  `examenes_snapshot_json` json DEFAULT NULL COMMENT 'Snapshot inmutable de los exámenes asignados al paciente; sobrevive cambios de catálogo.',
   `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
   UNIQUE KEY `pedido_id` (`pedido_id`,`dni`),
@@ -619,6 +622,47 @@ CREATE TABLE `historial_pedido` (
   CONSTRAINT `historial_pedido_ibfk_1` FOREIGN KEY (`pedido_id`) REFERENCES `pedidos` (`id`) ON DELETE CASCADE,
   CONSTRAINT `historial_pedido_ibfk_2` FOREIGN KEY (`cotizacion_id`) REFERENCES `cotizaciones` (`id`) ON DELETE SET NULL,
   CONSTRAINT `historial_pedido_ibfk_3` FOREIGN KEY (`usuario_id`) REFERENCES `usuarios` (`id`) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+-- -----------------------------------------------------------------------------
+-- Auditoría de archivos subidos (respaldo en S3)
+-- -----------------------------------------------------------------------------
+-- Cada PDF/Excel/imagen que el usuario sube se respalda en S3 antes de procesar.
+-- Permite reproceso y auditoría si el cliente alega haber subido otro archivo.
+CREATE TABLE `archivos_subidos` (
+  `id` bigint NOT NULL AUTO_INCREMENT,
+  `usuario_id` int DEFAULT NULL,
+  `usuario_nombre` varchar(200) DEFAULT NULL,
+  `usuario_rol` varchar(30) DEFAULT NULL,
+  `fuente` varchar(80) NOT NULL COMMENT 'Ruta funcional que originó el upload (ej. import.pdf-perfil-tablas)',
+  `pedido_id` int DEFAULT NULL,
+  `cotizacion_id` int DEFAULT NULL,
+  `empresa_id` int DEFAULT NULL,
+  `nombre_original` varchar(500) DEFAULT NULL,
+  `mime_type` varchar(150) DEFAULT NULL,
+  `tamano_bytes` bigint DEFAULT NULL,
+  `sha256_hex` char(64) DEFAULT NULL,
+  `s3_bucket` varchar(150) DEFAULT NULL,
+  `s3_key` varchar(500) DEFAULT NULL,
+  `s3_region` varchar(50) DEFAULT NULL,
+  `s3_etag` varchar(100) DEFAULT NULL,
+  `s3_version_id` varchar(150) DEFAULT NULL,
+  `estado` enum('SUBIDO','ERROR_S3','PENDIENTE') NOT NULL DEFAULT 'PENDIENTE',
+  `error_mensaje` varchar(500) DEFAULT NULL,
+  `subido_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
+  `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_archivos_subidos_usuario` (`usuario_id`),
+  KEY `idx_archivos_subidos_fuente` (`fuente`),
+  KEY `idx_archivos_subidos_sha` (`sha256_hex`),
+  KEY `idx_archivos_subidos_pedido` (`pedido_id`),
+  KEY `idx_archivos_subidos_cotizacion` (`cotizacion_id`),
+  KEY `idx_archivos_subidos_empresa` (`empresa_id`),
+  CONSTRAINT `fk_archivos_subidos_usuario`     FOREIGN KEY (`usuario_id`)    REFERENCES `usuarios`     (`id`) ON DELETE SET NULL,
+  CONSTRAINT `fk_archivos_subidos_pedido`      FOREIGN KEY (`pedido_id`)     REFERENCES `pedidos`      (`id`) ON DELETE SET NULL,
+  CONSTRAINT `fk_archivos_subidos_cotizacion`  FOREIGN KEY (`cotizacion_id`) REFERENCES `cotizaciones` (`id`) ON DELETE SET NULL,
+  CONSTRAINT `fk_archivos_subidos_empresa`     FOREIGN KEY (`empresa_id`)    REFERENCES `empresas`     (`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 SET FOREIGN_KEY_CHECKS = 1;
