@@ -58,6 +58,31 @@ exports.obtenerMatrizArticulos = async (req, res) => {
 // Buscar exámenes por texto (nombre o código) en el catálogo activo.
 // Nota: para validación de importación se debe comprobar existencia en BD,
 // no solo exámenes con tarifa vigente.
+//
+// Estrategia de búsqueda (ordenada por preferencia, primer modo que devuelva
+// resultados gana):
+//   1. AND de tokens significativos contra `nombre` (los protocolos vienen
+//      con redacciones distintas; "Rx de tórax PA" debe encontrar
+//      "RAYOS X TÓRAX P.A." porque `tórax` aparece en ambos, etc.). Usamos
+//      INSTR para evitar problemas con `%` y `_` literales del usuario.
+//      Acento-insensible vía la collation `utf8mb4_0900_ai_ci` del schema.
+//   2. INSTR clásico (subcadena directa) sobre `nombre` o `codigo`. Esto es
+//      el comportamiento histórico y sirve cuando el cliente envía un único
+//      token largo (p. ej. "Hemograma").
+const STOPWORDS_BUSQUEDA = new Set([
+  'de','del','la','el','los','las','en','y','o','con','sin','para','por','que',
+  'un','una','al','solo','tipo','rm','mas','solo','mas','etc','vs','via',
+]);
+function tokensBusquedaExamen(term) {
+  return String(term || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .split(/\s+/)
+    .filter((t) => t.length >= 3 && !STOPWORDS_BUSQUEDA.has(t));
+}
+
 exports.buscarExamenes = async (req, res) => {
   try {
     const { sede_id, q } = req.query;
@@ -68,9 +93,9 @@ exports.buscarExamenes = async (req, res) => {
     if (!term || term.length < 2) {
       return res.json({ examenes: [] });
     }
-    // INSTR(s, sub) evita que `_` y `%` en el término se interpreten como comodines de SQL LIKE.
-    const [examenes] = await pool.query(
-      `SELECT 
+
+    const sedeIdInt = parseInt(sede_id, 10);
+    const baseSelect = `SELECT 
         e.id AS examen_id,
         e.nombre AS nombre_examen,
         e.categoria AS examen_principal,
@@ -78,16 +103,42 @@ exports.buscarExamenes = async (req, res) => {
       FROM examenes e
       LEFT JOIN examen_precio ep ON e.id = ep.examen_id AND ep.sede_id = ? AND (ep.vigente_hasta IS NULL OR ep.vigente_hasta >= CURDATE())
       LEFT JOIN examen_precio ep_general ON e.id = ep_general.examen_id AND ep_general.sede_id IS NULL AND (ep_general.vigente_hasta IS NULL OR ep_general.vigente_hasta >= CURDATE())
-      WHERE e.activo = 1
-        AND (
-          INSTR(LOWER(e.nombre), LOWER(?)) > 0
-          OR INSTR(LOWER(IFNULL(e.codigo, '')), LOWER(?)) > 0
-        )
-      GROUP BY e.id, e.nombre, e.categoria
-      ORDER BY e.nombre
-      LIMIT 30`,
-      [sede_id, term, term]
-    );
+      WHERE e.activo = 1`;
+
+    let examenes = [];
+
+    // Modo 1: AND de tokens contra `nombre` (cuando hay >=2 tokens útiles).
+    const tokens = tokensBusquedaExamen(term);
+    if (tokens.length >= 2) {
+      const tokenWhere = tokens.map(() => 'INSTR(LOWER(e.nombre), ?) > 0').join(' AND ');
+      const params = [sedeIdInt, ...tokens];
+      const [rows] = await pool.query(
+        `${baseSelect}
+          AND (${tokenWhere})
+        GROUP BY e.id, e.nombre, e.categoria
+        ORDER BY CHAR_LENGTH(e.nombre), e.nombre
+        LIMIT 50`,
+        params
+      );
+      examenes = rows;
+    }
+
+    // Modo 2: subcadena directa contra `nombre` o `codigo` (fallback original).
+    if (examenes.length === 0) {
+      const [rows] = await pool.query(
+        `${baseSelect}
+          AND (
+            INSTR(LOWER(e.nombre), LOWER(?)) > 0
+            OR INSTR(LOWER(IFNULL(e.codigo, '')), LOWER(?)) > 0
+          )
+        GROUP BY e.id, e.nombre, e.categoria
+        ORDER BY CHAR_LENGTH(e.nombre), e.nombre
+        LIMIT 50`,
+        [sedeIdInt, term, term]
+      );
+      examenes = rows;
+    }
+
     res.json({ examenes });
   } catch (error) {
     console.error('Error al buscar exámenes:', error);
