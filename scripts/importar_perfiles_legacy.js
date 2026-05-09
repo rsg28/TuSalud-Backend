@@ -424,7 +424,7 @@ async function main() {
                 const [res] = await conn.query(
                   `INSERT INTO examenes (identificador, nombre, categoria_id, activo)
                    VALUES (?, ?, ?, 1)
-                   ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id)`,
+                   ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id), activo = 1`,
                   [codigo, nombreEx, categoriaId]
                 );
                 examenId = res.insertId;
