@@ -3,7 +3,10 @@ const pool = require('../config/database');
 // =====================================================
 // PRECIOS - Nuevo esquema: examenes + examen_precio (por sede)
 // No existe tabla precios_empresa; precios son por examen y sede.
+// La categoría legible vive en `emo_categorias` (examenes.categoria_id).
 // =====================================================
+
+const SQL_CATEGORIA_EXAMEN = `COALESCE(NULLIF(TRIM(ec.nombre), ''), 'Otros')`;
 
 // Obtener matriz de artículos (exámenes con precios por sede)
 exports.obtenerMatrizArticulos = async (req, res) => {
@@ -19,16 +22,17 @@ exports.obtenerMatrizArticulos = async (req, res) => {
       `SELECT 
         e.id AS examen_id,
         e.nombre AS nombre_examen,
-        e.categoria AS examen_principal,
+        ${SQL_CATEGORIA_EXAMEN} AS examen_principal,
         e.codigo,
         COALESCE(ep.precio, ep_general.precio) AS precio_lista,
         COALESCE(ep.precio, ep_general.precio) AS precio_aplicable
       FROM examenes e
+      LEFT JOIN emo_categorias ec ON ec.id = e.categoria_id
       LEFT JOIN examen_precio ep ON e.id = ep.examen_id AND ep.sede_id = ?
       LEFT JOIN examen_precio ep_general ON e.id = ep_general.examen_id AND ep_general.sede_id IS NULL
       WHERE e.activo = 1
         AND (ep.id IS NOT NULL OR ep_general.id IS NOT NULL)
-      ORDER BY e.categoria, e.nombre`,
+      ORDER BY ${SQL_CATEGORIA_EXAMEN}, e.nombre`,
       [sede_id]
     );
 
@@ -108,12 +112,17 @@ exports.buscarExamenes = async (req, res) => {
       .trim();
 
     const sedeIdInt = parseInt(sede_id, 10);
+    if (!Number.isFinite(sedeIdInt) || sedeIdInt <= 0) {
+      return res.status(400).json({ error: 'sede_id inválido' });
+    }
+
     const baseSelect = `SELECT 
         e.id AS examen_id,
         e.nombre AS nombre_examen,
-        e.categoria AS examen_principal,
+        ${SQL_CATEGORIA_EXAMEN} AS examen_principal,
         COALESCE(MIN(ep.precio), MIN(ep_general.precio), 0) AS precio
       FROM examenes e
+      LEFT JOIN emo_categorias ec ON ec.id = e.categoria_id
       LEFT JOIN examen_precio ep ON e.id = ep.examen_id AND ep.sede_id = ? AND (ep.vigente_hasta IS NULL OR ep.vigente_hasta >= CURDATE())
       LEFT JOIN examen_precio ep_general ON e.id = ep_general.examen_id AND ep_general.sede_id IS NULL AND (ep_general.vigente_hasta IS NULL OR ep_general.vigente_hasta >= CURDATE())
       WHERE e.activo = 1`;
@@ -129,7 +138,7 @@ exports.buscarExamenes = async (req, res) => {
       const [rows] = await pool.query(
         `${baseSelect}
           AND (${tokenWhere})
-        GROUP BY e.id, e.nombre, e.categoria
+        GROUP BY e.id, e.nombre, e.categoria_id, ec.id, ec.nombre
         ORDER BY CHAR_LENGTH(e.nombre), e.nombre
         LIMIT 50`,
         params
@@ -147,7 +156,7 @@ exports.buscarExamenes = async (req, res) => {
             INSTR(${nomCol}, ?) > 0
             OR INSTR(${codCol}, ?) > 0
           )
-        GROUP BY e.id, e.nombre, e.categoria
+        GROUP BY e.id, e.nombre, e.categoria_id, ec.id, ec.nombre
         ORDER BY CHAR_LENGTH(e.nombre), e.nombre
         LIMIT 50`,
         [sedeIdInt, termComparable, termComparable]
@@ -158,7 +167,17 @@ exports.buscarExamenes = async (req, res) => {
     res.json({ examenes });
   } catch (error) {
     console.error('Error al buscar exámenes:', error);
-    res.status(500).json({ error: 'Error al buscar exámenes' });
+    const raw =
+      error && error.sqlMessage
+        ? String(error.sqlMessage)
+        : error && error.message
+          ? String(error.message)
+          : '';
+    const detail = raw ? raw.slice(0, 280) : '';
+    res.status(500).json({
+      error: 'Error al buscar exámenes',
+      ...(detail ? { detail } : {}),
+    });
   }
 };
 
@@ -173,15 +192,16 @@ exports.listarCategorias = async (req, res) => {
     }
     const [rows] = await pool.query(
       `SELECT
-         COALESCE(NULLIF(TRIM(e.categoria), ''), 'Otros') AS nombre,
+         ${SQL_CATEGORIA_EXAMEN} AS nombre,
          COUNT(*) AS cantidad,
          SUM(CASE WHEN COALESCE(ep.precio, ep_general.precio) IS NULL OR COALESCE(ep.precio, ep_general.precio) = 0
                   THEN 1 ELSE 0 END) AS sin_precio
        FROM examenes e
+       LEFT JOIN emo_categorias ec ON ec.id = e.categoria_id
        LEFT JOIN examen_precio ep ON e.id = ep.examen_id AND ep.sede_id = ?
        LEFT JOIN examen_precio ep_general ON e.id = ep_general.examen_id AND ep_general.sede_id IS NULL
        WHERE e.activo = 1
-       GROUP BY COALESCE(NULLIF(TRIM(e.categoria), ''), 'Otros')
+       GROUP BY ${SQL_CATEGORIA_EXAMEN}
        ORDER BY nombre`,
       [sede_id]
     );
@@ -205,16 +225,17 @@ exports.listarExamenesPorCategoria = async (req, res) => {
       `SELECT
         e.id AS examen_id,
         e.nombre AS nombre_examen,
-        e.categoria AS examen_principal,
+        ${SQL_CATEGORIA_EXAMEN} AS examen_principal,
         e.codigo,
         COALESCE(ep.precio, ep_general.precio) AS precio,
         ep.id AS precio_sede_id,
         ep_general.id AS precio_general_id
        FROM examenes e
+       LEFT JOIN emo_categorias ec ON ec.id = e.categoria_id
        LEFT JOIN examen_precio ep ON e.id = ep.examen_id AND ep.sede_id = ?
        LEFT JOIN examen_precio ep_general ON e.id = ep_general.examen_id AND ep_general.sede_id IS NULL
        WHERE e.activo = 1
-         AND (COALESCE(NULLIF(TRIM(e.categoria), ''), 'Otros') = ?)
+         AND (${SQL_CATEGORIA_EXAMEN} = ?)
        ORDER BY e.nombre`,
       [sede_id, categoriaDecoded]
     );
@@ -465,11 +486,12 @@ exports.listarPreciosSede = async (req, res) => {
     const { sede_id } = req.params;
 
     const [precios] = await pool.query(
-      `SELECT ep.*, e.nombre AS nombre_examen, e.categoria
+      `SELECT ep.*, e.nombre AS nombre_examen, ${SQL_CATEGORIA_EXAMEN} AS categoria
        FROM examen_precio ep
        JOIN examenes e ON ep.examen_id = e.id
+       LEFT JOIN emo_categorias ec ON ec.id = e.categoria_id
        WHERE (ep.sede_id = ? OR ep.sede_id IS NULL) AND e.activo = 1
-       ORDER BY e.categoria, e.nombre`,
+       ORDER BY ${SQL_CATEGORIA_EXAMEN}, e.nombre`,
       [sede_id]
     );
 
