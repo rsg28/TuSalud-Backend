@@ -61,14 +61,10 @@ exports.obtenerMatrizArticulos = async (req, res) => {
 //
 // Estrategia de búsqueda (ordenada por preferencia, primer modo que devuelva
 // resultados gana):
-//   1. AND de tokens significativos contra `nombre` (los protocolos vienen
-//      con redacciones distintas; "Rx de tórax PA" debe encontrar
-//      "RAYOS X TÓRAX P.A." porque `tórax` aparece en ambos, etc.). Usamos
-//      INSTR para evitar problemas con `%` y `_` literales del usuario.
-//      Acento-insensible vía la collation `utf8mb4_0900_ai_ci` del schema.
-//   2. INSTR clásico (subcadena directa) sobre `nombre` o `codigo`. Esto es
-//      el comportamiento histórico y sirve cuando el cliente envía un único
-//      token largo (p. ej. "Hemograma").
+//   1. AND de tokens significativos contra `nombre` normalizado (minúsculas y
+//      sin tildes en SQL) — los tokens llegan sin acento desde Node para no
+//      perder filas tipo "tórax"/"torax".
+//   2. Subcadena igualmente acento-insensible contra `nombre` o `codigo`.
 const STOPWORDS_BUSQUEDA = new Set([
   'de','del','la','el','los','las','en','y','o','con','sin','para','por','que',
   'un','una','al','solo','tipo','rm','mas','solo','mas','etc','vs','via',
@@ -83,6 +79,16 @@ function tokensBusquedaExamen(term) {
     .filter((t) => t.length >= 3 && !STOPWORDS_BUSQUEDA.has(t));
 }
 
+/** LOWER(...) en SQL + quitar tildes en vocales: los tokens ya vienen ASCII desde Node. */
+function sqlNombreComparableSinTilde(alias = 'e.nombre') {
+  const lo = `LOWER(${alias})`;
+  return `REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(
+    REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(${lo},
+      'á','a'),'é','e'),'í','i'),'ó','o'),'ú','u'),
+      'à','a'),'è','e'),'ì','i'),'ò','o'),'ù','u'),
+      'â','a'),'ê','e'),'î','i'),'ô','o'),'û','u')`;
+}
+
 exports.buscarExamenes = async (req, res) => {
   try {
     const { sede_id, q } = req.query;
@@ -93,6 +99,13 @@ exports.buscarExamenes = async (req, res) => {
     if (!term || term.length < 2) {
       return res.json({ examenes: [] });
     }
+
+    const termComparable = term
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
 
     const sedeIdInt = parseInt(sede_id, 10);
     const baseSelect = `SELECT 
@@ -110,7 +123,8 @@ exports.buscarExamenes = async (req, res) => {
     // Modo 1: AND de tokens contra `nombre` (cuando hay >=2 tokens útiles).
     const tokens = tokensBusquedaExamen(term);
     if (tokens.length >= 2) {
-      const tokenWhere = tokens.map(() => 'INSTR(LOWER(e.nombre), ?) > 0').join(' AND ');
+      const col = sqlNombreComparableSinTilde('e.nombre');
+      const tokenWhere = tokens.map(() => `INSTR(${col}, ?) > 0`).join(' AND ');
       const params = [sedeIdInt, ...tokens];
       const [rows] = await pool.query(
         `${baseSelect}
@@ -125,16 +139,18 @@ exports.buscarExamenes = async (req, res) => {
 
     // Modo 2: subcadena directa contra `nombre` o `codigo` (fallback original).
     if (examenes.length === 0) {
+      const nomCol = sqlNombreComparableSinTilde('e.nombre');
+      const codCol = sqlNombreComparableSinTilde("IFNULL(e.codigo, '')");
       const [rows] = await pool.query(
         `${baseSelect}
           AND (
-            INSTR(LOWER(e.nombre), LOWER(?)) > 0
-            OR INSTR(LOWER(IFNULL(e.codigo, '')), LOWER(?)) > 0
+            INSTR(${nomCol}, ?) > 0
+            OR INSTR(${codCol}, ?) > 0
           )
         GROUP BY e.id, e.nombre, e.categoria
         ORDER BY CHAR_LENGTH(e.nombre), e.nombre
         LIMIT 50`,
-        [sedeIdInt, term, term]
+        [sedeIdInt, termComparable, termComparable]
       );
       examenes = rows;
     }
