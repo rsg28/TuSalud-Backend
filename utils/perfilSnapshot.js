@@ -190,7 +190,38 @@ async function buildPacienteExamenesSnapshot(dbConn, pacienteId, opts = {}) {
   };
 }
 
+/**
+ * Enriquece un snapshot de perfil ya construido con el texto exacto que traía
+ * el protocolo del cliente por examen_id (evita confusiones audit/factura).
+ *
+ * @param {object} snap — resultado de buildPerfilSnapshot
+ * @param {Array<{ examen_id: number, nombre_cliente: string }>} pairs
+ */
+function mergeNombresClienteEnPerfilSnapshot(snap, pairs) {
+  if (!snap || !Array.isArray(pairs) || pairs.length === 0) return snap;
+  const map = new Map();
+  for (const p of pairs) {
+    const id = Number(p.examen_id);
+    const t = (p.nombre_cliente != null ? String(p.nombre_cliente) : '').trim();
+    if (!Number.isFinite(id) || id <= 0 || !t) continue;
+    if (!map.has(id)) map.set(id, t);
+  }
+  if (map.size === 0) return snap;
+  const categorias = snap.categorias;
+  if (!Array.isArray(categorias)) return snap;
+  for (const cat of categorias) {
+    const examenes = cat.examenes;
+    if (!Array.isArray(examenes)) continue;
+    for (const ex of examenes) {
+      const nc = map.get(Number(ex.examen_id));
+      if (nc) ex.nombre_cliente = nc;
+    }
+  }
+  return snap;
+}
+
 module.exports = {
   buildPerfilSnapshot,
   buildPacienteExamenesSnapshot,
+  mergeNombresClienteEnPerfilSnapshot,
 };

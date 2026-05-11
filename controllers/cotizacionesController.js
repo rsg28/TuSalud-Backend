@@ -6,7 +6,7 @@ const {
     emitirNotificacionAVendedorDePedido,
   },
 } = require('./notificacionesController');
-const { buildPerfilSnapshot } = require('../utils/perfilSnapshot');
+const { buildPerfilSnapshot, mergeNombresClienteEnPerfilSnapshot } = require('../utils/perfilSnapshot');
 
 // Estados válidos de cotización. El manager solo aprueba (APROBADA_POR_MANAGER), no rechaza.
 const ESTADOS_COTIZACION = ['BORRADOR', 'ENVIADA', 'ENVIADA_AL_CLIENTE', 'ENVIADA_AL_MANAGER', 'APROBADA_POR_MANAGER', 'APROBADA', 'RECHAZADA'];
@@ -27,6 +27,29 @@ function normalizeItem(it) {
   const variacion_pct = precio_base !== 0 ? ((precio_final - precio_base) / precio_base) * 100 : 0;
   const subtotal = precio_final * cantidad;
 
+  /** Snapshot JSON enviado por el cliente (p. ej. import protocolo); tiene prioridad si viene completo. */
+  let examenes_snapshot_json = null;
+  if (it.examenes_snapshot_json != null && it.examenes_snapshot_json !== '') {
+    examenes_snapshot_json =
+      typeof it.examenes_snapshot_json === 'string'
+        ? it.examenes_snapshot_json
+        : JSON.stringify(it.examenes_snapshot_json);
+  }
+
+  /** Texto exacto del protocolo por examen (para fusionar en snapshot de PERFIL). */
+  let examenes_nombre_cliente = null;
+  if (Array.isArray(it.examenes_nombre_cliente) && it.examenes_nombre_cliente.length > 0) {
+    examenes_nombre_cliente = it.examenes_nombre_cliente.map((row) => ({
+      examen_id: Number(row.examen_id),
+      nombre_cliente:
+        row.nombre_cliente != null ? String(row.nombre_cliente).trim() : '',
+    })).filter((row) => Number.isFinite(row.examen_id) && row.examen_id > 0 && row.nombre_cliente);
+    if (examenes_nombre_cliente.length === 0) examenes_nombre_cliente = null;
+  }
+
+  const nombre_cliente_protocolo =
+    typeof it.nombre_cliente_protocolo === 'string' ? it.nombre_cliente_protocolo.trim() : '';
+
   if (tipo_item === 'PERFIL') {
     if (!it.perfil_id) throw new Error('Item PERFIL requiere perfil_id');
     const tipo_emo = it.tipo_emo ? String(it.tipo_emo).toUpperCase() : null;
@@ -40,6 +63,8 @@ function normalizeItem(it) {
       examen_id: null,
       nombre: it.nombre || 'Perfil',
       cantidad, precio_base, precio_final, variacion_pct, subtotal,
+      examenes_snapshot_json,
+      examenes_nombre_cliente,
     };
   }
 
@@ -51,6 +76,8 @@ function normalizeItem(it) {
     examen_id: Number(it.examen_id),
     nombre: it.nombre || 'Examen',
     cantidad, precio_base, precio_final, variacion_pct, subtotal,
+    examenes_snapshot_json,
+    nombre_cliente_protocolo,
   };
 }
 
@@ -68,22 +95,45 @@ const SELECT_ITEMS_SQL = `
   ORDER BY ci.id
 `;
 
+function snapshotExamenSueltoProtocolo(it) {
+  const nc = it.nombre_cliente_protocolo;
+  if (!nc) return null;
+  return JSON.stringify({
+    snapshot_at: new Date().toISOString(),
+    origen: 'protocolo_import',
+    tipo: 'EXAMEN',
+    examen_id: it.examen_id,
+    nombre_catalogo: it.nombre || null,
+    nombre_cliente: nc,
+  });
+}
+
 /**
- * Inserta una fila en cotizacion_items y, si es PERFIL, congela el snapshot
- * inmutable del perfil al momento (definición de exámenes, reglas, código
- * legacy). Esto permite que cambios futuros del catálogo no falsifiquen los
- * registros históricos. Para items tipo EXAMEN no se guarda snapshot.
+ * Inserta una fila en cotizacion_items y congela snapshot cuando aplica:
+ * - PERFIL: snapshot desde BD + opcional fusión de nombres del protocolo (cliente).
+ * - EXAMEN: si viene nombre_cliente_protocolo o examenes_snapshot_json explícito.
  */
 async function insertarCotizacionItem(connection, cotizacionId, it) {
   let snapshotJson = null;
-  if (it.tipo_item === 'PERFIL' && it.perfil_id && it.tipo_emo) {
+
+  if (it.examenes_snapshot_json) {
+    snapshotJson =
+      typeof it.examenes_snapshot_json === 'string'
+        ? it.examenes_snapshot_json
+        : JSON.stringify(it.examenes_snapshot_json);
+  } else if (it.tipo_item === 'PERFIL' && it.perfil_id && it.tipo_emo) {
     try {
-      const snap = await buildPerfilSnapshot(connection, it.perfil_id, it.tipo_emo);
+      let snap = await buildPerfilSnapshot(connection, it.perfil_id, it.tipo_emo);
+      if (snap && it.examenes_nombre_cliente && it.examenes_nombre_cliente.length) {
+        snap = mergeNombresClienteEnPerfilSnapshot(snap, it.examenes_nombre_cliente);
+      }
       if (snap) snapshotJson = JSON.stringify(snap);
     } catch (e) {
-      // Snapshot fallido no debe romper la cotización; queda NULL.
       console.warn('[cotizaciones] snapshot perfil falló:', e?.message || e);
     }
+  } else if (it.tipo_item === 'EXAMEN') {
+    const snapStr = snapshotExamenSueltoProtocolo(it);
+    if (snapStr) snapshotJson = snapStr;
   }
 
   await connection.execute(
