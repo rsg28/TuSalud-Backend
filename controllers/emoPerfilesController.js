@@ -319,7 +319,9 @@ exports.listarVisiblesParaEmpresa = async (req, res) => {
       params
     );
 
-    const perfiles = rows.map((r) => {
+    const includeExamenes = String(req.query?.include_examenes ?? '').trim() === '1';
+
+    const perfilesBase = rows.map((r) => {
       const origenes = [];
       if (r.es_global) origenes.push('GLOBAL');
       if (r.asignado_empresa) origenes.push('EMPRESA');
@@ -337,7 +339,41 @@ exports.listarVisiblesParaEmpresa = async (req, res) => {
       };
     });
 
-    res.json({ empresa_id: empresaId, perfiles });
+    if (!includeExamenes || perfilesBase.length === 0) {
+      return res.json({ empresa_id: empresaId, perfiles: perfilesBase });
+    }
+
+    // Adjunta exámenes por tipo (para conteo en el picker / mismas vistas que listarPerfiles).
+    const perfilIds = perfilesBase.map((p) => p.id);
+    const placeholders = perfilIds.map(() => '?').join(',');
+    let mapSql = `SELECT mpe.perfil_id, mpe.tipo_emo, e.id AS examen_id, e.nombre AS nombre_examen
+                  FROM emo_perfil_examenes mpe
+                  JOIN examenes e ON e.id = mpe.examen_id
+                  WHERE mpe.perfil_id IN (${placeholders})`;
+    const mapParams = [...perfilIds];
+    if (filtrarPorTipo) {
+      mapSql += ' AND mpe.tipo_emo = ?';
+      mapParams.push(tipoEmoRaw);
+    }
+    mapSql += ' ORDER BY mpe.perfil_id ASC, mpe.tipo_emo ASC, e.nombre ASC';
+
+    const [mapeos] = await pool.execute(mapSql, mapParams);
+    const perfilesMap = new Map();
+    perfilesBase.forEach((p) => {
+      perfilesMap.set(p.id, {
+        ...p,
+        examenes_por_tipo: { PREOC: [], ANUAL: [], RETIRO: [], VISITA: [] },
+      });
+    });
+    mapeos.forEach((m) => {
+      const perfil = perfilesMap.get(m.perfil_id);
+      if (!perfil) return;
+      const tipo = String(m.tipo_emo || '').toUpperCase();
+      if (!perfil.examenes_por_tipo[tipo]) perfil.examenes_por_tipo[tipo] = [];
+      perfil.examenes_por_tipo[tipo].push({ examen_id: m.examen_id, nombre_examen: m.nombre_examen });
+    });
+
+    res.json({ empresa_id: empresaId, perfiles: Array.from(perfilesMap.values()) });
   } catch (error) {
     console.error('Error al listar perfiles visibles para empresa:', error);
     res.status(500).json({ error: 'Error al listar perfiles para empresa', details: error.message });
