@@ -673,6 +673,72 @@ const updateCotizacion = async (req, res) => {
   }
 };
 
+/**
+ * Estados de PEDIDO que ya están terminados o cerrados. Si un pedido está en
+ * uno de estos, no debemos retroceder su estado al cambiar el estado de una
+ * cotización (típicamente complementaria) — la cotización puede continuar su
+ * propio ciclo pero el pedido se queda quieto.
+ */
+const ESTADOS_PEDIDO_CERRADOS = new Set([
+  'FALTA_PAGO_FACTURA',
+  'FACTURADO',
+  'COMPLETADO',
+  'CANCELADO',
+]);
+
+/**
+ * Decide si la transición solicitada está permitida según rol del usuario y
+ * el creador_tipo de la cotización. Devuelve { ok: true } o { ok: false, error }.
+ */
+function autorizarTransicionCotizacion({ rol, estadoActual, estadoNuevo, creadorTipo, esCreador }) {
+  if (rol === 'manager') return { ok: true };
+
+  // Cliente
+  if (rol === 'cliente') {
+    // El cliente solo puede mover SUS cotizaciones (creadas por él) o aprobar/rechazar
+    // las que le envió el vendedor.
+    if (estadoNuevo === 'APROBADA' || estadoNuevo === 'RECHAZADA') {
+      // Sólo puede aprobar/rechazar cotizaciones que el vendedor le envió.
+      if (creadorTipo === 'CLIENTE') {
+        return { ok: false, error: 'No puedes aprobar/rechazar tu propia cotización.' };
+      }
+      if (estadoActual !== 'ENVIADA_AL_CLIENTE') {
+        return { ok: false, error: 'La cotización no está pendiente de tu aprobación.' };
+      }
+      return { ok: true };
+    }
+    if (estadoNuevo === 'ENVIADA') {
+      // Cliente envía su cot al vendedor: sólo si es suya y está en BORRADOR.
+      if (creadorTipo !== 'CLIENTE' || !esCreador) {
+        return { ok: false, error: 'Solo el creador puede enviar la cotización.' };
+      }
+      if (estadoActual !== 'BORRADOR') {
+        return { ok: false, error: 'Solo puedes enviar cotizaciones en borrador.' };
+      }
+      return { ok: true };
+    }
+    return { ok: false, error: 'Acción no permitida para tu rol.' };
+  }
+
+  // Vendedor
+  if (rol === 'vendedor') {
+    if (estadoNuevo === 'APROBADA' || estadoNuevo === 'RECHAZADA') {
+      // El vendedor solo aprueba/rechaza cotizaciones del CLIENTE.
+      if (creadorTipo !== 'CLIENTE') {
+        return { ok: false, error: 'El vendedor no aprueba/rechaza sus propias cotizaciones (eso lo hace el cliente).' };
+      }
+      if (estadoActual !== 'ENVIADA') {
+        return { ok: false, error: 'La cotización del cliente no está pendiente de tu respuesta.' };
+      }
+      return { ok: true };
+    }
+    // Vendedor puede manejar el resto del flujo: enviar al manager, al cliente, etc.
+    return { ok: true };
+  }
+
+  return { ok: false, error: 'Rol no autorizado.' };
+}
+
 /** PATCH /api/cotizaciones/:id/estado — Actualiza solo el estado (y opcionalmente mensaje_rechazo, notas_manager). */
 const updateEstadoCotizacion = async (req, res) => {
   try {
@@ -684,13 +750,32 @@ const updateEstadoCotizacion = async (req, res) => {
     if (!ESTADOS_COTIZACION.includes(estado)) {
       return res.status(400).json({ error: `estado debe ser uno de: ${ESTADOS_COTIZACION.join(', ')}` });
     }
-    const [existing] = await pool.execute('SELECT id, estado, pedido_id, es_complementaria FROM cotizaciones WHERE id = ?', [id]);
+    const [existing] = await pool.execute(
+      'SELECT id, estado, pedido_id, es_complementaria, creador_tipo, creador_id, numero_cotizacion FROM cotizaciones WHERE id = ?',
+      [id]
+    );
     if (existing.length === 0) {
       return res.status(404).json({ error: 'Cotización no encontrada' });
     }
     if (existing[0].estado === 'APROBADA') {
       return res.status(403).json({ error: 'No se pueden modificar cotizaciones ya aprobadas.' });
     }
+
+    // Validar permiso para la transición.
+    const rol = (req.user?.rol || '').toLowerCase();
+    const creadorTipo = existing[0].creador_tipo || 'VENDEDOR';
+    const esCreador = req.user?.id != null && Number(existing[0].creador_id) === Number(req.user.id);
+    const auth = autorizarTransicionCotizacion({
+      rol,
+      estadoActual: existing[0].estado,
+      estadoNuevo: estado,
+      creadorTipo,
+      esCreador,
+    });
+    if (!auth.ok) {
+      return res.status(403).json({ error: auth.error });
+    }
+
     const connection = await pool.getConnection();
     await connection.beginTransaction();
     try {
@@ -708,16 +793,29 @@ const updateEstadoCotizacion = async (req, res) => {
         );
       }
       const pedido_id = existing[0].pedido_id;
-      const es_complementaria = existing[0].es_complementaria;
+      const es_complementaria = !!existing[0].es_complementaria;
+      const cotEsDelCliente = creadorTipo === 'CLIENTE';
+
+      // Obtener el estado actual del pedido para no retroceder.
+      const [pedidoEstadoRows] = await connection.execute(
+        'SELECT estado FROM pedidos WHERE id = ?',
+        [pedido_id]
+      );
+      const estadoPedidoActual = pedidoEstadoRows[0]?.estado ?? null;
+      const pedidoCerrado = estadoPedidoActual ? ESTADOS_PEDIDO_CERRADOS.has(estadoPedidoActual) : false;
+
       const estadosEnviada = ['ENVIADA', 'ENVIADA_AL_CLIENTE', 'ENVIADA_AL_MANAGER'];
       if (estadosEnviada.includes(estado)) {
-        await connection.execute(
-          "UPDATE pedidos SET estado = 'FALTA_APROBAR_COTIZACION' WHERE id = ?",
-          [pedido_id]
-        );
+        // El cambio "complementaria pasa por ENVIADA_*" no debe revertir el
+        // estado de un pedido ya facturado/completado/cancelado.
+        if (!es_complementaria && !pedidoCerrado) {
+          await connection.execute(
+            "UPDATE pedidos SET estado = 'FALTA_APROBAR_COTIZACION' WHERE id = ?",
+            [pedido_id]
+          );
+        }
         if (estado === 'ENVIADA') {
-          const esDelCliente = existing[0].creador_tipo === 'CLIENTE';
-          const descripcion = esDelCliente
+          const descripcion = cotEsDelCliente
             ? 'El cliente añadió su cotización para revisión del vendedor.'
             : 'Cotización enviada para revisión.';
           await connection.execute(
@@ -739,33 +837,47 @@ const updateEstadoCotizacion = async (req, res) => {
           );
         }
       } else if (estado === 'APROBADA_POR_MANAGER') {
-        await connection.execute(
-          "UPDATE pedidos SET estado = 'FALTA_APROBAR_COTIZACION' WHERE id = ?",
-          [pedido_id]
-        );
+        if (!es_complementaria && !pedidoCerrado) {
+          await connection.execute(
+            "UPDATE pedidos SET estado = 'FALTA_APROBAR_COTIZACION' WHERE id = ?",
+            [pedido_id]
+          );
+        }
         await connection.execute(
           `INSERT INTO historial_pedido (pedido_id, cotizacion_id, tipo_evento, descripcion, usuario_id, usuario_nombre, valor_anterior, valor_nuevo, atendidos, no_atendidos)
            VALUES (?, ?, 'COTIZACION_APROBADA', 'El manager aprobó la cotización. Lista para enviar al cliente.', ?, ?, NULL, NULL, NULL, NULL)`,
           [pedido_id, id, req.user?.id || null, req.user?.nombre_completo || null]
         );
       } else if (estado === 'APROBADA' && !es_complementaria) {
-        await connection.execute(
-          "UPDATE pedidos SET estado = 'COTIZACION_APROBADA', cotizacion_principal_id = ? WHERE id = ?",
-          [id, pedido_id]
-        );
+        if (!pedidoCerrado) {
+          await connection.execute(
+            "UPDATE pedidos SET estado = 'COTIZACION_APROBADA', cotizacion_principal_id = ? WHERE id = ?",
+            [id, pedido_id]
+          );
+        }
+        // El historial depende de quién aprobó. Si la cot era del cliente,
+        // quien aprueba es el vendedor (ya validado por autorizarTransicion).
+        const descAprob = cotEsDelCliente
+          ? `El vendedor${req.user?.nombre_completo ? ` (${req.user.nombre_completo})` : ''} aprobó la cotización del cliente.`
+          : 'El cliente aprobó la cotización.';
         await connection.execute(
           `INSERT INTO historial_pedido (pedido_id, cotizacion_id, tipo_evento, descripcion, usuario_id, usuario_nombre, valor_anterior, valor_nuevo, atendidos, no_atendidos)
-           VALUES (?, ?, 'COTIZACION_APROBADA', 'El cliente aprobó la cotización.', ?, ?, NULL, NULL, NULL, NULL)`,
-          [pedido_id, id, req.user?.id || null, req.user?.nombre_completo || null]
+           VALUES (?, ?, 'COTIZACION_APROBADA', ?, ?, ?, NULL, NULL, NULL, NULL)`,
+          [pedido_id, id, descAprob, req.user?.id || null, req.user?.nombre_completo || null]
         );
       } else if (estado === 'RECHAZADA' && !es_complementaria) {
-        await connection.execute(
-          "UPDATE pedidos SET estado = 'COTIZACION_RECHAZADA' WHERE id = ?",
-          [pedido_id]
-        );
-        const descRechazo = mensaje_rechazo && String(mensaje_rechazo).trim()
-          ? `El cliente rechazó la cotización. Motivo: ${String(mensaje_rechazo).trim()}`
-          : 'El cliente rechazó la cotización.';
+        if (!pedidoCerrado) {
+          await connection.execute(
+            "UPDATE pedidos SET estado = 'COTIZACION_RECHAZADA' WHERE id = ?",
+            [pedido_id]
+          );
+        }
+        const motivo = mensaje_rechazo && String(mensaje_rechazo).trim()
+          ? ` Motivo: ${String(mensaje_rechazo).trim()}`
+          : '';
+        const descRechazo = cotEsDelCliente
+          ? `El vendedor rechazó la cotización del cliente.${motivo}`
+          : `El cliente rechazó la cotización.${motivo}`;
         await connection.execute(
           `INSERT INTO historial_pedido (pedido_id, cotizacion_id, tipo_evento, descripcion, usuario_id, usuario_nombre, valor_anterior, valor_nuevo, atendidos, no_atendidos)
            VALUES (?, ?, 'COTIZACION_RECHAZADA', ?, ?, ?, NULL, NULL, NULL, NULL)`,
@@ -790,7 +902,28 @@ const updateEstadoCotizacion = async (req, res) => {
             );
             const empresaIdPedido = pedRows[0]?.empresa_id ?? null;
 
-            if (estado === 'ENVIADA_AL_CLIENTE' && empresaIdPedido) {
+            // Para los avisos al cliente cuando el vendedor responde a SU
+            // cotización, mandamos la notif al usuario creador específico, no
+            // a todos los clientes de la empresa.
+            const cotEsDelCliente = cot.creador_tipo === 'CLIENTE';
+            const clienteCreadorId = cot.creador_id;
+
+            if (estado === 'ENVIADA' && cotEsDelCliente && empresaIdPedido) {
+              // Cliente envió su cotización al vendedor → notificar al vendedor del pedido.
+              await emitirNotificacionAVendedorDePedido(conn2, {
+                pedidoId,
+                tipo: 'MENSAJE',
+                titulo: `Cotización ${numeroCotizacion} recibida del cliente`,
+                mensaje: 'El cliente envió su propia cotización. Revísala y apruébala o recházala.',
+                contextoJson: {
+                  evento: 'COTIZACION_RECIBIDA_DEL_CLIENTE',
+                  cotizacion_id: cot.id,
+                  pedido_id: pedidoId,
+                  numero_cotizacion: numeroCotizacion,
+                },
+                remitenteUsuarioId: req.user ? req.user.id : null,
+              });
+            } else if (estado === 'ENVIADA_AL_CLIENTE' && empresaIdPedido) {
               await emitirNotificacionAClientesDeEmpresa(conn2, {
                 empresaId: empresaIdPedido,
                 tipo: 'COTIZACION_CREADA',
@@ -805,37 +938,80 @@ const updateEstadoCotizacion = async (req, res) => {
                 remitenteUsuarioId: req.user ? req.user.id : null,
               });
             } else if (estado === 'APROBADA') {
-              await emitirNotificacionAVendedorDePedido(conn2, {
-                pedidoId,
-                tipo: 'MENSAJE',
-                titulo: `Cotización ${numeroCotizacion} aprobada por el cliente`,
-                mensaje: 'El cliente aprobó la cotización. Puedes continuar con el pedido.',
-                contextoJson: {
-                  evento: 'COTIZACION_APROBADA',
-                  cotizacion_id: cot.id,
-                  pedido_id: pedidoId,
-                  numero_cotizacion: numeroCotizacion,
-                },
-                remitenteUsuarioId: req.user ? req.user.id : null,
-              });
+              if (cotEsDelCliente && clienteCreadorId) {
+                // Vendedor aprobó la cotización del cliente → notificar al cliente creador.
+                await conn2.execute(
+                  `INSERT INTO notificaciones (tipo, titulo, mensaje, contexto_json, remitente_usuario_id, destinatario_usuario_id, destinatario_empresa_id, leida)
+                   VALUES ('MENSAJE', ?, ?, ?, ?, ?, ?, 0)`,
+                  [
+                    `Tu cotización ${numeroCotizacion} fue aprobada`,
+                    'El vendedor aceptó la cotización que enviaste. El pedido continúa el flujo normal.',
+                    JSON.stringify({
+                      evento: 'COTIZACION_CLIENTE_APROBADA_POR_VENDEDOR',
+                      cotizacion_id: cot.id,
+                      pedido_id: pedidoId,
+                      numero_cotizacion: numeroCotizacion,
+                    }),
+                    req.user ? req.user.id : null,
+                    clienteCreadorId,
+                    empresaIdPedido,
+                  ]
+                );
+              } else {
+                await emitirNotificacionAVendedorDePedido(conn2, {
+                  pedidoId,
+                  tipo: 'MENSAJE',
+                  titulo: `Cotización ${numeroCotizacion} aprobada por el cliente`,
+                  mensaje: 'El cliente aprobó la cotización. Puedes continuar con el pedido.',
+                  contextoJson: {
+                    evento: 'COTIZACION_APROBADA',
+                    cotizacion_id: cot.id,
+                    pedido_id: pedidoId,
+                    numero_cotizacion: numeroCotizacion,
+                  },
+                  remitenteUsuarioId: req.user ? req.user.id : null,
+                });
+              }
             } else if (estado === 'RECHAZADA') {
               const motivo = mensaje_rechazo && String(mensaje_rechazo).trim()
                 ? `Motivo: ${String(mensaje_rechazo).trim()}`
                 : 'No se indicó motivo.';
-              await emitirNotificacionAVendedorDePedido(conn2, {
-                pedidoId,
-                tipo: 'MENSAJE',
-                titulo: `Cotización ${numeroCotizacion} rechazada por el cliente`,
-                mensaje: motivo,
-                contextoJson: {
-                  evento: 'COTIZACION_RECHAZADA',
-                  cotizacion_id: cot.id,
-                  pedido_id: pedidoId,
-                  numero_cotizacion: numeroCotizacion,
-                  mensaje_rechazo: mensaje_rechazo || null,
-                },
-                remitenteUsuarioId: req.user ? req.user.id : null,
-              });
+              if (cotEsDelCliente && clienteCreadorId) {
+                // Vendedor rechazó la cotización del cliente → avisar al cliente creador.
+                await conn2.execute(
+                  `INSERT INTO notificaciones (tipo, titulo, mensaje, contexto_json, remitente_usuario_id, destinatario_usuario_id, destinatario_empresa_id, leida)
+                   VALUES ('MENSAJE', ?, ?, ?, ?, ?, ?, 0)`,
+                  [
+                    `Tu cotización ${numeroCotizacion} fue rechazada`,
+                    motivo,
+                    JSON.stringify({
+                      evento: 'COTIZACION_CLIENTE_RECHAZADA_POR_VENDEDOR',
+                      cotizacion_id: cot.id,
+                      pedido_id: pedidoId,
+                      numero_cotizacion: numeroCotizacion,
+                      mensaje_rechazo: mensaje_rechazo || null,
+                    }),
+                    req.user ? req.user.id : null,
+                    clienteCreadorId,
+                    empresaIdPedido,
+                  ]
+                );
+              } else {
+                await emitirNotificacionAVendedorDePedido(conn2, {
+                  pedidoId,
+                  tipo: 'MENSAJE',
+                  titulo: `Cotización ${numeroCotizacion} rechazada por el cliente`,
+                  mensaje: motivo,
+                  contextoJson: {
+                    evento: 'COTIZACION_RECHAZADA',
+                    cotizacion_id: cot.id,
+                    pedido_id: pedidoId,
+                    numero_cotizacion: numeroCotizacion,
+                    mensaje_rechazo: mensaje_rechazo || null,
+                  },
+                  remitenteUsuarioId: req.user ? req.user.id : null,
+                });
+              }
             } else if (estado === 'APROBADA_POR_MANAGER') {
               await emitirNotificacionAVendedorDePedido(conn2, {
                 pedidoId,
@@ -923,10 +1099,41 @@ const deleteCotizacion = async (req, res) => {
     await connection.execute('DELETE FROM cotizacion_items WHERE cotizacion_id = ?', [idNum]);
     await connection.execute('DELETE FROM cotizaciones WHERE id = ?', [idNum]);
 
-    // Si no queda ninguna cotización en el pedido, estado pasa a "A la espera de cotización"
-    const [restantes] = await connection.execute('SELECT COUNT(*) AS total FROM cotizaciones WHERE pedido_id = ?', [pedido_id]);
-    if (restantes[0].total === 0) {
-      await connection.execute("UPDATE pedidos SET estado = 'ESPERA_COTIZACION' WHERE id = ?", [pedido_id]);
+    // Normalizar estado del pedido después del borrado.
+    // - Si el pedido ya está FACTURADO/COMPLETADO/CANCELADO no tocamos su estado.
+    // - Si no quedan cotizaciones → ESPERA_COTIZACION.
+    // - Si quedan cotizaciones pero ninguna APROBADA → ajustar según lo más
+    //   reciente: si hay alguna ENVIADA/ENVIADA_AL_CLIENTE/ENVIADA_AL_MANAGER/
+    //   APROBADA_POR_MANAGER → FALTA_APROBAR_COTIZACION; si todas son
+    //   BORRADOR/RECHAZADA → ESPERA_COTIZACION.
+    const [pedidoActualRows] = await connection.execute(
+      'SELECT estado FROM pedidos WHERE id = ?',
+      [pedido_id]
+    );
+    const estadoPedidoActual = pedidoActualRows[0]?.estado ?? null;
+    const cerrado = estadoPedidoActual && ['FALTA_PAGO_FACTURA', 'FACTURADO', 'COMPLETADO', 'CANCELADO'].includes(estadoPedidoActual);
+    if (!cerrado) {
+      const [restantes] = await connection.execute(
+        'SELECT estado FROM cotizaciones WHERE pedido_id = ?',
+        [pedido_id]
+      );
+      if (restantes.length === 0) {
+        await connection.execute("UPDATE pedidos SET estado = 'ESPERA_COTIZACION' WHERE id = ?", [pedido_id]);
+      } else {
+        const hayAprobada = restantes.some((r) => r.estado === 'APROBADA');
+        const hayEnProceso = restantes.some((r) =>
+          ['ENVIADA', 'ENVIADA_AL_CLIENTE', 'ENVIADA_AL_MANAGER', 'APROBADA_POR_MANAGER'].includes(r.estado)
+        );
+        if (hayAprobada) {
+          // Si la cot principal aprobada sigue existiendo, mantener el estado.
+          // (cotizacion_principal_id se preservó porque era de otra cot.)
+        } else if (hayEnProceso) {
+          await connection.execute("UPDATE pedidos SET estado = 'FALTA_APROBAR_COTIZACION' WHERE id = ?", [pedido_id]);
+        } else {
+          // Solo quedan BORRADOR/RECHAZADA → tratar como sin cotización viva.
+          await connection.execute("UPDATE pedidos SET estado = 'ESPERA_COTIZACION' WHERE id = ?", [pedido_id]);
+        }
+      }
     }
 
     await connection.commit();

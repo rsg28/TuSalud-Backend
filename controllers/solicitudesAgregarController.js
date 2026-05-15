@@ -210,6 +210,20 @@ const actualizarEstado = async (req, res) => {
       connection.release();
       return res.status(400).json({ error: 'La solicitud ya fue procesada' });
     }
+    // No se puede aprobar una solicitud sobre un pedido cerrado.
+    if (estadoUpper === 'APROBADA') {
+      const [pedidoEstado] = await connection.execute(
+        'SELECT estado FROM pedidos WHERE id = ?',
+        [sols[0].pedido_id]
+      );
+      const estPed = pedidoEstado[0]?.estado;
+      if (estPed && ['COMPLETADO', 'CANCELADO'].includes(estPed)) {
+        connection.release();
+        return res.status(400).json({
+          error: `El pedido ya está en estado ${estPed}; no se pueden añadir exámenes.`,
+        });
+      }
+    }
 
     await connection.beginTransaction();
 
