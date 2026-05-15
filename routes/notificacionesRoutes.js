@@ -6,7 +6,8 @@ const {
   marcarLeida,
   marcarTodasLeidas,
   crear,
-  responder,
+  eliminar,
+  eliminarTodas,
 } = require('../controllers/notificacionesController');
 const { authenticateToken, requireRole } = require('../middleware/auth');
 
@@ -14,7 +15,8 @@ router.get('/mias', authenticateToken, listarMias);
 router.get('/no-leidas', authenticateToken, contadorNoLeidas);
 router.put('/leer-todas', authenticateToken, marcarTodasLeidas);
 router.put('/:id/leida', authenticateToken, marcarLeida);
+router.delete('/mias', authenticateToken, eliminarTodas);
+router.delete('/:id', authenticateToken, eliminar);
 router.post('/', authenticateToken, requireRole('manager', 'vendedor'), crear);
-router.post('/:id/responder', authenticateToken, responder);
 
 module.exports = router;

@@ -1,5 +1,23 @@
 const pool = require('../config/database');
 
+/** Retención: las notificaciones se borran automáticamente pasadas N horas. */
+const RETENCION_HORAS = 24;
+
+/**
+ * Best-effort: borra notificaciones que sobrepasaron la retención. Cualquier
+ * error se loggea pero no rompe la operación de quien la llamó.
+ */
+async function purgarAntiguas() {
+  try {
+    await pool.execute(
+      'DELETE FROM notificaciones WHERE created_at < (NOW() - INTERVAL ? HOUR)',
+      [RETENCION_HORAS]
+    );
+  } catch (err) {
+    console.warn('[notificaciones] purga falló:', err?.message || err);
+  }
+}
+
 /**
  * Helpers reutilizables desde otros controladores (auto-emisión).
  *
@@ -118,56 +136,53 @@ async function emitirNotificacionAVendedorDePedido(conn, params) {
  * ========================================================================== */
 
 /**
- * Listar notificaciones del usuario actual.
- *   - Recibe (destinatario directo o vía empresa).
- *   - O envió (remitente) — para que el vendedor vea su historial.
+ * Listar notificaciones RECIBIDAS por el usuario actual (directas o vía
+ * empresa). Las notificaciones que él mismo emitió no se incluyen — el panel
+ * de notificaciones es solo una bandeja de entrada.
  *
- * Query: ?solo_no_leidas=1 (solo recibidas no leídas), ?limit=N, ?thread_id=N
+ * Las notificaciones con más de RETENCION_HORAS se eliminan automáticamente.
+ *
+ * Query: ?solo_no_leidas=1, ?limit=N
  */
 exports.listarMias = async (req, res) => {
   try {
     const usuarioId = req.user?.id;
     if (!usuarioId) return res.status(401).json({ error: 'Usuario no autenticado' });
 
+    // Limpieza proactiva: borra notificaciones expiradas antes de leer.
+    await purgarAntiguas();
+
     const soloNoLeidas = String(req.query?.solo_no_leidas || '').trim() === '1';
     const limit = Math.min(parseInt(String(req.query?.limit || '100'), 10) || 100, 500);
-    const threadId = req.query?.thread_id ? parseInt(String(req.query.thread_id), 10) : null;
 
     const [user] = await pool.execute('SELECT empresa_id FROM usuarios WHERE id = ?', [usuarioId]);
     const empresaIdUsuario = user[0]?.empresa_id ?? null;
 
     const params = [];
-    const conds = [];
-    // Recibidas (directas)
-    conds.push('n.destinatario_usuario_id = ?');
+    const conds = ['n.destinatario_usuario_id = ?'];
     params.push(usuarioId);
-    // Recibidas vía empresa
     if (empresaIdUsuario != null) {
       conds.push('n.destinatario_empresa_id = ?');
       params.push(empresaIdUsuario);
     }
-    // Enviadas
-    conds.push('n.remitente_usuario_id = ?');
-    params.push(usuarioId);
 
     let sql = `SELECT n.id, n.thread_id, n.tipo, n.titulo, n.mensaje, n.contexto_json,
                       n.remitente_usuario_id, n.destinatario_usuario_id, n.destinatario_empresa_id,
                       n.leida, n.created_at,
                       ru.nombre_completo AS remitente_nombre,
+                      ru.rol             AS remitente_rol,
                       du.nombre_completo AS destinatario_nombre,
                       e.razon_social    AS destinatario_empresa_nombre
                  FROM notificaciones n
             LEFT JOIN usuarios ru ON ru.id = n.remitente_usuario_id
             LEFT JOIN usuarios du ON du.id = n.destinatario_usuario_id
             LEFT JOIN empresas e  ON e.id  = n.destinatario_empresa_id
-                WHERE (${conds.join(' OR ')})`;
+                WHERE (${conds.join(' OR ')})
+                  AND (n.remitente_usuario_id IS NULL OR n.remitente_usuario_id <> ?)`;
+    params.push(usuarioId);
+
     if (soloNoLeidas) {
-      sql += ' AND n.leida = 0 AND n.remitente_usuario_id <> ?';
-      params.push(usuarioId);
-    }
-    if (threadId) {
-      sql += ' AND n.thread_id = ?';
-      params.push(threadId);
+      sql += ' AND n.leida = 0';
     }
     sql += ' ORDER BY n.created_at DESC LIMIT ?';
     params.push(limit);
@@ -187,12 +202,14 @@ exports.listarMias = async (req, res) => {
 };
 
 /**
- * Conteo rápido de no leídas (para badge en UI).
+ * Conteo rápido de no leídas (para badge en UI). También purga antes de contar.
  */
 exports.contadorNoLeidas = async (req, res) => {
   try {
     const usuarioId = req.user?.id;
     if (!usuarioId) return res.status(401).json({ error: 'Usuario no autenticado' });
+
+    await purgarAntiguas();
 
     const [user] = await pool.execute('SELECT empresa_id FROM usuarios WHERE id = ?', [usuarioId]);
     const empresaIdUsuario = user[0]?.empresa_id ?? null;
@@ -206,7 +223,7 @@ exports.contadorNoLeidas = async (req, res) => {
     const [rows] = await pool.execute(
       `SELECT COUNT(*) AS total FROM notificaciones
         WHERE leida = 0
-          AND remitente_usuario_id <> ?
+          AND (remitente_usuario_id IS NULL OR remitente_usuario_id <> ?)
           AND (destinatario_usuario_id = ? ${extraEmpresa})`,
       params
     );
@@ -214,6 +231,60 @@ exports.contadorNoLeidas = async (req, res) => {
   } catch (error) {
     console.error('Error contador no leídas:', error);
     res.status(500).json({ error: 'Error al contar notificaciones' });
+  }
+};
+
+/**
+ * Eliminar una notificación específica (el usuario debe ser destinatario).
+ * Para "borrar para mí". Notas: como ahora ya no listamos las que envié, esto
+ * cubre todos los casos visibles desde la UI.
+ */
+exports.eliminar = async (req, res) => {
+  try {
+    const usuarioId = req.user?.id;
+    if (!usuarioId) return res.status(401).json({ error: 'Usuario no autenticado' });
+    const id = parseInt(String(req.params.id), 10);
+    if (!Number.isInteger(id) || id <= 0) {
+      return res.status(400).json({ error: 'id inválido' });
+    }
+    const [user] = await pool.execute('SELECT empresa_id FROM usuarios WHERE id = ?', [usuarioId]);
+    const empresaIdUsuario = user[0]?.empresa_id ?? null;
+
+    const [result] = await pool.execute(
+      `DELETE FROM notificaciones
+        WHERE id = ?
+          AND (destinatario_usuario_id = ?
+               OR (destinatario_empresa_id IS NOT NULL AND destinatario_empresa_id = ?))`,
+      [id, usuarioId, empresaIdUsuario]
+    );
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ error: 'Notificación no encontrada o no autorizada' });
+    }
+    res.json({ message: 'Notificación eliminada' });
+  } catch (error) {
+    console.error('Error al eliminar notificación:', error);
+    res.status(500).json({ error: 'Error al eliminar notificación' });
+  }
+};
+
+/** Eliminar TODAS las notificaciones recibidas por el usuario actual. */
+exports.eliminarTodas = async (req, res) => {
+  try {
+    const usuarioId = req.user?.id;
+    if (!usuarioId) return res.status(401).json({ error: 'Usuario no autenticado' });
+    const [user] = await pool.execute('SELECT empresa_id FROM usuarios WHERE id = ?', [usuarioId]);
+    const empresaIdUsuario = user[0]?.empresa_id ?? null;
+
+    await pool.execute(
+      `DELETE FROM notificaciones
+        WHERE destinatario_usuario_id = ?
+           OR (destinatario_empresa_id IS NOT NULL AND destinatario_empresa_id = ?)`,
+      [usuarioId, empresaIdUsuario]
+    );
+    res.json({ message: 'Todas las notificaciones fueron eliminadas' });
+  } catch (error) {
+    console.error('Error al eliminar todas:', error);
+    res.status(500).json({ error: 'Error al eliminar notificaciones' });
   }
 };
 
