@@ -1059,6 +1059,56 @@ const obtenerArticulosPendientes = async (req, res) => {
   res.json({ articulos: [] });
 };
 
+/**
+ * Lógica reutilizable de cancelación de pedido (borrado en cascada).
+ * Debe ejecutarse dentro de una transacción abierta sobre `connection`.
+ * No hace commit ni release; es responsabilidad del caller.
+ */
+async function cancelarPedidoEnConnection(connection, pedidoId) {
+  // 1. Quitar referencias del pedido para poder borrar facturas y cotizaciones
+  await connection.execute(
+    'UPDATE pedidos SET cotizacion_principal_id = NULL, factura_id = NULL WHERE id = ?',
+    [pedidoId]
+  );
+
+  // 2. Borrar todas las facturas del pedido (FK pedido_id es RESTRICT: hay que borrar antes que el pedido)
+  const [facturas] = await connection.execute('SELECT id FROM facturas WHERE pedido_id = ?', [pedidoId]);
+  const facturaIds = facturas.map((f) => f.id);
+  if (facturaIds.length > 0) {
+    const placeholders = facturaIds.map(() => '?').join(',');
+    await connection.execute(`DELETE FROM factura_detalle WHERE factura_id IN (${placeholders})`, facturaIds);
+    await connection.execute(`DELETE FROM factura_cotizacion WHERE factura_id IN (${placeholders})`, facturaIds);
+    await connection.execute('DELETE FROM facturas WHERE pedido_id = ?', [pedidoId]);
+  }
+
+  // 3. Borrar historial del pedido
+  await connection.execute('DELETE FROM historial_pedido WHERE pedido_id = ?', [pedidoId]);
+
+  // 4. Borrar solicitudes de agregar exámenes (y sus tablas hijas) para este pedido
+  const [solicitudes] = await connection.execute('SELECT id FROM solicitudes_agregar WHERE pedido_id = ?', [pedidoId]);
+  const solicitudIds = solicitudes.map((s) => s.id);
+  if (solicitudIds.length > 0) {
+    const placeholdersSol = solicitudIds.map(() => '?').join(',');
+    await connection.execute(`DELETE FROM solicitud_agregar_examenes WHERE solicitud_id IN (${placeholdersSol})`, solicitudIds);
+    await connection.execute(`DELETE FROM solicitud_agregar_paciente WHERE solicitud_id IN (${placeholdersSol})`, solicitudIds);
+    await connection.execute('DELETE FROM solicitudes_agregar WHERE pedido_id = ?', [pedidoId]);
+  }
+
+  // 4.b Borrar solicitudes de cancelación previas del pedido (si fuese llamado desde
+  // un contexto que no hace cascade, p.ej. tests). El FK ON DELETE CASCADE las
+  // limpiará igualmente al borrar el pedido, pero por idempotencia es seguro.
+  await connection.execute('DELETE FROM solicitudes_cancelacion WHERE pedido_id = ?', [pedidoId]);
+
+  // 5. Borrar cotizaciones del pedido (el CHECK exige: si es_complementaria=1 entonces cotizacion_base_id no puede ser NULL)
+  // Primero borrar complementarias; luego anular base en las restantes y borrarlas.
+  await connection.execute('DELETE FROM cotizaciones WHERE pedido_id = ? AND es_complementaria = 1', [pedidoId]);
+  await connection.execute('UPDATE cotizaciones SET cotizacion_base_id = NULL WHERE pedido_id = ?', [pedidoId]);
+  await connection.execute('DELETE FROM cotizaciones WHERE pedido_id = ?', [pedidoId]);
+
+  // 6. Borrar el pedido (CASCADE: pedido_items, pedido_pacientes, paciente_examen_*)
+  await connection.execute('DELETE FROM pedidos WHERE id = ?', [pedidoId]);
+}
+
 const cancelarPedido = async (req, res) => {
   const connection = await pool.getConnection();
   try {
@@ -1068,55 +1118,9 @@ const cancelarPedido = async (req, res) => {
       connection.release();
       return res.status(404).json({ error: 'Pedido no encontrado' });
     }
-    if (req.user.rol === 'cliente') {
-      const [users] = await connection.execute('SELECT empresa_id FROM usuarios WHERE id = ?', [req.user.id]);
-      const miEmpresaId = users.length > 0 ? users[0].empresa_id : null;
-      if (miEmpresaId == null || pedido[0].empresa_id !== miEmpresaId) {
-        connection.release();
-        return res.status(403).json({ error: 'No puede cancelar este pedido' });
-      }
-    }
 
     await connection.beginTransaction();
-
-    // 1. Quitar referencias del pedido para poder borrar facturas y cotizaciones
-    await connection.execute(
-      'UPDATE pedidos SET cotizacion_principal_id = NULL, factura_id = NULL WHERE id = ?',
-      [pedido_id]
-    );
-
-    // 2. Borrar todas las facturas del pedido (FK pedido_id es RESTRICT: hay que borrar antes que el pedido)
-    const [facturas] = await connection.execute('SELECT id FROM facturas WHERE pedido_id = ?', [pedido_id]);
-    const facturaIds = facturas.map((f) => f.id);
-    if (facturaIds.length > 0) {
-      const placeholders = facturaIds.map(() => '?').join(',');
-      await connection.execute(`DELETE FROM factura_detalle WHERE factura_id IN (${placeholders})`, facturaIds);
-      await connection.execute(`DELETE FROM factura_cotizacion WHERE factura_id IN (${placeholders})`, facturaIds);
-      await connection.execute('DELETE FROM facturas WHERE pedido_id = ?', [pedido_id]);
-    }
-
-    // 3. Borrar historial del pedido
-    await connection.execute('DELETE FROM historial_pedido WHERE pedido_id = ?', [pedido_id]);
-
-    // 4. Borrar solicitudes de agregar exámenes (y sus tablas hijas) para este pedido
-    const [solicitudes] = await connection.execute('SELECT id FROM solicitudes_agregar WHERE pedido_id = ?', [pedido_id]);
-    const solicitudIds = solicitudes.map((s) => s.id);
-    if (solicitudIds.length > 0) {
-      const placeholdersSol = solicitudIds.map(() => '?').join(',');
-      await connection.execute(`DELETE FROM solicitud_agregar_examenes WHERE solicitud_id IN (${placeholdersSol})`, solicitudIds);
-      await connection.execute(`DELETE FROM solicitud_agregar_paciente WHERE solicitud_id IN (${placeholdersSol})`, solicitudIds);
-      await connection.execute('DELETE FROM solicitudes_agregar WHERE pedido_id = ?', [pedido_id]);
-    }
-
-    // 5. Borrar cotizaciones del pedido (el CHECK exige: si es_complementaria=1 entonces cotizacion_base_id no puede ser NULL)
-    // Primero borrar complementarias; luego anular base en las restantes y borrarlas.
-    await connection.execute('DELETE FROM cotizaciones WHERE pedido_id = ? AND es_complementaria = 1', [pedido_id]);
-    await connection.execute('UPDATE cotizaciones SET cotizacion_base_id = NULL WHERE pedido_id = ?', [pedido_id]);
-    await connection.execute('DELETE FROM cotizaciones WHERE pedido_id = ?', [pedido_id]);
-
-    // 6. Borrar el pedido (CASCADE: pedido_items, pedido_pacientes, paciente_examen_*)
-    await connection.execute('DELETE FROM pedidos WHERE id = ?', [pedido_id]);
-
+    await cancelarPedidoEnConnection(connection, pedido_id);
     await connection.commit();
     res.json({ message: 'Pedido cancelado y eliminado correctamente' });
   } catch (error) {
@@ -1146,5 +1150,6 @@ module.exports = {
   cargarEmpleados,
   marcarCompletado,
   cancelarPedido,
+  cancelarPedidoEnConnection,
   obtenerArticulosPendientes
 };

@@ -41,6 +41,7 @@ app.use('/api/cotizaciones', require('./routes/cotizacionesRoutes'));
 app.use('/api/facturas', require('./routes/facturasRoutes'));
 app.use('/api/pedidos', require('./routes/pedidosRoutes'));
 app.use('/api/solicitudes-agregar-examenes', require('./routes/solicitudesAgregarRoutes'));
+app.use('/api/solicitudes-cancelacion', require('./routes/solicitudesCancelacionRoutes'));
 app.use('/api/precios', require('./routes/preciosEmpresaRoutes'));
 app.use('/api/emo-perfiles', require('./routes/emoPerfilesRoutes'));
 app.use('/api/reniec', require('./routes/reniecRoutes'));

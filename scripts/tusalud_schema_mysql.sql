@@ -599,6 +599,33 @@ CREATE TABLE `solicitud_agregar_examenes` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 -- -----------------------------------------------------------------------------
+-- Solicitudes de cancelación de pedido (cliente → vendedor/manager)
+-- -----------------------------------------------------------------------------
+CREATE TABLE `solicitudes_cancelacion` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `pedido_id` int NOT NULL,
+  `cliente_usuario_id` int NOT NULL,
+  `estado` enum('PENDIENTE','APROBADA','RECHAZADA') NOT NULL DEFAULT 'PENDIENTE',
+  `mensaje_cliente` text,
+  `mensaje_rechazo` text,
+  `fecha_solicitud` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
+  `fecha_revision` timestamp NULL DEFAULT NULL,
+  `revisado_por_usuario_id` int DEFAULT NULL,
+  `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  `pendiente_lock` int GENERATED ALWAYS AS (CASE WHEN `estado` = 'PENDIENTE' THEN `pedido_id` ELSE NULL END) STORED,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_solicitudes_cancel_una_pendiente` (`pendiente_lock`),
+  KEY `cliente_usuario_id` (`cliente_usuario_id`),
+  KEY `revisado_por_usuario_id` (`revisado_por_usuario_id`),
+  KEY `idx_solicitudes_cancel_pedido` (`pedido_id`),
+  KEY `idx_solicitudes_cancel_estado` (`estado`),
+  CONSTRAINT `solicitudes_cancel_ibfk_1` FOREIGN KEY (`pedido_id`) REFERENCES `pedidos` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `solicitudes_cancel_ibfk_2` FOREIGN KEY (`cliente_usuario_id`) REFERENCES `usuarios` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `solicitudes_cancel_ibfk_3` FOREIGN KEY (`revisado_por_usuario_id`) REFERENCES `usuarios` (`id`) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+-- -----------------------------------------------------------------------------
 -- Historial de pedidos (auditoría)
 -- -----------------------------------------------------------------------------
 CREATE TABLE `historial_pedido` (

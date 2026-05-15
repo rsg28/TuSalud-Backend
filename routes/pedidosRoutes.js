@@ -48,7 +48,9 @@ router.post('/', authenticateToken, requireRole('vendedor', 'manager', 'cliente'
 // POST /api/pedidos/:pedido_id/examenes — Agrega un examen al pedido (vendedor o manager)
 router.post('/:pedido_id/examenes', authenticateToken, requireRole('vendedor', 'manager'), pedidosController.agregarExamen);
 
-// POST /api/pedidos/:pedido_id/cancelar — Cancela el pedido (vendedor, manager o cliente)
-router.post('/:pedido_id/cancelar', authenticateToken, requireRole('vendedor', 'manager', 'cliente'), pedidosController.cancelarPedido);
+// POST /api/pedidos/:pedido_id/cancelar — Cancela el pedido (solo vendedor o manager).
+// Los clientes NO pueden cancelar directamente: deben crear una solicitud de
+// cancelación en /api/solicitudes-cancelacion que el vendedor/manager aprueba.
+router.post('/:pedido_id/cancelar', authenticateToken, requireRole('vendedor', 'manager'), pedidosController.cancelarPedido);
 
 module.exports = router;
