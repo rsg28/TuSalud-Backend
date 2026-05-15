@@ -173,9 +173,27 @@ const createFactura = async (req, res) => {
         );
       }
 
+      /**
+       * Una factura recién creada está en estado PENDIENTE (de pago). El pedido
+       * pasa a `FALTA_PAGO_FACTURA` para reflejar que ya hay factura emitida
+       * pero aún no cobrada. Cuando la factura se marca como PAGADA el pedido
+       * avanza a `FACTURADO` (ver updateFactura más abajo).
+       */
       await connection.execute(
-        "UPDATE pedidos SET factura_id = ?, estado = 'FACTURADO' WHERE id = ?",
+        "UPDATE pedidos SET factura_id = ?, estado = 'FALTA_PAGO_FACTURA' WHERE id = ?",
         [factura_id, pedido_id]
+      );
+
+      // Registrar evento en el historial del pedido
+      await connection.execute(
+        `INSERT INTO historial_pedido (pedido_id, cotizacion_id, tipo_evento, descripcion, usuario_id, usuario_nombre, valor_anterior, valor_nuevo, atendidos, no_atendidos)
+         VALUES (?, NULL, 'FACTURA_GENERADA', ?, ?, ?, NULL, NULL, NULL, NULL)`,
+        [
+          pedido_id,
+          `Factura ${numero_factura} emitida (S/ ${Number(total).toFixed(2)}). En espera de pago.`,
+          req.user?.id || null,
+          req.user?.nombre_completo || null,
+        ]
       );
 
       await connection.commit();
@@ -217,10 +235,30 @@ const updateFactura = async (req, res) => {
       );
       if (estado === 'PAGADA') {
         const pedido_id = existing[0].pedido_id;
+        /**
+         * Al cobrarse la factura, el pedido pasa de `FALTA_PAGO_FACTURA` a
+         * `FACTURADO`. El estado final `COMPLETADO` se asigna desde el manager
+         * (endpoint /api/pedidos/:id/completar) una vez que se entregan los
+         * exámenes / resultados al cliente.
+         */
+        await pool.execute(
+          "UPDATE pedidos SET estado = 'FACTURADO' WHERE id = ? AND estado IN ('FALTA_PAGO_FACTURA', 'COTIZACION_APROBADA')",
+          [pedido_id]
+        );
         await pool.execute(
           `INSERT INTO historial_pedido (pedido_id, cotizacion_id, tipo_evento, descripcion, usuario_id, usuario_nombre, valor_anterior, valor_nuevo, atendidos, no_atendidos)
            VALUES (?, NULL, 'PAGO_RECIBIDO', 'Factura marcada como pagada.', ?, ?, NULL, NULL, NULL, NULL)`,
           [pedido_id, req.user?.id || null, req.user?.nombre_completo || null]
+        );
+      } else if (estado === 'PENDIENTE') {
+        /**
+         * Reversa: si por alguna razón se vuelve a marcar PENDIENTE, asegurar
+         * que el pedido refleje FALTA_PAGO_FACTURA (no FACTURADO).
+         */
+        const pedido_id = existing[0].pedido_id;
+        await pool.execute(
+          "UPDATE pedidos SET estado = 'FALTA_PAGO_FACTURA' WHERE id = ? AND estado = 'FACTURADO'",
+          [pedido_id]
         );
       }
     }
@@ -270,6 +308,10 @@ const deleteFactura = async (req, res) => {
 
     const pedido_id = existing[0].pedido_id;
 
+    /**
+     * Al anular la factura, el pedido vuelve a `COTIZACION_APROBADA` (la
+     * cotización aprobada sigue vigente; solo se rehace la factura).
+     */
     await pool.execute(
       "UPDATE pedidos SET factura_id = NULL, estado = 'COTIZACION_APROBADA' WHERE factura_id = ?",
       [id]

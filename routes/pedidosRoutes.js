@@ -39,6 +39,9 @@ router.get('/:pedido_id/historial', authenticateToken, pedidosController.obtener
 // PATCH /api/pedidos/:pedido_id/estado — Actualiza el estado del pedido
 router.patch('/:pedido_id/estado', authenticateToken, requireRole('vendedor', 'manager'), pedidosController.actualizarEstadoPedido);
 
+// POST /api/pedidos/:pedido_id/completar — Marca el pedido como COMPLETADO (manager o vendedor)
+router.post('/:pedido_id/completar', authenticateToken, requireRole('vendedor', 'manager'), pedidosController.marcarCompletado);
+
 // POST /api/pedidos — Crea un nuevo pedido (vendedor, manager o cliente)
 router.post('/', authenticateToken, requireRole('vendedor', 'manager', 'cliente'), pedidosController.crearPedido);
 

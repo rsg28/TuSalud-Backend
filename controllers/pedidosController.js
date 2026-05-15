@@ -733,6 +733,11 @@ const agregarExamen = async (req, res) => {
   }
 };
 
+/**
+ * @deprecated `LISTO_PARA_COTIZACION` no se usa en el flujo real (no hay ruta
+ * que lo invoque). Se conserva por compatibilidad con datos históricos y por
+ * si en el futuro se introduce un paso explícito "marcar como listo".
+ */
 const marcarListoParaCotizacion = async (req, res) => {
   try {
     const { pedido_id } = req.params;
@@ -1015,6 +1020,11 @@ const cargarEmpleados = async (req, res) => {
   }
 };
 
+/**
+ * POST /api/pedidos/:pedido_id/completar — Marca el pedido como COMPLETADO.
+ * Solo es válido cuando el pedido ya está FACTURADO (factura pagada).
+ * Acción típica del manager: cierra el ciclo después de entregar los exámenes.
+ */
 const marcarCompletado = async (req, res) => {
   try {
     const { pedido_id } = req.params;
@@ -1022,7 +1032,21 @@ const marcarCompletado = async (req, res) => {
     if (pedido.length === 0) {
       return res.status(404).json({ error: 'Pedido no encontrado' });
     }
+    const estadoActual = pedido[0].estado;
+    if (estadoActual === 'COMPLETADO') {
+      return res.status(400).json({ error: 'El pedido ya está completado' });
+    }
+    if (estadoActual !== 'FACTURADO') {
+      return res.status(400).json({
+        error: 'Solo se pueden completar pedidos que ya están FACTURADOS (factura pagada).',
+      });
+    }
     await pool.execute("UPDATE pedidos SET estado = 'COMPLETADO' WHERE id = ?", [pedido_id]);
+    await pool.execute(
+      `INSERT INTO historial_pedido (pedido_id, cotizacion_id, tipo_evento, descripcion, usuario_id, usuario_nombre, valor_anterior, valor_nuevo, atendidos, no_atendidos)
+       VALUES (?, NULL, 'PEDIDO_COMPLETADO', 'Pedido marcado como completado.', ?, ?, ?, 'COMPLETADO', NULL, NULL)`,
+      [pedido_id, req.user?.id || null, req.user?.nombre_completo || null, estadoActual]
+    );
     const [updated] = await pool.execute('SELECT * FROM pedidos WHERE id = ?', [pedido_id]);
     res.json({ message: 'Pedido marcado como completado', pedido: updated[0] });
   } catch (error) {
