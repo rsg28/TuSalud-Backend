@@ -288,12 +288,6 @@ const forgotPassword = async (req, res) => {
       console.error('Resend error:', sendError);
       return res.status(500).json({ error: 'No se pudo enviar el correo. Intenta más tarde.' });
     }
-    if (sendData?.id) {
-      console.log('[forgotPassword] Resend enviado. id:', sendData.id, 'to:', emailNorm);
-    } else {
-      console.log('[forgotPassword] Resend enviado (sin id). to:', emailNorm);
-    }
-
     res.json({ message });
   } catch (error) {
     console.error('Error en forgotPassword:', error);

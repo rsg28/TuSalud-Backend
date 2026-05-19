@@ -226,8 +226,8 @@ const updateFactura = async (req, res) => {
     }
 
     if (estado !== undefined) {
-      if (estado === 'PAGADA' && req.user?.rol !== 'vendedor') {
-        return res.status(403).json({ error: 'Solo el vendedor puede marcar la factura como pagada' });
+      if (estado === 'PAGADA' && !['vendedor', 'manager'].includes(req.user?.rol)) {
+        return res.status(403).json({ error: 'Solo el vendedor o manager pueden marcar la factura como pagada' });
       }
       await pool.execute(
         'UPDATE facturas SET estado = ?, fecha_pago = COALESCE(?, fecha_pago) WHERE id = ?',

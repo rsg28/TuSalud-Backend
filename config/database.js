@@ -13,8 +13,6 @@ const dbConfig = {
   queueLimit: 0,
   enableKeepAlive: true,
   keepAliveInitialDelay: 0,
-  // Configuraciones adicionales para mejor manejo de errores
-  reconnect: true,
   timezone: '+00:00',
   charset: 'utf8mb4'
 };
@@ -43,11 +41,6 @@ async function testConnection() {
 
 // Probar conexión al iniciar
 testConnection();
-
-// Manejar errores de conexión
-pool.on('connection', (connection) => {
-  console.log('🔌 New connection established as id ' + connection.threadId);
-});
 
 pool.on('error', (err) => {
   console.error('❌ Database pool error:', err);
