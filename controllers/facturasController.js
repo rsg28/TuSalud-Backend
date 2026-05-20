@@ -187,7 +187,7 @@ const createFactura = async (req, res) => {
       // Registrar evento en el historial del pedido
       await connection.execute(
         `INSERT INTO historial_pedido (pedido_id, cotizacion_id, tipo_evento, descripcion, usuario_id, usuario_nombre, valor_anterior, valor_nuevo, atendidos, no_atendidos)
-         VALUES (?, NULL, 'FACTURA_GENERADA', ?, ?, ?, NULL, NULL, NULL, NULL)`,
+         VALUES (?, NULL, 'FACTURA_EMITIDA', ?, ?, ?, NULL, NULL, NULL, NULL)`,
         [
           pedido_id,
           `Factura ${numero_factura} emitida (S/ ${Number(total).toFixed(2)}). En espera de pago.`,

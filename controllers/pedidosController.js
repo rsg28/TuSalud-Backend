@@ -347,11 +347,13 @@ const obtenerPedido = async (req, res) => {
     );
 
     const [historial] = await pool.execute(
-      `SELECT h.*, u.nombre_completo AS usuario_nombre
+      `SELECT h.id, h.pedido_id, h.cotizacion_id, h.tipo_evento, h.descripcion, h.usuario_id,
+              COALESCE(NULLIF(TRIM(u.nombre_completo), ''), NULLIF(TRIM(h.usuario_nombre), '')) AS usuario_nombre,
+              h.valor_anterior, h.valor_nuevo, h.atendidos, h.no_atendidos, h.created_at
        FROM historial_pedido h
        LEFT JOIN usuarios u ON h.usuario_id = u.id
        WHERE h.pedido_id = ?
-       ORDER BY h.created_at ASC`,
+       ORDER BY h.created_at ASC, h.id ASC`,
       [pedido_id]
     );
 
@@ -774,15 +776,17 @@ const obtenerHistorial = async (req, res) => {
     const { pedido_id } = req.params;
 
     const [historial] = await pool.execute(
-      `SELECT h.*, u.nombre_completo AS usuario_nombre
+      `SELECT h.id, h.pedido_id, h.cotizacion_id, h.tipo_evento, h.descripcion, h.usuario_id,
+              COALESCE(NULLIF(TRIM(u.nombre_completo), ''), NULLIF(TRIM(h.usuario_nombre), '')) AS usuario_nombre,
+              h.valor_anterior, h.valor_nuevo, h.atendidos, h.no_atendidos, h.created_at
        FROM historial_pedido h
        LEFT JOIN usuarios u ON h.usuario_id = u.id
        WHERE h.pedido_id = ?
-       ORDER BY h.created_at ASC`,
+       ORDER BY h.created_at ASC, h.id ASC`,
       [pedido_id]
     );
 
-    res.json({ historial });
+    res.json({ historial: sanitizeForJson(historial) });
   } catch (error) {
     console.error('Error al obtener historial:', error);
     res.status(500).json({ error: 'Error al obtener historial' });
@@ -1042,10 +1046,11 @@ const marcarCompletado = async (req, res) => {
       });
     }
     await pool.execute("UPDATE pedidos SET estado = 'COMPLETADO' WHERE id = ?", [pedido_id]);
+    const descCompletado = `Pedido marcado como completado (estado anterior: ${estadoActual}).`;
     await pool.execute(
       `INSERT INTO historial_pedido (pedido_id, cotizacion_id, tipo_evento, descripcion, usuario_id, usuario_nombre, valor_anterior, valor_nuevo, atendidos, no_atendidos)
-       VALUES (?, NULL, 'PEDIDO_COMPLETADO', 'Pedido marcado como completado.', ?, ?, ?, 'COMPLETADO', NULL, NULL)`,
-      [pedido_id, req.user?.id || null, req.user?.nombre_completo || null, estadoActual]
+       VALUES (?, NULL, 'PEDIDO_COMPLETADO', ?, ?, ?, NULL, NULL, NULL, NULL)`,
+      [pedido_id, descCompletado, req.user?.id || null, req.user?.nombre_completo || null]
     );
     const [updated] = await pool.execute('SELECT * FROM pedidos WHERE id = ?', [pedido_id]);
     res.json({ message: 'Pedido marcado como completado', pedido: updated[0] });
