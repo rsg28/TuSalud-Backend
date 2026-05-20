@@ -220,8 +220,133 @@ function mergeNombresClienteEnPerfilSnapshot(snap, pairs) {
   return snap;
 }
 
+/**
+ * Mapa examen_id → precio vigente (sede específica o tarifa general; 0 si no hay fila).
+ * @param {import('mysql2/promise').Pool | import('mysql2/promise').PoolConnection} dbConn
+ * @param {number[]} examenIds
+ * @param {number|null|undefined} sedeId
+ */
+async function getPreciosMapPorExamenIds(dbConn, examenIds, sedeId) {
+  const map = new Map();
+  const ids = [...new Set(
+    (examenIds || [])
+      .map((id) => Number(id))
+      .filter((id) => Number.isFinite(id) && id > 0)
+  )];
+  if (!ids.length) return map;
+
+  const placeholders = ids.map(() => '?').join(',');
+  const sede = sedeId != null && Number.isFinite(Number(sedeId)) ? Number(sedeId) : null;
+
+  let rows;
+  if (sede != null) {
+    [rows] = await dbConn.query(
+      `SELECT e.id AS examen_id,
+              COALESCE(ep_sede.precio, ep_gen.precio, 0) AS precio
+         FROM examenes e
+         LEFT JOIN examen_precio ep_sede
+           ON ep_sede.examen_id = e.id
+          AND ep_sede.sede_id = ?
+          AND (ep_sede.vigente_hasta IS NULL OR ep_sede.vigente_hasta >= CURDATE())
+         LEFT JOIN examen_precio ep_gen
+           ON ep_gen.examen_id = e.id
+          AND ep_gen.sede_id IS NULL
+          AND (ep_gen.vigente_hasta IS NULL OR ep_gen.vigente_hasta >= CURDATE())
+        WHERE e.id IN (${placeholders})`,
+      [sede, ...ids]
+    );
+  } else {
+    [rows] = await dbConn.query(
+      `SELECT e.id AS examen_id,
+              COALESCE(ep_gen.precio, 0) AS precio
+         FROM examenes e
+         LEFT JOIN examen_precio ep_gen
+           ON ep_gen.examen_id = e.id
+          AND ep_gen.sede_id IS NULL
+          AND (ep_gen.vigente_hasta IS NULL OR ep_gen.vigente_hasta >= CURDATE())
+        WHERE e.id IN (${placeholders})`,
+      ids
+    );
+  }
+
+  for (const r of rows || []) {
+    map.set(Number(r.examen_id), Number(r.precio) || 0);
+  }
+  for (const id of ids) {
+    if (!map.has(id)) map.set(id, 0);
+  }
+  return map;
+}
+
+function parseSnapshotJson(raw) {
+  if (raw == null || raw === '') return null;
+  try {
+    return typeof raw === 'string' ? JSON.parse(raw) : raw;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Añade `precio` a cada examen del snapshot (catálogo vigente al leer la cotización).
+ * Si ya trae precio guardado, no lo sobrescribe.
+ */
+function enrichPerfilSnapshotWithPrecios(snap, preciosMap) {
+  if (!snap || !Array.isArray(snap.categorias)) return snap;
+  for (const cat of snap.categorias) {
+    const examenes = cat.examenes;
+    if (!Array.isArray(examenes)) continue;
+    for (const ex of examenes) {
+      const eid = Number(ex.examen_id);
+      if (ex.precio != null && ex.precio !== '' && !Number.isNaN(Number(ex.precio))) {
+        ex.precio = Number(ex.precio) || 0;
+        continue;
+      }
+      ex.precio = preciosMap.get(eid) ?? 0;
+    }
+  }
+  return snap;
+}
+
+/**
+ * Enriquece examenes_snapshot_json de ítems PERFIL con precio por examen.
+ * @param {import('mysql2/promise').Pool | import('mysql2/promise').PoolConnection} dbConn
+ * @param {Array<object>} items — filas de cotizacion_items
+ * @param {number|null} sedeId — sede del pedido (tarifa)
+ */
+async function enrichCotizacionItemsSnapshots(dbConn, items, sedeId) {
+  if (!Array.isArray(items) || items.length === 0) return items;
+
+  const examenIds = [];
+  for (const it of items) {
+    if (String(it.tipo_item || '').toUpperCase() !== 'PERFIL') continue;
+    const snap = parseSnapshotJson(it.examenes_snapshot_json);
+    if (!snap?.categorias) continue;
+    for (const cat of snap.categorias) {
+      for (const ex of cat.examenes || []) {
+        if (ex.examen_id != null) examenIds.push(Number(ex.examen_id));
+      }
+    }
+  }
+
+  const preciosMap = await getPreciosMapPorExamenIds(dbConn, examenIds, sedeId);
+
+  return items.map((it) => {
+    if (String(it.tipo_item || '').toUpperCase() !== 'PERFIL' || !it.examenes_snapshot_json) {
+      return it;
+    }
+    const snap = parseSnapshotJson(it.examenes_snapshot_json);
+    if (!snap) return it;
+    enrichPerfilSnapshotWithPrecios(snap, preciosMap);
+    return { ...it, examenes_snapshot_json: snap };
+  });
+}
+
 module.exports = {
   buildPerfilSnapshot,
   buildPacienteExamenesSnapshot,
   mergeNombresClienteEnPerfilSnapshot,
+  getPreciosMapPorExamenIds,
+  enrichPerfilSnapshotWithPrecios,
+  enrichCotizacionItemsSnapshots,
 };

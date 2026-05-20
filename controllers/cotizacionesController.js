@@ -6,7 +6,11 @@ const {
     emitirNotificacionAVendedorDePedido,
   },
 } = require('./notificacionesController');
-const { buildPerfilSnapshot, mergeNombresClienteEnPerfilSnapshot } = require('../utils/perfilSnapshot');
+const {
+  buildPerfilSnapshot,
+  mergeNombresClienteEnPerfilSnapshot,
+  enrichCotizacionItemsSnapshots,
+} = require('../utils/perfilSnapshot');
 
 // Estados válidos de cotización. El manager solo aprueba (APROBADA_POR_MANAGER), no rechaza.
 const ESTADOS_COTIZACION = ['BORRADOR', 'ENVIADA', 'ENVIADA_AL_CLIENTE', 'ENVIADA_AL_MANAGER', 'APROBADA_POR_MANAGER', 'APROBADA', 'RECHAZADA'];
@@ -305,7 +309,9 @@ const getCotizacionById = async (req, res) => {
       }
     }
 
-    const [items] = await pool.execute(SELECT_ITEMS_SQL, [id]);
+    let [items] = await pool.execute(SELECT_ITEMS_SQL, [id]);
+    const [pedRow] = await pool.execute('SELECT sede_id FROM pedidos WHERE id = ?', [cotizaciones[0].pedido_id]);
+    items = await enrichCotizacionItemsSnapshots(pool, items, pedRow[0]?.sede_id ?? null);
 
     res.json({
       cotizacion: cotizaciones[0],
@@ -347,7 +353,9 @@ const getCotizacionItems = async (req, res) => {
       }
     }
 
-    const [items] = await pool.execute(SELECT_ITEMS_SQL, [id]);
+    let [items] = await pool.execute(SELECT_ITEMS_SQL, [id]);
+    const [pedRow] = await pool.execute('SELECT sede_id FROM pedidos WHERE id = ?', [existe[0].pedido_id]);
+    items = await enrichCotizacionItemsSnapshots(pool, items, pedRow[0]?.sede_id ?? null);
     res.json({ items });
   } catch (error) {
     console.error('Error al obtener ítems de cotización:', error);
