@@ -412,6 +412,7 @@ CREATE TABLE `factura_cotizacion` (
 CREATE TABLE `factura_detalle` (
   `id` int NOT NULL AUTO_INCREMENT,
   `factura_id` int NOT NULL,
+  `cotizacion_id` int DEFAULT NULL,
   `tipo_item` enum('PERFIL','EXAMEN') NOT NULL DEFAULT 'EXAMEN',
   `perfil_id` int DEFAULT NULL,
   `tipo_emo` enum('PREOC','ANUAL','RETIRO','VISITA') DEFAULT NULL,
@@ -422,11 +423,13 @@ CREATE TABLE `factura_detalle` (
   `subtotal` decimal(14,2) NOT NULL,
   PRIMARY KEY (`id`),
   KEY `idx_factura_detalle_factura` (`factura_id`),
+  KEY `idx_factura_detalle_cotizacion` (`cotizacion_id`),
   KEY `idx_factura_detalle_perfil` (`perfil_id`),
   KEY `idx_factura_detalle_examen` (`examen_id`),
   CONSTRAINT `factura_detalle_ibfk_1` FOREIGN KEY (`factura_id`) REFERENCES `facturas` (`id`) ON DELETE CASCADE,
   CONSTRAINT `factura_detalle_ibfk_2` FOREIGN KEY (`examen_id`) REFERENCES `examenes` (`id`) ON DELETE RESTRICT,
   CONSTRAINT `factura_detalle_ibfk_3` FOREIGN KEY (`perfil_id`) REFERENCES `emo_perfiles` (`id`) ON DELETE RESTRICT,
+  CONSTRAINT `factura_detalle_ibfk_4` FOREIGN KEY (`cotizacion_id`) REFERENCES `cotizaciones` (`id`) ON DELETE SET NULL,
   CONSTRAINT `factura_detalle_chk_tipo` CHECK (
     (`tipo_item` = 'EXAMEN' AND `examen_id` IS NOT NULL AND `perfil_id` IS NULL AND `tipo_emo` IS NULL)
     OR
