@@ -3,26 +3,14 @@ const { normalizarRol } = require('../middleware/auth');
 const {
   helpers: { emitirNotificacionAVendedorDePedido },
 } = require('./notificacionesController');
-const { buildPacienteExamenesSnapshot } = require('../utils/perfilSnapshot');
+const { persistirSnapshotPaciente: persistirSnapshotPacienteBase } = require('../utils/perfilSnapshot');
 
 /**
- * Tras insertar las filas de paciente_examen_asignado del paciente, congela el
- * snapshot inmutable y lo guarda en pedido_pacientes.examenes_snapshot_json.
- * Tolerante a fallos: si algo se rompe, no aborta la operación principal
- * (el snapshot queda NULL y se puede regenerar después).
+ * Congela el snapshot histórico de un paciente con el tag «pedidos» para los logs.
+ * Delega en el helper compartido `utils/perfilSnapshot.persistirSnapshotPaciente`.
  */
-async function persistirSnapshotPaciente(connection, pacienteId, opts = {}) {
-  if (!pacienteId) return;
-  try {
-    const snap = await buildPacienteExamenesSnapshot(connection, pacienteId, opts);
-    if (!snap) return;
-    await connection.execute(
-      'UPDATE pedido_pacientes SET examenes_snapshot_json = ? WHERE id = ?',
-      [JSON.stringify(snap), pacienteId]
-    );
-  } catch (e) {
-    console.warn('[pedidos] snapshot paciente falló:', e?.message || e);
-  }
+function persistirSnapshotPaciente(connection, pacienteId, opts = {}) {
+  return persistirSnapshotPacienteBase(connection, pacienteId, { ...opts, tag: 'pedidos' });
 }
 
 // Asegura que ningún BigInt llegue a res.json() (mysql2 puede devolver BigInt y JSON.stringify falla)

@@ -342,6 +342,50 @@ async function enrichCotizacionItemsSnapshots(dbConn, items, sedeId) {
   });
 }
 
+/**
+ * Persiste el snapshot histórico en `pedido_pacientes.examenes_snapshot_json`
+ * para un paciente. Reúne `emo_perfil_id` y `emo_tipo` del paciente para
+ * enriquecer el snapshot con el perfil de origen. Tolerante a fallos: si algo
+ * se rompe, no lanza — solo escribe un warning. Sirve para usar en cualquier
+ * controlador (pedidos, pacientes, solicitudes-agregar) sin duplicar lógica.
+ *
+ * @param {import('mysql2/promise').Pool | import('mysql2/promise').PoolConnection} dbConn
+ * @param {number} pacienteId
+ * @param {object} [opts]
+ * @param {number} [opts.perfilId] Para no leer otra vez si ya lo tienes.
+ * @param {string} [opts.tipoEmo]
+ * @param {string} [opts.tag]      Etiqueta para el log de error (origen del call).
+ */
+async function persistirSnapshotPaciente(dbConn, pacienteId, opts = {}) {
+  if (!pacienteId) return;
+  try {
+    let perfilId = opts.perfilId;
+    let tipoEmo = opts.tipoEmo;
+    if (perfilId === undefined || tipoEmo === undefined) {
+      const [rows] = await dbConn.execute(
+        'SELECT emo_perfil_id, emo_tipo FROM pedido_pacientes WHERE id = ?',
+        [pacienteId]
+      );
+      if (rows.length) {
+        if (perfilId === undefined) perfilId = rows[0].emo_perfil_id ?? null;
+        if (tipoEmo === undefined) tipoEmo = rows[0].emo_tipo ?? null;
+      }
+    }
+    const snap = await buildPacienteExamenesSnapshot(dbConn, pacienteId, {
+      perfilId: perfilId ?? null,
+      tipoEmo: tipoEmo ?? null,
+    });
+    if (!snap) return;
+    await dbConn.execute(
+      'UPDATE pedido_pacientes SET examenes_snapshot_json = ? WHERE id = ?',
+      [JSON.stringify(snap), pacienteId]
+    );
+  } catch (e) {
+    const tag = opts.tag ? `[${opts.tag}] ` : '';
+    console.warn(`${tag}snapshot paciente falló:`, e?.message || e);
+  }
+}
+
 module.exports = {
   buildPerfilSnapshot,
   buildPacienteExamenesSnapshot,
@@ -349,4 +393,5 @@ module.exports = {
   getPreciosMapPorExamenIds,
   enrichPerfilSnapshotWithPrecios,
   enrichCotizacionItemsSnapshots,
+  persistirSnapshotPaciente,
 };

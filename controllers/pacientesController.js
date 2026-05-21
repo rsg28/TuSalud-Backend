@@ -1,7 +1,17 @@
 const pool = require('../config/database');
 const { validationResult } = require('express-validator');
+const { persistirSnapshotPaciente: persistirSnapshotPacienteBase } = require('../utils/perfilSnapshot');
 
 // En el nuevo esquema los "pacientes" son pedido_pacientes (empleados por pedido).
+
+/**
+ * Congela la "foto" inmutable de exámenes asignados al paciente. Delega en
+ * `utils/perfilSnapshot.persistirSnapshotPaciente` — leerá `emo_perfil_id` y
+ * `emo_tipo` desde la BD si no se pasan, y nunca lanza (solo logea).
+ */
+function persistirSnapshotPaciente(dbConn, pacienteId) {
+  return persistirSnapshotPacienteBase(dbConn, pacienteId, { tag: 'pacientes' });
+}
 
 // Listar pacientes: por pedido_id (obligatorio) o todos si no se filtra
 const getAllPacientes = async (req, res) => {
@@ -76,11 +86,22 @@ const getPacienteById = async (req, res) => {
       [id]
     );
 
+    /**
+     * `examenes_snapshot_json` viene en `rows[0]` ya como columna JSON. mysql2
+     * lo devuelve como string en algunas configuraciones, así que lo
+     * normalizamos a objeto antes de mandarlo al frontend.
+     */
+    let snapshot = rows[0].examenes_snapshot_json ?? null;
+    if (typeof snapshot === 'string' && snapshot.length > 0) {
+      try { snapshot = JSON.parse(snapshot); } catch { /* deja string si está corrupto */ }
+    }
+
     res.json({
       paciente: {
         ...rows[0],
         examenes_asignados: asignados.map(a => a.examen_id),
-        examenes_completados: completados
+        examenes_completados: completados,
+        examenes_snapshot: snapshot,
       }
     });
   } catch (error) {
@@ -119,6 +140,9 @@ const createPaciente = async (req, res) => {
         );
       }
     }
+
+    /** Congelar el snapshot histórico recién creado. */
+    await persistirSnapshotPaciente(pool, pacienteId);
 
     const [newPaciente] = await pool.execute(
       'SELECT * FROM pedido_pacientes WHERE id = ?',
@@ -167,6 +191,8 @@ const updatePaciente = async (req, res) => {
           [id, examen_id]
         );
       }
+      /** Solo re-congelamos cuando cambió la lista de exámenes. */
+      await persistirSnapshotPaciente(pool, id);
     }
 
     const [updated] = await pool.execute('SELECT * FROM pedido_pacientes WHERE id = ?', [id]);

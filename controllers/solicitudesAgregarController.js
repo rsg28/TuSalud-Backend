@@ -1,5 +1,14 @@
 const pool = require('../config/database');
 const { crearCotizacionComplementariaConConnection } = require('./cotizacionesController');
+const { persistirSnapshotPaciente: persistirSnapshotPacienteBase } = require('../utils/perfilSnapshot');
+
+/**
+ * Congela el snapshot histórico del paciente tras añadirle exámenes desde una
+ * solicitud aprobada. Delega en el helper compartido para evitar duplicación.
+ */
+function persistirSnapshotPaciente(connection, pacienteId) {
+  return persistirSnapshotPacienteBase(connection, pacienteId, { tag: 'solicitudes-agregar' });
+}
 
 function sanitizeForJson(obj) {
   if (obj === null || obj === undefined) return obj;
@@ -304,6 +313,24 @@ const actualizarEstado = async (req, res) => {
             [pacienteId, examen_id]
           );
         }
+      }
+
+      /**
+       * Re-congelamos el snapshot de cada paciente afectado. Lo hacemos una sola
+       * vez por paciente (no por cada examen añadido) para mantener O(N pacientes)
+       * y no O(N pacientes × M exámenes).
+       */
+      const pacientesAfectados = new Set();
+      for (const row of examenesRows) {
+        if (row.solicitud_agregar_paciente_id == null) {
+          for (const pid of todosPacienteIds) pacientesAfectados.add(pid);
+        } else {
+          const pid = mapSapIdToPacienteId[row.solicitud_agregar_paciente_id];
+          if (pid) pacientesAfectados.add(pid);
+        }
+      }
+      for (const pid of pacientesAfectados) {
+        await persistirSnapshotPaciente(connection, pid);
       }
 
       const [count] = await connection.execute('SELECT COUNT(*) AS c FROM pedido_pacientes WHERE pedido_id = ?', [pedido_id]);
