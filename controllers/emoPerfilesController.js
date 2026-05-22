@@ -281,7 +281,8 @@ exports.listarVisiblesParaEmpresa = async (req, res) => {
     const filtrarPorTipo = tipoEmoRaw && EMO_TIPOS_VALIDOS.includes(tipoEmoRaw);
 
     const filtros = [];
-    const params = [empresaId, empresaId];
+    /** Visibilidad: GLOBAL, asignación directa o membresía en grupo (empresa_grupo). */
+    const params = [empresaId, empresaId, empresaId, empresaId];
     if (q) {
       filtros.push('LOWER(p.nombre) LIKE LOWER(?)');
       params.push(`%${q}%`);
@@ -295,26 +296,41 @@ exports.listarVisiblesParaEmpresa = async (req, res) => {
     }
     const whereExtra = filtros.length > 0 ? ` AND (${filtros.join(' AND ')})` : '';
 
-    // Trae perfiles + indicadores de origen para esa empresa.
+    const visibilidadParaEmpresa = `
+      (
+        p.visibilidad = 'GLOBAL'
+        OR EXISTS (
+          SELECT 1 FROM emo_perfil_asignacion epa
+           WHERE epa.perfil_id = p.id AND epa.empresa_id = ?
+        )
+        OR EXISTS (
+          SELECT 1
+            FROM emo_perfil_grupo_asignacion epga
+            INNER JOIN empresa_grupo eg
+                    ON eg.grupo_id = epga.grupo_id AND eg.empresa_id = ?
+           WHERE epga.perfil_id = p.id
+        )
+      )`;
+
+    // Trae perfiles + indicadores de origen para esa empresa (sin JOINs amplios que dupliquen filas).
     const [rows] = await pool.execute(
       `SELECT p.id, p.nombre, p.visibilidad,
               CASE WHEN p.visibilidad = 'GLOBAL' THEN 1 ELSE 0 END AS es_global,
-              CASE WHEN epa.empresa_id IS NOT NULL THEN 1 ELSE 0 END AS asignado_empresa,
-              GROUP_CONCAT(DISTINCT g.nombre ORDER BY g.nombre SEPARATOR '|') AS grupos_nombres
+              CASE WHEN EXISTS (
+                SELECT 1 FROM emo_perfil_asignacion epa
+                 WHERE epa.perfil_id = p.id AND epa.empresa_id = ?
+              ) THEN 1 ELSE 0 END AS asignado_empresa,
+              (
+                SELECT GROUP_CONCAT(DISTINCT g.nombre ORDER BY g.nombre SEPARATOR '|')
+                  FROM emo_perfil_grupo_asignacion epga
+                  INNER JOIN empresa_grupo eg
+                          ON eg.grupo_id = epga.grupo_id AND eg.empresa_id = ?
+                  INNER JOIN grupos_empresariales g ON g.id = epga.grupo_id
+                 WHERE epga.perfil_id = p.id
+              ) AS grupos_nombres
          FROM emo_perfiles p
-    LEFT JOIN emo_perfil_asignacion epa
-           ON epa.perfil_id = p.id AND epa.empresa_id = ?
-    LEFT JOIN emo_perfil_grupo_asignacion epga
-           ON epga.perfil_id = p.id
-    LEFT JOIN empresa_grupo eg
-           ON eg.grupo_id = epga.grupo_id AND eg.empresa_id = ?
-    LEFT JOIN grupos_empresariales g
-           ON g.id = epga.grupo_id AND eg.empresa_id IS NOT NULL
-        WHERE (p.visibilidad = 'GLOBAL'
-           OR epa.empresa_id IS NOT NULL
-           OR eg.empresa_id IS NOT NULL)
+        WHERE ${visibilidadParaEmpresa}
            ${whereExtra}
-     GROUP BY p.id, p.nombre, p.visibilidad
      ORDER BY p.nombre ASC`,
       params
     );

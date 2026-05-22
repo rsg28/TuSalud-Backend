@@ -20,7 +20,7 @@ router.get('/', authenticateToken, listarGrupos);
 router.get('/:id', authenticateToken, obtenerGrupo);
 router.post('/', authenticateToken, requireRole('manager', 'vendedor'), grupoValidation, crearGrupo);
 router.put('/:id', authenticateToken, requireRole('manager', 'vendedor'), grupoValidation, actualizarGrupo);
-router.delete('/:id', authenticateToken, requireRole('manager'), eliminarGrupo);
+router.delete('/:id', authenticateToken, requireRole('manager', 'vendedor'), eliminarGrupo);
 
 // Empresas dentro de un grupo
 router.put('/:id/empresas', authenticateToken, requireRole('manager', 'vendedor'), setEmpresasDeGrupo);
