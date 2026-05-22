@@ -2268,10 +2268,52 @@ function isSemanticAnchorString(t) {
   return false;
 }
 
+/**
+ * ¿El item parece ser una "marca de columna" dentro de una fila de tabla?
+ * Una marca típica es una "X" pequeña, "x", "✓", o un valor monetario "S/ 12.50".
+ * Si el item candidato a ancla está acompañado por varias marcas en su misma Y,
+ * es porque NO es un título suelto sino una fila de datos cuyo nombre arranca
+ * con "ANEXO ..." (caso real: "Anexo 16 (Evaluación clínica)" como nombre de
+ * examen en protocolos peruanos).
+ */
+function looksLikeColumnMarkText(s) {
+  const t = String(s || '').trim();
+  if (!t) return false;
+  // Marca corta tipo "X" / "x" / "✓" / "✔" / "·" / "•".
+  if (/^[Xx]$|^[✓✔√●●·•]$/.test(t)) return true;
+  // Precio "S/ 12.50".
+  if (/^S\/\s*\d/i.test(t)) return true;
+  // Sólo dígitos y separadores (un número en la columna de cantidad).
+  if (/^[\d.,]+$/.test(t) && t.length <= 8) return true;
+  return false;
+}
+
+function countRowDataMarkersNearY(items, candidate, yTol = ROW_Y_TOL) {
+  let count = 0;
+  for (const o of items) {
+    if (o === candidate) continue;
+    if (Math.abs(o.y - candidate.y) > yTol) continue;
+    // La marca debe estar a la derecha del item-candidato (típico en tablas).
+    if (o.x <= candidate.x + 2) continue;
+    if (looksLikeColumnMarkText(o.str)) count += 1;
+  }
+  return count;
+}
+
 function detectSemanticAnchors(items) {
   const out = [];
   for (const it of items) {
     if (!isSemanticAnchorString(it.str)) continue;
+    // Si el candidato tiene varias marcas "X"/precio en su misma Y, en
+    // realidad es una fila de tabla cuyo nombre comienza con "ANEXO N"
+    // (caso real: "Anexo 16 (Evaluación clínica)" como examen).
+    const markers = countRowDataMarkersNearY(items, it);
+    if (markers >= 2) {
+      if (process.env.DEBUG_ANCHORS) {
+        console.error('[anchor:skip] data-row markers=', markers, 'y=', it.y.toFixed(2), 'str=', it.str.slice(0, 60));
+      }
+      continue;
+    }
     const { yTop, yBot } = textItemVerticalBBox(it);
     if (process.env.DEBUG_ANCHORS) {
       console.error('[anchor] raw y=', it.y.toFixed(2), 'h=', it.h.toFixed(2), 'yTop=', yTop.toFixed(2), 'yBot=', yBot.toFixed(2), 'str=', it.str.slice(0, 60));
