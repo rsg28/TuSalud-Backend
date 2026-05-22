@@ -33,13 +33,13 @@ async function adjuntarCotizacionesALista(pedidos) {
   if (pedidoIds.length > 0) {
     const placeholders = pedidoIds.map(() => '?').join(',');
     const [cots] = await pool.execute(
-      `SELECT pedido_id, estado FROM cotizaciones WHERE pedido_id IN (${placeholders}) ORDER BY es_complementaria ASC, id ASC`,
+      `SELECT pedido_id, estado, creador_tipo FROM cotizaciones WHERE pedido_id IN (${placeholders}) ORDER BY es_complementaria ASC, id ASC`,
       pedidoIds
     );
     for (const row of cots) {
       const pid = row.pedido_id;
       if (!cotizacionesPorPedido[pid]) cotizacionesPorPedido[pid] = [];
-      cotizacionesPorPedido[pid].push({ estado: row.estado });
+      cotizacionesPorPedido[pid].push({ estado: row.estado, creador_tipo: row.creador_tipo });
     }
   }
   return pedidos.map((p) => ({

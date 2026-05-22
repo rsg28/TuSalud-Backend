@@ -703,13 +703,14 @@ function autorizarTransicionCotizacion({ rol, estadoActual, estadoNuevo, creador
 
   // Cliente
   if (rol === 'cliente') {
-    // El cliente solo puede mover SUS cotizaciones (creadas por él) o aprobar/rechazar
-    // las que le envió el vendedor.
+    // El cliente puede:
+    //  1) Enviar SU cotización en BORRADOR al vendedor.
+    //  2) Aprobar/rechazar cualquier cotización que esté en `ENVIADA_AL_CLIENTE`
+    //     (sin importar creador_tipo): es el vendedor quien marca ese estado
+    //     explícitamente para pedir la aprobación del cliente, incluso si la
+    //     cotización original fue creada por el cliente y el vendedor la
+    //     devolvió con cambios.
     if (estadoNuevo === 'APROBADA' || estadoNuevo === 'RECHAZADA') {
-      // Sólo puede aprobar/rechazar cotizaciones que el vendedor le envió.
-      if (creadorTipo === 'CLIENTE') {
-        return { ok: false, error: 'No puedes aprobar/rechazar tu propia cotización.' };
-      }
       if (estadoActual !== 'ENVIADA_AL_CLIENTE') {
         return { ok: false, error: 'La cotización no está pendiente de tu aprobación.' };
       }
@@ -863,9 +864,12 @@ const updateEstadoCotizacion = async (req, res) => {
             [id, pedido_id]
           );
         }
-        // El historial depende de quién aprobó. Si la cot era del cliente,
-        // quien aprueba es el vendedor (ya validado por autorizarTransicion).
-        const descAprob = cotEsDelCliente
+        // El historial depende del ROL del usuario que ejecuta la acción, no
+        // del creador. Una cotización originada por el cliente puede ser
+        // aprobada por el vendedor (tal cual) o devuelta y aprobada después
+        // por el propio cliente.
+        const aprobadaPorVendedor = rol === 'vendedor';
+        const descAprob = aprobadaPorVendedor
           ? `El vendedor${req.user?.nombre_completo ? ` (${req.user.nombre_completo})` : ''} aprobó la cotización del cliente.`
           : 'El cliente aprobó la cotización.';
         await connection.execute(
@@ -946,7 +950,9 @@ const updateEstadoCotizacion = async (req, res) => {
                 remitenteUsuarioId: req.user ? req.user.id : null,
               });
             } else if (estado === 'APROBADA') {
-              if (cotEsDelCliente && clienteCreadorId) {
+              // El destinatario depende de QUIÉN aprueba, no del creador de la cot.
+              const aprobadaPorVendedor = rol === 'vendedor';
+              if (aprobadaPorVendedor && cotEsDelCliente && clienteCreadorId) {
                 // Vendedor aprobó la cotización del cliente → notificar al cliente creador.
                 await conn2.execute(
                   `INSERT INTO notificaciones (tipo, titulo, mensaje, contexto_json, remitente_usuario_id, destinatario_usuario_id, destinatario_empresa_id, leida)
@@ -966,6 +972,7 @@ const updateEstadoCotizacion = async (req, res) => {
                   ]
                 );
               } else {
+                // Cliente aprobó (su propia cot devuelta por vendedor, o cot del vendedor) → notificar al vendedor.
                 await emitirNotificacionAVendedorDePedido(conn2, {
                   pedidoId,
                   tipo: 'MENSAJE',
@@ -984,7 +991,8 @@ const updateEstadoCotizacion = async (req, res) => {
               const motivo = mensaje_rechazo && String(mensaje_rechazo).trim()
                 ? `Motivo: ${String(mensaje_rechazo).trim()}`
                 : 'No se indicó motivo.';
-              if (cotEsDelCliente && clienteCreadorId) {
+              const rechazadaPorVendedor = rol === 'vendedor';
+              if (rechazadaPorVendedor && cotEsDelCliente && clienteCreadorId) {
                 // Vendedor rechazó la cotización del cliente → avisar al cliente creador.
                 await conn2.execute(
                   `INSERT INTO notificaciones (tipo, titulo, mensaje, contexto_json, remitente_usuario_id, destinatario_usuario_id, destinatario_empresa_id, leida)
