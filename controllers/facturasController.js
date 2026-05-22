@@ -64,16 +64,27 @@ const getFacturaById = async (req, res) => {
       [id]
     );
 
+    /**
+     * `examenes_snapshot_json` no se copia en `factura_detalle`; se recupera
+     * desde `cotizacion_items` con un JOIN por (cotizacion_id + tipo_item +
+     * perfil_id ó examen_id) para que el frontend pueda reconstruir grupos
+     * por perfil EMO en la vista de la factura.
+     */
     const [detalles] = await pool.execute(
       `SELECT fd.*,
               e.nombre AS examen_nombre,
               pf.nombre AS perfil_nombre,
               c.numero_cotizacion AS cotizacion_numero,
-              c.es_complementaria AS cotizacion_es_complementaria
+              c.es_complementaria AS cotizacion_es_complementaria,
+              ci.examenes_snapshot_json
        FROM factura_detalle fd
        LEFT JOIN examenes e   ON fd.examen_id = e.id
        LEFT JOIN emo_perfiles pf ON fd.perfil_id = pf.id
        LEFT JOIN cotizaciones c ON fd.cotizacion_id = c.id
+       LEFT JOIN cotizacion_items ci
+              ON ci.cotizacion_id = fd.cotizacion_id
+             AND ci.tipo_item = fd.tipo_item
+             AND ((ci.perfil_id <=> fd.perfil_id) AND (ci.examen_id <=> fd.examen_id))
        WHERE fd.factura_id = ?
        ORDER BY c.es_complementaria ASC, c.id ASC, fd.id`,
       [id]
