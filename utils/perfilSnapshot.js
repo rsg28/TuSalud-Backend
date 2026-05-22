@@ -173,20 +173,48 @@ async function buildPacienteExamenesSnapshot(dbConn, pacienteId, opts = {}) {
     }
   }
 
-  return {
-    snapshot_at: nowIso(),
-    perfil_id: opts.perfilId ?? null,
-    perfil_nombre: perfilNombre,
-    perfil_tipo: perfilTipo,
-    tipo_emo: opts.tipoEmo ? safeUpper(opts.tipoEmo) : null,
-    examenes: filas.map((f) => ({
+  // Calcula el set de examen_id que pertenecían al perfil/tipo_emo aplicado
+  // en el momento del snapshot. Lo usamos para marcar `origen` en cada examen
+  // del paciente: PERFIL (estaba en el perfil) o ADICIONAL (vino de la columna
+  // "Evaluaciones adicionales / condicionales" del archivo, o lo agregó un
+  // usuario después). Es clave para auditoría retroactiva: permite saber
+  // exactamente qué se tomó "por el perfil" y qué se tomó "extra" en una fecha.
+  const tipoEmoUpper = opts.tipoEmo ? safeUpper(opts.tipoEmo) : null;
+  let examenesDelPerfil = new Set();
+  if (opts.perfilId && tipoEmoUpper && TIPOS_EMO_VALIDOS.has(tipoEmoUpper)) {
+    const [pe] = await dbConn.query(
+      'SELECT examen_id FROM emo_perfil_examenes WHERE perfil_id = ? AND tipo_emo = ?',
+      [opts.perfilId, tipoEmoUpper]
+    );
+    examenesDelPerfil = new Set(pe.map((r) => Number(r.examen_id)));
+  }
+
+  let totalPerfil = 0;
+  let totalAdicionales = 0;
+  const examenes = filas.map((f) => {
+    const origen = examenesDelPerfil.has(Number(f.examen_id)) ? 'PERFIL' : 'ADICIONAL';
+    if (origen === 'PERFIL') totalPerfil += 1;
+    else totalAdicionales += 1;
+    return {
       examen_id: f.examen_id,
       codigo_legacy: f.codigo_legacy ?? null,
       nombre: f.examen_nombre,
       categoria_nombre: f.categoria_nombre || null,
       categoria_id_cola: f.categoria_id_cola || null,
-    })),
+      origen,
+    };
+  });
+
+  return {
+    snapshot_at: nowIso(),
+    perfil_id: opts.perfilId ?? null,
+    perfil_nombre: perfilNombre,
+    perfil_tipo: perfilTipo,
+    tipo_emo: tipoEmoUpper,
+    examenes,
     total_examenes: filas.length,
+    total_perfil: totalPerfil,
+    total_adicionales: totalAdicionales,
   };
 }
 

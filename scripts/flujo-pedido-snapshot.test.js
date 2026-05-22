@@ -100,9 +100,12 @@ test('pacientesController.updatePaciente: persiste snapshot tras reasignar exám
   ]);
   // 8) SELECT nombre, tipo FROM emo_perfiles WHERE id = ?
   pool.pushResponse([{ nombre: 'OPERARIO', tipo: 'PERFIL' }]);
-  // 9) UPDATE pedido_pacientes SET examenes_snapshot_json = ?  ← LA CLAVE
+  // 9) SELECT examen_id FROM emo_perfil_examenes WHERE perfil_id = ? AND tipo_emo = ?
+  //    (set de exámenes del perfil → para marcar origen PERFIL vs ADICIONAL)
+  pool.pushResponse([{ examen_id: 101 }, { examen_id: 202 }]);
+  // 10) UPDATE pedido_pacientes SET examenes_snapshot_json = ?  ← LA CLAVE
   pool.pushResponse([], { affectedRows: 1 });
-  // 10) SELECT * FROM pedido_pacientes WHERE id = ?
+  // 11) SELECT * FROM pedido_pacientes WHERE id = ?
   pool.pushResponse([{
     id: 7, dni: '12345678', nombre_completo: 'JUAN',
     examenes_snapshot_json: '{"total_examenes":2}',
@@ -135,6 +138,75 @@ test('pacientesController.updatePaciente: persiste snapshot tras reasignar exám
     parsed.examenes.map((e) => e.examen_id).sort(),
     [101, 202]
   );
+  // Ambos exámenes pertenecen al perfil → origen PERFIL, 0 adicionales.
+  assert.equal(parsed.total_perfil, 2);
+  assert.equal(parsed.total_adicionales, 0);
+  for (const e of parsed.examenes) {
+    assert.equal(e.origen, 'PERFIL', `examen ${e.examen_id} debe ir como PERFIL`);
+  }
+});
+
+test('updatePaciente: distingue examen del PERFIL vs ADICIONAL (columna "Evaluaciones adicionales / condicionales")', async () => {
+  const pool = makeFakePool();
+
+  // 1) SELECT id FROM pedido_pacientes WHERE id = ?  → existe
+  pool.pushResponse([{ id: 7 }]);
+  // 2) UPDATE pedido_pacientes ...
+  pool.pushResponse([], { affectedRows: 1 });
+  // 3) DELETE paciente_examen_asignado
+  pool.pushResponse([], { affectedRows: 0 });
+  // 4..6) INSERT (3 exámenes asignados al paciente: 101, 202 son del perfil, 999 es adicional)
+  pool.pushResponse([], { affectedRows: 1 });
+  pool.pushResponse([], { affectedRows: 1 });
+  pool.pushResponse([], { affectedRows: 1 });
+  // 7) SELECT emo_perfil_id, emo_tipo  → perfil 42 / PREOC
+  pool.pushResponse([{ emo_perfil_id: 42, emo_tipo: 'PREOC' }]);
+  // 8) SELECT pea.examen_id ...  (los 3 que el paciente realmente tiene asignados)
+  pool.pushResponse([
+    { examen_id: 101, codigo_legacy: 'EX-101', examen_nombre: 'A',
+      categoria_id: 1, categoria_nombre: 'LAB', categoria_id_cola: 'LAB' },
+    { examen_id: 202, codigo_legacy: 'EX-202', examen_nombre: 'B',
+      categoria_id: 1, categoria_nombre: 'LAB', categoria_id_cola: 'LAB' },
+    { examen_id: 999, codigo_legacy: 'EX-999', examen_nombre: 'ESPIROMETRIA ADICIONAL',
+      categoria_id: 2, categoria_nombre: 'OCUP', categoria_id_cola: 'OCU' },
+  ]);
+  // 9) SELECT FROM emo_perfiles
+  pool.pushResponse([{ nombre: 'OPERARIO', tipo: 'PERFIL' }]);
+  // 10) SELECT examen_id FROM emo_perfil_examenes (solo 101 y 202 pertenecen al perfil)
+  pool.pushResponse([{ examen_id: 101 }, { examen_id: 202 }]);
+  // 11) UPDATE pedido_pacientes SET examenes_snapshot_json
+  pool.pushResponse([], { affectedRows: 1 });
+  // 12) SELECT * FROM pedido_pacientes WHERE id = ?
+  pool.pushResponse([{
+    id: 7, dni: '12345678', nombre_completo: 'JUAN',
+    examenes_snapshot_json: '{"total_examenes":3}',
+  }]);
+
+  const ctrl = loadControllerConPoolMock('../controllers/pacientesController', pool);
+  const req = {
+    params: { id: '7' },
+    body: { dni: '12345678', nombre_completo: 'JUAN', cargo: null, area: null,
+            examenes: [101, 202, 999] },
+  };
+  const res = makeRes();
+  await ctrl.updatePaciente(req, res);
+
+  assert.equal(res.statusCode, 200);
+
+  const snapshotUpdate = pool.calls.find(
+    (c) => /UPDATE pedido_pacientes SET examenes_snapshot_json = \?/i.test(c.sql)
+  );
+  assert.ok(snapshotUpdate);
+  const parsed = JSON.parse(snapshotUpdate.params[0]);
+
+  assert.equal(parsed.total_examenes, 3);
+  assert.equal(parsed.total_perfil, 2, 'dos exámenes del perfil');
+  assert.equal(parsed.total_adicionales, 1, 'un examen adicional fuera del perfil');
+
+  const byId = Object.fromEntries(parsed.examenes.map((e) => [e.examen_id, e]));
+  assert.equal(byId[101].origen, 'PERFIL');
+  assert.equal(byId[202].origen, 'PERFIL');
+  assert.equal(byId[999].origen, 'ADICIONAL', 'examen 999 no está en el perfil → ADICIONAL');
 });
 
 test('pacientesController.createPaciente: persiste snapshot después de insertar exámenes', async () => {

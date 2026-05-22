@@ -108,9 +108,15 @@ test('buildPerfilSnapshot: tipo_emo inválido → null sin tocar la BD', async (
   assert.equal(db.pendientes(), 0);
 });
 
-test('buildPacienteExamenesSnapshot: arma lista plana de exámenes asignados', async () => {
-  // 1ª query: SELECT FROM paciente_examen_asignado JOIN examenes JOIN emo_categorias
-  // 2ª query: SELECT FROM emo_perfiles WHERE id = ?
+test('buildPacienteExamenesSnapshot: arma lista plana y marca origen PERFIL/ADICIONAL', async () => {
+  // Paciente con 3 exámenes asignados: el 1 y el 2 vienen del perfil OPERARIO MINA
+  // (perfil_id=42, tipo_emo=PREOC). El 99 NO está en el perfil → "ADICIONAL"
+  // (típicamente viene de la columna "Evaluaciones adicionales / condicionales"
+  // del archivo del cliente, o lo agregó un usuario después).
+  // Consultas en orden:
+  //   1ª: examenes asignados al paciente
+  //   2ª: SELECT FROM emo_perfiles WHERE id = ?
+  //   3ª: SELECT examen_id FROM emo_perfil_examenes (set del perfil)
   const db = makeStubDb([
     [
       {
@@ -121,8 +127,13 @@ test('buildPacienteExamenesSnapshot: arma lista plana de exámenes asignados', a
         examen_id: 2, codigo_legacy: 'EX-002', examen_nombre: 'TRIAJE BASICO',
         categoria_id: 11, categoria_nombre: 'TRIAJE', categoria_id_cola: 'T1',
       },
+      {
+        examen_id: 99, codigo_legacy: 'EX-099', examen_nombre: 'ESPIROMETRIA',
+        categoria_id: 12, categoria_nombre: 'OCUPACIONAL', categoria_id_cola: 'OCU',
+      },
     ],
     [{ nombre: 'OPERARIO MINA', tipo: 'PERFIL' }],
+    [{ examen_id: 1 }, { examen_id: 2 }],
   ]);
 
   const snap = await buildPacienteExamenesSnapshot(db, 7, { perfilId: 42, tipoEmo: 'PREOC' });
@@ -130,12 +141,17 @@ test('buildPacienteExamenesSnapshot: arma lista plana de exámenes asignados', a
   assert.equal(snap.perfil_id, 42);
   assert.equal(snap.perfil_nombre, 'OPERARIO MINA');
   assert.equal(snap.tipo_emo, 'PREOC');
-  assert.equal(snap.total_examenes, 2);
-  assert.equal(snap.examenes[0].codigo_legacy, 'EX-001');
-  assert.equal(snap.examenes[1].categoria_nombre, 'TRIAJE');
+  assert.equal(snap.total_examenes, 3);
+  assert.equal(snap.total_perfil, 2);
+  assert.equal(snap.total_adicionales, 1);
+
+  const byId = Object.fromEntries(snap.examenes.map((e) => [e.examen_id, e]));
+  assert.equal(byId[1].origen, 'PERFIL');
+  assert.equal(byId[2].origen, 'PERFIL');
+  assert.equal(byId[99].origen, 'ADICIONAL', 'examen que no está en el perfil debe ser ADICIONAL');
 });
 
-test('buildPacienteExamenesSnapshot: sin perfil opcional → solo lista de exámenes', async () => {
+test('buildPacienteExamenesSnapshot: sin perfil opcional → todos ADICIONAL', async () => {
   const db = makeStubDb([
     [
       {
@@ -149,6 +165,11 @@ test('buildPacienteExamenesSnapshot: sin perfil opcional → solo lista de exám
   assert.equal(snap.perfil_id, null);
   assert.equal(snap.perfil_nombre, null);
   assert.equal(snap.total_examenes, 1);
+  // Sin perfilId/tipoEmo no podemos saber qué pertenecía al perfil → todo va
+  // como ADICIONAL para no falsificar la auditoría.
+  assert.equal(snap.examenes[0].origen, 'ADICIONAL');
+  assert.equal(snap.total_perfil, 0);
+  assert.equal(snap.total_adicionales, 1);
 });
 
 test('mergeNombresClienteEnPerfilSnapshot: añade nombre_cliente a los exámenes correctos', () => {
