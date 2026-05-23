@@ -668,6 +668,19 @@ const updateCotizacion = async (req, res) => {
       await connection.commit();
 
       const [updated] = await pool.execute('SELECT * FROM cotizaciones WHERE id = ?', [id]);
+
+      // Notificación por WhatsApp al vendedor (best-effort, no bloquea respuesta).
+      // Solo dispara cuando el cliente envía SU cotización (creador_tipo='CLIENTE'
+      // y estado='ENVIADA'); la función decide internamente si corresponde.
+      try {
+        const { dispararEnvioSiCorresponde } = require('./whatsappController');
+        dispararEnvioSiCorresponde(Number(id)).catch((e) =>
+          console.warn('[whatsapp] envío async falló:', e?.message || e)
+        );
+      } catch (e) {
+        console.warn('[whatsapp] no se pudo cargar el controller:', e?.message || e);
+      }
+
       res.json({ message: 'Cotización actualizada', cotizacion: updated[0] });
     } catch (err) {
       await connection.rollback();
@@ -1049,6 +1062,18 @@ const updateEstadoCotizacion = async (req, res) => {
         }
       } catch (notifErr) {
         console.warn('No se pudo emitir notificación de cambio de estado:', notifErr?.message);
+      }
+
+      // Notificación por WhatsApp al vendedor: solo aplica cuando el cliente
+      // envía SU cotización al vendedor (estado='ENVIADA', creador_tipo='CLIENTE').
+      // Best-effort, no bloquea la respuesta HTTP.
+      try {
+        const { dispararEnvioSiCorresponde } = require('./whatsappController');
+        dispararEnvioSiCorresponde(Number(id)).catch((e) =>
+          console.warn('[whatsapp] envío async falló:', e?.message || e)
+        );
+      } catch (e) {
+        console.warn('[whatsapp] no se pudo cargar el controller:', e?.message || e);
       }
 
       res.json({ message: 'Estado actualizado', cotizacion: updated[0] });

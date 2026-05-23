@@ -146,6 +146,24 @@ TuSalud-Backend/
 - `PUT /api/cotizaciones/:id` - Actualizar (estado, items si BORRADOR)
 - `DELETE /api/cotizaciones/:id` - Eliminar (solo BORRADOR)
 
+### WhatsApp (aprobación de cotizaciones, con fallback automático a SMS)
+Cuando un cliente sube un pedido con cotización (estado de la cotización pasa a `ENVIADA`, creador = `CLIENTE`), el backend envía un Excel con el detalle al WhatsApp del vendedor asignado y queda esperando una palabra clave. Si Twilio reporta que el WhatsApp no se entregó (`undelivered`/`failed`, típicamente porque el destinatario no tiene internet o no usa WhatsApp), el backend envía automáticamente el mismo contenido por SMS — sin adjunto, con texto compacto. El vendedor puede responder por WhatsApp o por SMS indistintamente; el bot responde en el mismo canal.
+- Palabras válidas: `APROBAR` (también `SI`, `OK`) o `RECHAZAR` (también `NO`). Tras `RECHAZAR` el bot pide el motivo en el siguiente mensaje.
+- `POST /api/whatsapp/webhook` - Endpoint público que recibe respuestas del proveedor (WhatsApp o SMS). Verifica firma del proveedor (Twilio: HMAC-SHA1 `X-Twilio-Signature`).
+- `POST /api/whatsapp/status-callback` - Endpoint público que recibe los updates de delivery (queued/sent/delivered/undelivered/failed). El SMS fallback se dispara desde aquí cuando llega `undelivered` o `failed`. Configurar este URL en Twilio como `Status Callback URL` (o pasarlo en cada envío — el backend lo hace automáticamente).
+- `GET /api/whatsapp/archivo/:token` - Sirve el XLSX al proveedor para adjuntarlo (token aleatorio con expiración).
+- `POST /api/whatsapp/reenviar/:cotizacionId` - Reenviar manualmente (requiere rol manager o vendedor).
+
+Configuración:
+- Variables `WHATSAPP_PROVIDER`, `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_WHATSAPP_FROM`, `TWILIO_SMS_FROM`, `WHATSAPP_PUBLIC_BASE_URL`, `WHATSAPP_MANAGER_FALLBACK_PHONE`, `WHATSAPP_SMS_FALLBACK_ENABLED` — ver `.env.example`.
+- Migraciones (en orden):
+  ```bash
+  node scripts/run-migration.cjs scripts/migration_whatsapp_aprobaciones.sql
+  node scripts/run-migration.cjs scripts/migration_whatsapp_sms_fallback.sql
+  ```
+- Con `WHATSAPP_PROVIDER=null` o sin las credenciales de Twilio el envío queda desactivado (las cotizaciones siguen aprobándose desde la app sin cambios).
+- Si no quieres pagar por un número SMS, deja `TWILIO_SMS_FROM` vacío: el fallback queda deshabilitado automáticamente y los WhatsApps no entregados simplemente quedan registrados.
+
 ### Facturas (por pedido)
 - `GET /api/facturas` - Listar (filtros: `?pedido_id=`, `?estado=`, `?empresa_id=`)
 - `GET /api/facturas/:id` - Obtener factura con cotizaciones y detalle

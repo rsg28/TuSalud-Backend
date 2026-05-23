@@ -46,6 +46,7 @@ app.use('/api/precios', require('./routes/preciosEmpresaRoutes'));
 app.use('/api/emo-perfiles', require('./routes/emoPerfilesRoutes'));
 app.use('/api/reniec', require('./routes/reniecRoutes'));
 app.use('/api/import', require('./routes/pdfTextoEmbebidoRoutes'));
+app.use('/api/whatsapp', require('./routes/whatsappRoutes'));
 
 // 404 handler
 app.use((req, res) => {
