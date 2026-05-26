@@ -28,6 +28,21 @@ const {
   descargarArchivoPorToken,
   reenviarSolicitud,
 } = require('../controllers/whatsappController');
+const { getProvider } = require('../services/whatsapp');
+
+/**
+ * GET /api/whatsapp/webhook
+ * Handshake de verificación que Meta envía UNA VEZ al guardar la URL del
+ * webhook en Business Manager. Twilio no usa GET aquí. Si el proveedor
+ * activo expone `handleVerification`, lo llamamos; en otro caso 404.
+ */
+router.get('/webhook', (req, res) => {
+  const provider = getProvider();
+  if (typeof provider.handleVerification === 'function') {
+    return provider.handleVerification(req, res);
+  }
+  return res.status(404).send('Not found');
+});
 
 router.post('/webhook', webhookEntrante);
 router.post('/status-callback', statusCallbackEntrante);

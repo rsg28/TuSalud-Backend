@@ -18,6 +18,7 @@
  */
 
 const twilioProvider = require('./twilio');
+const metaProvider = require('./meta');
 const nullProvider = require('./null');
 
 let cachedProvider = null;
@@ -26,6 +27,11 @@ function getProvider() {
   if (cachedProvider) return cachedProvider;
   const id = String(process.env.WHATSAPP_PROVIDER || 'null').toLowerCase().trim();
   switch (id) {
+    case 'meta':
+    case 'whatsapp_cloud':
+    case 'cloud':
+      cachedProvider = metaProvider;
+      break;
     case 'twilio':
       cachedProvider = twilioProvider;
       break;

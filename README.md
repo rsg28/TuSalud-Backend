@@ -146,23 +146,105 @@ TuSalud-Backend/
 - `PUT /api/cotizaciones/:id` - Actualizar (estado, items si BORRADOR)
 - `DELETE /api/cotizaciones/:id` - Eliminar (solo BORRADOR)
 
-### WhatsApp (aprobación de cotizaciones, con fallback automático a SMS)
-Cuando un cliente sube un pedido con cotización (estado de la cotización pasa a `ENVIADA`, creador = `CLIENTE`), el backend envía un Excel con el detalle al WhatsApp del vendedor asignado y queda esperando una palabra clave. Si Twilio reporta que el WhatsApp no se entregó (`undelivered`/`failed`, típicamente porque el destinatario no tiene internet o no usa WhatsApp), el backend envía automáticamente el mismo contenido por SMS — sin adjunto, con texto compacto. El vendedor puede responder por WhatsApp o por SMS indistintamente; el bot responde en el mismo canal.
-- Palabras válidas: `APROBAR` (también `SI`, `OK`) o `RECHAZAR` (también `NO`). Tras `RECHAZAR` el bot pide el motivo en el siguiente mensaje.
-- `POST /api/whatsapp/webhook` - Endpoint público que recibe respuestas del proveedor (WhatsApp o SMS). Verifica firma del proveedor (Twilio: HMAC-SHA1 `X-Twilio-Signature`).
-- `POST /api/whatsapp/status-callback` - Endpoint público que recibe los updates de delivery (queued/sent/delivered/undelivered/failed). El SMS fallback se dispara desde aquí cuando llega `undelivered` o `failed`. Configurar este URL en Twilio como `Status Callback URL` (o pasarlo en cada envío — el backend lo hace automáticamente).
-- `GET /api/whatsapp/archivo/:token` - Sirve el XLSX al proveedor para adjuntarlo (token aleatorio con expiración).
-- `POST /api/whatsapp/reenviar/:cotizacionId` - Reenviar manualmente (requiere rol manager o vendedor).
+### Seguimiento clínico de pacientes (tracking de exámenes tomados)
 
-Configuración:
-- Variables `WHATSAPP_PROVIDER`, `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_WHATSAPP_FROM`, `TWILIO_SMS_FROM`, `WHATSAPP_PUBLIC_BASE_URL`, `WHATSAPP_MANAGER_FALLBACK_PHONE`, `WHATSAPP_SMS_FALLBACK_ENABLED` — ver `.env.example`.
-- Migraciones (en orden):
-  ```bash
-  node scripts/run-migration.cjs scripts/migration_whatsapp_aprobaciones.sql
-  node scripts/run-migration.cjs scripts/migration_whatsapp_sms_fallback.sql
-  ```
-- Con `WHATSAPP_PROVIDER=null` o sin las credenciales de Twilio el envío queda desactivado (las cotizaciones siguen aprobándose desde la app sin cambios).
-- Si no quieres pagar por un número SMS, deja `TWILIO_SMS_FROM` vacío: el fallback queda deshabilitado automáticamente y los WhatsApps no entregados simplemente quedan registrados.
+A cada paciente de un pedido se le asignan N exámenes (vía `paciente_examen_asignado`). El manager y el vendedor pueden ir marcando, examen por examen, el resultado real: **COMPLETADO**, **AUSENTE**, **NO_REALIZADO** o **POSPUESTO**. La columna `estado` vive en `paciente_examen_asignado` y todo cambio queda auditado en `paciente_examen_historial`.
+
+La cotización facturada **no se modifica automáticamente** ante ausencias: el backend solo expone un endpoint de *ajustes sugeridos* y el manager decide si genera una cotización complementaria negativa.
+
+#### Endpoints
+
+| Método | Ruta | Rol | Notas |
+|---|---|---|---|
+| GET | `/api/pedidos/:pedido_id/pacientes-examenes` | autenticado | Lista pacientes con exámenes y conteos por estado |
+| GET | `/api/pedidos/:pedido_id/ajustes-sugeridos` | manager / vendedor | Monto sugerido por los exámenes no realizados |
+| PUT | `/api/pacientes/:id/examen` | manager / vendedor | Cambia el estado de un examen (`{ examen_id, estado, motivo? }`) |
+| POST | `/api/pacientes/:id/estado-masivo` | manager / vendedor | Aplica un estado a TODOS los exámenes pendientes (típico: `AUSENTE`) |
+| GET | `/api/pacientes/:id/historial-examenes` | manager / vendedor | Timeline de transiciones de estado del paciente |
+| POST | `/api/integraciones/examen-evento` | API key | Webhook para sistemas externos (laboratorio del jefe). Idempotente por `referencia_externa` |
+
+#### Integración con sistema externo (API del jefe)
+
+El endpoint `POST /api/integraciones/examen-evento` está pensado para que un laboratorio o ERP nos empuje eventos de toma de muestras sin pasar por la UI.
+
+- **Autenticación**: `Authorization: Bearer <token>` o `X-API-Key: <token>`. El token se guarda hasheado en `integraciones_api_keys`; el plano nunca se almacena.
+- **Idempotencia**: si llega el mismo `referencia_externa` dos veces, la segunda llamada no hace nada (devuelve `idempotent: true`).
+- **Payload mínimo**:
+
+```jsonc
+{
+  "referencia_externa": "evt-2026-05-25-001",
+  "evento": "EXAMEN_TOMADO",      // o "PACIENTE_AUSENTE", "EXAMEN_NO_REALIZADO", ...
+  "paciente": { "dni": "12345678" },   // alternativa: { "id": 42 }
+  "examen":   { "codigo": "AUD-01" },  // alternativa: { "id": 78 } o { "nombre": "Audiometría" }
+  "motivo": "Tomado en sede norte"     // opcional
+}
+```
+
+Para dar de alta una API key:
+
+```sql
+-- Generar token aleatorio de 32 chars y guardar su SHA-256:
+INSERT INTO integraciones_api_keys (nombre, token_hash, scope)
+VALUES ('Sistema laboratorio jefe', SHA2('TOKEN_PLANO_AQUI', 256), 'examen-evento');
+```
+
+El token plano se entrega una sola vez al sistema externo; el backend solo guarda el hash.
+
+#### Migración
+
+```bash
+node scripts/run-migration.cjs scripts/migration_seguimiento_examenes.sql
+```
+
+Crea: columna `estado` + metadata en `paciente_examen_asignado`, tabla `paciente_examen_historial`, tabla `integraciones_api_keys`. Hace backfill de las filas ya `COMPLETADO` desde `paciente_examen_completado` (que se mantiene como mirror legacy).
+
+---
+
+### WhatsApp (aprobación de cotizaciones)
+
+Cuando un cliente sube un pedido con cotización (estado `ENVIADA`, creador `CLIENTE`), el backend notifica al WhatsApp del vendedor asignado (o al manager fallback) y espera una palabra clave. El vendedor responde `APROBAR` / `SI` / `OK` o `RECHAZAR` / `NO`; tras `RECHAZAR` el bot pide el motivo.
+
+#### Proveedores soportados
+
+| Provider | `WHATSAPP_PROVIDER` | Notas |
+|---|---|---|
+| **Meta Cloud API** (recomendado) | `meta` | Oficial, escalable a miles de números, sin alquiler de números. Costo aprox. $0.005-0.015 por conversación en Perú; primeras 1000 service/mes gratis. |
+| **Twilio** | `twilio` | Sandbox gratis para pruebas. Permite fallback automático a SMS si el WhatsApp no se entrega (`undelivered`/`failed`). |
+| **null** | `null` | Solo loggea, no envía. Útil en dev/tests. |
+
+#### Endpoints
+
+- `GET /api/whatsapp/webhook` — Handshake de verificación de Meta (responde con `hub.challenge` si el `verify_token` coincide). Twilio no lo usa.
+- `POST /api/whatsapp/webhook` — Mensajes entrantes (y, para Meta, también status updates en el mismo POST). Verifica firma del proveedor (Meta: HMAC-SHA256; Twilio: HMAC-SHA1).
+- `POST /api/whatsapp/status-callback` — Status callbacks separados de Twilio (no aplica a Meta). Dispara el fallback a SMS.
+- `GET /api/whatsapp/archivo/:token` — Sirve el XLSX al proveedor para adjuntarlo (token con expiración).
+- `POST /api/whatsapp/reenviar/:cotizacionId` — Reenvío manual (requiere rol manager o vendedor).
+
+#### Pasos para Meta (recomendado)
+
+1. Crear app en <https://developers.facebook.com> → tipo Business → Agregar producto **WhatsApp**.
+2. Copiar `WHATSAPP_PHONE_NUMBER_ID` y un `WHATSAPP_ACCESS_TOKEN` permanente (System User).
+3. En **App Settings → Basic** copiar el **App Secret** → `WHATSAPP_APP_SECRET`.
+4. En **WhatsApp → Configuration → Webhooks**: callback `https://<dominio>/api/whatsapp/webhook`, verify token = `WHATSAPP_WEBHOOK_VERIFY_TOKEN`. Suscribirse a `messages`.
+5. (Producción) Crear y aprobar una plantilla con 5 variables (nº cotización, empresa, nº pedido, ítems, total) y poner el nombre en `WHATSAPP_TEMPLATE_NUEVA_COTIZACION`.
+6. Setear todas las variables en `.env` y reiniciar el backend.
+
+#### Pasos para Twilio (alternativa con sandbox y SMS fallback)
+
+1. Crear cuenta Twilio, copiar `TWILIO_ACCOUNT_SID` + `TWILIO_AUTH_TOKEN`.
+2. Activar sandbox WhatsApp (`TWILIO_WHATSAPP_FROM=whatsapp:+14155238886`).
+3. Cada destinatario envía la palabra de "join" al sandbox.
+4. (Opcional) Comprar un número SMS y ponerlo en `TWILIO_SMS_FROM` para habilitar el fallback automático.
+
+#### Migraciones de base de datos (en orden)
+
+```bash
+node scripts/run-migration.cjs scripts/migration_whatsapp_aprobaciones.sql
+node scripts/run-migration.cjs scripts/migration_whatsapp_sms_fallback.sql
+```
+
+Con `WHATSAPP_PROVIDER=null` o sin credenciales, el envío queda desactivado y las cotizaciones siguen aprobándose desde la app sin cambios.
 
 ### Facturas (por pedido)
 - `GET /api/facturas` - Listar (filtros: `?pedido_id=`, `?estado=`, `?empresa_id=`)

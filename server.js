@@ -16,8 +16,19 @@ app.use(cors({
     'Accept-Language',
   ],
 }));
-app.use(express.json({ limit: '30mb' }));
-app.use(express.urlencoded({ extended: true, limit: '30mb' }));
+/**
+ * Capturamos el cuerpo crudo en `req.rawBody` para los webhooks de WhatsApp
+ * Cloud API (Meta) que firman con HMAC-SHA256 sobre el JSON original. Express
+ * normaliza el JSON antes de entregárnoslo, así que cualquier diferencia de
+ * espacios o codificación rompería la verificación si tuviéramos que
+ * recomponerlo. Con `verify` guardamos el Buffer original y el resto sigue
+ * funcionando igual para JSON/form-urlencoded.
+ */
+const captureRawBody = (req, _res, buf) => {
+  if (buf && buf.length) req.rawBody = buf;
+};
+app.use(express.json({ limit: '30mb', verify: captureRawBody }));
+app.use(express.urlencoded({ extended: true, limit: '30mb', verify: captureRawBody }));
 
 // Test route
 app.get('/', (req, res) => {
@@ -47,6 +58,7 @@ app.use('/api/emo-perfiles', require('./routes/emoPerfilesRoutes'));
 app.use('/api/reniec', require('./routes/reniecRoutes'));
 app.use('/api/import', require('./routes/pdfTextoEmbebidoRoutes'));
 app.use('/api/whatsapp', require('./routes/whatsappRoutes'));
+app.use('/api/integraciones', require('./routes/integracionesRoutes'));
 
 // 404 handler
 app.use((req, res) => {

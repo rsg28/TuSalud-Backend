@@ -27,6 +27,18 @@ router.get('/:pedido_id/facturas', authenticateToken, pedidosController.obtenerF
 // GET /api/pedidos/:pedido_id/pacientes-completados — Pacientes del pedido que completaron todos sus exámenes
 router.get('/:pedido_id/pacientes-completados', authenticateToken, pedidosController.obtenerPacientesCompletados);
 
+/**
+ * GET /api/pedidos/:pedido_id/ajustes-sugeridos
+ * Lista los exámenes AUSENTE / NO_REALIZADO del pedido con el monto sugerido
+ * para una cotización complementaria negativa. Solo manager (es quien decide).
+ */
+router.get(
+  '/:pedido_id/ajustes-sugeridos',
+  authenticateToken,
+  requireRole('manager', 'vendedor'),
+  pedidosController.obtenerAjustesSugeridos
+);
+
 // GET /api/pedidos/:pedido_id/estado — Solo el estado del pedido
 router.get('/:pedido_id/estado', authenticateToken, pedidosController.obtenerEstadoPedido);
 

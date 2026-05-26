@@ -41,6 +41,16 @@ async function sendSms({ to, body, statusCallback }) {
   return sendMessage({ to, body, channel: 'sms', statusCallback });
 }
 
+async function sendTemplate({ to, templateName, languageCode, components }) {
+  console.log('[whatsapp:null] sendTemplate', {
+    to,
+    templateName,
+    languageCode: languageCode || 'es',
+    nComponents: Array.isArray(components) ? components.length : 0,
+  });
+  return { sid: fakeSid('NULLTPL'), channel: 'whatsapp' };
+}
+
 function verifyIncomingSignature(_req) {
   // En modo null aceptamos cualquier cosa: el webhook no se va a llamar en prod.
   return true;
@@ -71,12 +81,29 @@ function parseStatusCallback(req) {
   };
 }
 
+/** Helper para que el controller pueda iterar mensajes/status como con Meta. */
+function parseEvents(req) {
+  const msg = parseIncomingMessage(req);
+  const st = parseStatusCallback(req);
+  return {
+    messages: msg.from ? [msg] : [],
+    statuses: st.messageSid ? [st] : [],
+  };
+}
+
+function handleVerification(_req, res) {
+  return res.status(200).send('null-provider');
+}
+
 module.exports = {
   sendMessage,
   sendSms,
+  sendTemplate,
   verifyIncomingSignature,
   parseIncomingMessage,
   parseStatusCallback,
+  parseEvents,
+  handleVerification,
   normalizeNumber,
   detectarCanal,
 };

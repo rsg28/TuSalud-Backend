@@ -288,6 +288,266 @@ test('smsFallbackHabilitado: requiere TWILIO_SMS_FROM y flag != false', () => {
 
 // -------- Cuerpo del SMS (debe quedar compacto, sin emojis raros) ----------
 
+// =========================================================================
+// Provider Meta (WhatsApp Cloud API)
+// =========================================================================
+
+test('meta: verifyIncomingSignature acepta firma HMAC-SHA256 válida', () => {
+  delete require.cache[require.resolve('../services/whatsapp/meta')];
+  const meta = require('../services/whatsapp/meta');
+  const crypto = require('node:crypto');
+
+  process.env.WHATSAPP_APP_SECRET = 'unsupersecret';
+
+  const payload = JSON.stringify({
+    object: 'whatsapp_business_account',
+    entry: [{ id: '123', changes: [] }],
+  });
+  const sig = 'sha256=' + crypto
+    .createHmac('sha256', 'unsupersecret')
+    .update(Buffer.from(payload, 'utf8'))
+    .digest('hex');
+
+  const req = {
+    headers: { 'x-hub-signature-256': sig },
+    rawBody: Buffer.from(payload, 'utf8'),
+    body: JSON.parse(payload),
+  };
+  assert.equal(meta.verifyIncomingSignature(req), true);
+
+  // Firma incorrecta:
+  const reqBad = { ...req, headers: { 'x-hub-signature-256': 'sha256=' + 'a'.repeat(64) } };
+  assert.equal(meta.verifyIncomingSignature(reqBad), false);
+});
+
+test('meta: handleVerification responde challenge cuando el token coincide', () => {
+  delete require.cache[require.resolve('../services/whatsapp/meta')];
+  const meta = require('../services/whatsapp/meta');
+  process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN = 'tk-secret-123';
+
+  const req = {
+    query: {
+      'hub.mode': 'subscribe',
+      'hub.verify_token': 'tk-secret-123',
+      'hub.challenge': '999000',
+    },
+  };
+  let status = 0;
+  let body = '';
+  const res = {
+    status(s) { status = s; return this; },
+    send(b) { body = b; return this; },
+  };
+  meta.handleVerification(req, res);
+  assert.equal(status, 200);
+  assert.equal(body, '999000');
+
+  // Token incorrecto → 403.
+  const reqBad = { query: { ...req.query, 'hub.verify_token': 'otro' } };
+  meta.handleVerification(reqBad, res);
+  assert.equal(status, 403);
+});
+
+test('meta: parseEvents extrae mensajes y status updates de un mismo POST', () => {
+  delete require.cache[require.resolve('../services/whatsapp/meta')];
+  const meta = require('../services/whatsapp/meta');
+
+  // Payload realista de Cloud API con un mensaje entrante + un status update.
+  const req = {
+    body: {
+      object: 'whatsapp_business_account',
+      entry: [
+        {
+          id: 'WABA',
+          changes: [
+            {
+              field: 'messages',
+              value: {
+                messaging_product: 'whatsapp',
+                metadata: { display_phone_number: '14155551234', phone_number_id: 'pnid' },
+                contacts: [{ profile: { name: 'Vendedor' }, wa_id: '51987654321' }],
+                messages: [
+                  {
+                    from: '51987654321',
+                    id: 'wamid.AAA',
+                    timestamp: '1700000000',
+                    type: 'text',
+                    text: { body: 'APROBAR' },
+                  },
+                ],
+              },
+            },
+            {
+              field: 'messages',
+              value: {
+                messaging_product: 'whatsapp',
+                metadata: { display_phone_number: '14155551234', phone_number_id: 'pnid' },
+                statuses: [
+                  {
+                    id: 'wamid.OUT123',
+                    status: 'delivered',
+                    recipient_id: '51987654321',
+                    timestamp: '1700000001',
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      ],
+    },
+  };
+
+  const { messages, statuses } = meta.parseEvents(req);
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].body, 'APROBAR');
+  assert.equal(messages[0].from, '+51987654321');
+  assert.equal(messages[0].canal, 'whatsapp');
+  assert.equal(messages[0].messageSid, 'wamid.AAA');
+  assert.equal(statuses.length, 1);
+  assert.equal(statuses[0].status, 'delivered');
+  assert.equal(statuses[0].messageSid, 'wamid.OUT123');
+  assert.equal(statuses[0].to, '+51987654321');
+});
+
+test('meta: parseEvents captura status failed con código de error', () => {
+  delete require.cache[require.resolve('../services/whatsapp/meta')];
+  const meta = require('../services/whatsapp/meta');
+  const req = {
+    body: {
+      object: 'whatsapp_business_account',
+      entry: [{
+        id: 'X',
+        changes: [{
+          field: 'messages',
+          value: {
+            messaging_product: 'whatsapp',
+            metadata: { display_phone_number: '15551234567' },
+            statuses: [{
+              id: 'wamid.fail',
+              status: 'failed',
+              recipient_id: '51987111222',
+              errors: [{ code: 131026, title: 'Receiver unavailable', message: 'Phone offline' }],
+            }],
+          },
+        }],
+      }],
+    },
+  };
+  const { statuses } = meta.parseEvents(req);
+  assert.equal(statuses[0].status, 'failed');
+  assert.equal(statuses[0].errorCode, 131026);
+  assert.match(statuses[0].errorMessage, /unavailable|offline/i);
+});
+
+test('meta: sendMessage construye payload de texto con E.164 sin "+"', async () => {
+  delete require.cache[require.resolve('../services/whatsapp/meta')];
+  const meta = require('../services/whatsapp/meta');
+  process.env.WHATSAPP_PHONE_NUMBER_ID = 'pnid-123';
+  process.env.WHATSAPP_ACCESS_TOKEN = 'EAA-fake';
+
+  const originalFetch = global.fetch;
+  let capturedUrl = '';
+  let capturedBody = null;
+  global.fetch = async (url, opts) => {
+    capturedUrl = url;
+    capturedBody = JSON.parse(opts.body);
+    return {
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ messages: [{ id: 'wamid.OK' }] }),
+    };
+  };
+  try {
+    const out = await meta.sendMessage({
+      to: '987654321', // Perú móvil sin código país
+      body: 'Hola',
+    });
+    assert.equal(out.sid, 'wamid.OK');
+    assert.match(capturedUrl, /\/pnid-123\/messages$/);
+    assert.equal(capturedBody.messaging_product, 'whatsapp');
+    assert.equal(capturedBody.to, '51987654321'); // E.164 sin "+"
+    assert.equal(capturedBody.type, 'text');
+    assert.equal(capturedBody.text.body, 'Hola');
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test('meta: sendTemplate construye payload con plantilla y parámetros', async () => {
+  delete require.cache[require.resolve('../services/whatsapp/meta')];
+  const meta = require('../services/whatsapp/meta');
+  process.env.WHATSAPP_PHONE_NUMBER_ID = 'pnid-321';
+  process.env.WHATSAPP_ACCESS_TOKEN = 'EAA-fake';
+
+  const originalFetch = global.fetch;
+  let capturedBody = null;
+  global.fetch = async (_url, opts) => {
+    capturedBody = JSON.parse(opts.body);
+    return {
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ messages: [{ id: 'wamid.TPL' }] }),
+    };
+  };
+  try {
+    await meta.sendTemplate({
+      to: '+17783183933',
+      templateName: 'cotizacion_pendiente',
+      languageCode: 'es',
+      components: [
+        { type: 'body', parameters: [
+          { type: 'text', text: 'COT-001' },
+          { type: 'text', text: 'ACME' },
+        ]},
+      ],
+    });
+    assert.equal(capturedBody.type, 'template');
+    assert.equal(capturedBody.template.name, 'cotizacion_pendiente');
+    assert.equal(capturedBody.template.language.code, 'es');
+    assert.equal(capturedBody.to, '17783183933');
+    assert.equal(capturedBody.template.components[0].parameters[0].text, 'COT-001');
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test('meta: sendMessage propaga error HTTP con detalle de Meta', async () => {
+  delete require.cache[require.resolve('../services/whatsapp/meta')];
+  const meta = require('../services/whatsapp/meta');
+  process.env.WHATSAPP_PHONE_NUMBER_ID = 'pnid-err';
+  process.env.WHATSAPP_ACCESS_TOKEN = 'EAA-bad';
+
+  const originalFetch = global.fetch;
+  global.fetch = async () => ({
+    ok: false,
+    status: 400,
+    text: async () => JSON.stringify({ error: { message: 'Recipient phone not in allowed list', code: 100 } }),
+  });
+  try {
+    await assert.rejects(
+      meta.sendMessage({ to: '+51987654321', body: 'x' }),
+      /Recipient phone not in allowed list/i
+    );
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test('meta: sendSms lanza error (no soporta SMS)', async () => {
+  delete require.cache[require.resolve('../services/whatsapp/meta')];
+  const meta = require('../services/whatsapp/meta');
+  await assert.rejects(meta.sendSms({ to: '+1', body: 'x' }), /no env(í|i)a SMS/i);
+});
+
+test('normalizarTelefono: Perú por defecto y Canadá 778', () => {
+  const { normalizarTelefono } = require('../utils/normalizarTelefono');
+  assert.equal(normalizarTelefono('987654321'), '+51987654321');
+  assert.equal(normalizarTelefono('51987654321'), '+51987654321');
+  assert.equal(normalizarTelefono('7781234567'), '+17781234567');
+  assert.equal(normalizarTelefono('+17781234567'), '+17781234567');
+});
+
 test('MENSAJE_SMS: incluye datos clave y cabe en ~2 segmentos GSM-7', () => {
   delete require.cache[require.resolve('../controllers/whatsappController')];
   const ctrl = require('../controllers/whatsappController');

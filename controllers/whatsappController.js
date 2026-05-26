@@ -29,6 +29,7 @@ const pool = require('../config/database');
 const { getProvider } = require('../services/whatsapp');
 const { aplicarTransicionExterna } = require('../services/cotizacionEstadoCanal');
 const { generarXlsxCotizacion } = require('../utils/generarCotizacionXlsx');
+const { normalizarTelefono } = require('../utils/normalizarTelefono');
 
 // --------------------------------------------------------------------------
 // Mensajes UX
@@ -172,12 +173,12 @@ async function resolverDestinatario(cotizacionId) {
   const fila = rows[0] || {};
   if (fila.vendedor_id && fila.vendedor_telefono && String(fila.vendedor_telefono).trim()) {
     return {
-      telefono: String(fila.vendedor_telefono).trim(),
+      telefono: normalizarTelefono(fila.vendedor_telefono),
       usuarioId: fila.vendedor_id,
       rol: 'vendedor',
     };
   }
-  const fallback = String(process.env.WHATSAPP_MANAGER_FALLBACK_PHONE || '').trim();
+  const fallback = normalizarTelefono(process.env.WHATSAPP_MANAGER_FALLBACK_PHONE || '');
   if (fallback) {
     return { telefono: fallback, usuarioId: null, rol: 'manager' };
   }
@@ -263,15 +264,49 @@ async function enviarCotizacionAprobacion(cotizacionId) {
       adjuntoMensaje: mediaUrl ? '📎 Excel adjunto con el detalle.' : null,
     });
 
+    /**
+     * Selección de método de envío:
+     *
+     *   - Meta exige que el PRIMER mensaje a un usuario fuera de la ventana
+     *     de 24h sea una plantilla aprobada. Si el operador configuró
+     *     `WHATSAPP_TEMPLATE_NUEVA_COTIZACION`, enviamos esa plantilla con los
+     *     parámetros del resumen.
+     *   - Si no hay plantilla configurada (Twilio, sandbox de Meta o usuario
+     *     dentro de la ventana de 24h), mandamos texto libre + documento.
+     */
+    const templateName = String(process.env.WHATSAPP_TEMPLATE_NUEVA_COTIZACION || '').trim();
+    const templateLang = String(process.env.WHATSAPP_TEMPLATE_LANGUAGE || 'es').trim();
+
     let sid = null;
     try {
-      const sendResult = await provider.sendMessage({
-        to: destino.telefono,
-        body,
-        mediaUrl: mediaUrl || undefined,
-        channel: 'whatsapp',
-        statusCallback: statusCallback || undefined,
-      });
+      let sendResult;
+      if (templateName && typeof provider.sendTemplate === 'function') {
+        sendResult = await provider.sendTemplate({
+          to: destino.telefono,
+          templateName,
+          languageCode: templateLang,
+          components: [
+            {
+              type: 'body',
+              parameters: [
+                { type: 'text', text: String(resumen.numero || '-') },
+                { type: 'text', text: String(resumen.empresa || '-') },
+                { type: 'text', text: String(resumen.pedidoNumero || '-') },
+                { type: 'text', text: String(resumen.nItems ?? 0) },
+                { type: 'text', text: `S/ ${Number(resumen.total || 0).toFixed(2)}` },
+              ],
+            },
+          ],
+        });
+      } else {
+        sendResult = await provider.sendMessage({
+          to: destino.telefono,
+          body,
+          mediaUrl: mediaUrl || undefined,
+          channel: 'whatsapp',
+          statusCallback: statusCallback || undefined,
+        });
+      }
       sid = sendResult?.sid || null;
     } catch (sendErr) {
       // Si Twilio devuelve un error HTTP, el envío de WhatsApp ni siquiera
@@ -445,13 +480,108 @@ async function descargarArchivoPorToken(req, res) {
 }
 
 /**
+ * Procesa un único mensaje entrante. Extraído para que `webhookEntrante`
+ * pueda iterar varios (Meta) o uno solo (Twilio) sin duplicar la lógica.
+ */
+async function _procesarMensajeEntrante(provider, msg) {
+  const canal = msg.canal || 'whatsapp';
+  const telefono = normalizarTelefono(msg.from);
+  if (!telefono) return;
+
+  const [pendientes] = await pool.execute(
+    `SELECT id, cotizacion_id, estado, numero_cotizacion,
+            destinatario_usuario_id, destinatario_rol
+       FROM whatsapp_aprobaciones
+      WHERE destinatario_telefono = ?
+        AND estado IN ('PENDIENTE', 'ESPERANDO_MOTIVO_RECHAZO')
+      ORDER BY created_at DESC
+      LIMIT 1`,
+    [telefono]
+  );
+
+  if (pendientes.length === 0) {
+    await provider.sendMessage({ to: telefono, body: RESPUESTAS.sinPendientes, channel: canal });
+    return;
+  }
+
+  const conv = pendientes[0];
+  const decision = interpretarMensaje(conv.estado, msg.body);
+  const canalActor = canal === 'sms' ? 'SMS' : 'WHATSAPP';
+  const numero = conv.numero_cotizacion || `#${conv.cotizacion_id}`;
+
+  if (decision === 'APROBAR') {
+    const resultado = await aplicarTransicionExterna({
+      cotizacionId: conv.cotizacion_id,
+      nuevoEstado: 'APROBADA',
+      actor: {
+        canal: canalActor,
+        usuarioId: conv.destinatario_usuario_id,
+        nombre: `${canalActor} (${conv.destinatario_rol || 'destinatario'})`,
+      },
+    });
+    await pool.execute(
+      `UPDATE whatsapp_aprobaciones
+          SET estado = 'APROBADA', respondido_at = NOW()
+        WHERE id = ?`,
+      [conv.id]
+    );
+    const cuerpo = resultado.transicionado
+      ? RESPUESTAS.aprobada(numero)
+      : RESPUESTAS.yaResuelta(numero, resultado.cotizacion?.estado || 'APROBADA');
+    await provider.sendMessage({ to: telefono, body: cuerpo, channel: canal });
+    return;
+  }
+
+  if (decision === 'RECHAZAR_INICIAR') {
+    await pool.execute(
+      `UPDATE whatsapp_aprobaciones SET estado = 'ESPERANDO_MOTIVO_RECHAZO' WHERE id = ?`,
+      [conv.id]
+    );
+    await provider.sendMessage({ to: telefono, body: RESPUESTAS.pideMotivo(numero), channel: canal });
+    return;
+  }
+
+  if (decision === 'RECHAZAR_CON_MOTIVO') {
+    const motivo = String(msg.body || '').trim().slice(0, 1000);
+    const resultado = await aplicarTransicionExterna({
+      cotizacionId: conv.cotizacion_id,
+      nuevoEstado: 'RECHAZADA',
+      motivoRechazo: motivo,
+      actor: {
+        canal: canalActor,
+        usuarioId: conv.destinatario_usuario_id,
+        nombre: `${canalActor} (${conv.destinatario_rol || 'destinatario'})`,
+      },
+    });
+    await pool.execute(
+      `UPDATE whatsapp_aprobaciones
+          SET estado = 'RECHAZADA', motivo_rechazo = ?, respondido_at = NOW()
+        WHERE id = ?`,
+      [motivo, conv.id]
+    );
+    const cuerpo = resultado.transicionado
+      ? RESPUESTAS.rechazada(numero)
+      : RESPUESTAS.yaResuelta(numero, resultado.cotizacion?.estado || 'RECHAZADA');
+    await provider.sendMessage({ to: telefono, body: cuerpo, channel: canal });
+    return;
+  }
+
+  await provider.sendMessage({ to: telefono, body: RESPUESTAS.desconocida, channel: canal });
+}
+
+/**
  * POST /api/whatsapp/webhook
- * Endpoint público al que el proveedor envía las respuestas del vendedor
- * (por WhatsApp o por SMS). Validamos firma del proveedor, detectamos el
- * canal por el `From` y respondemos en el mismo canal.
+ * Endpoint público que recibe del proveedor:
+ *   - Twilio: un único mensaje (o un único status callback) por POST.
+ *   - Meta:   un POST puede traer N mensajes Y N status updates a la vez.
+ *
+ * Si el provider expone `parseEvents`, lo usamos y procesamos todo. Si no,
+ * caemos al camino antiguo (parseIncomingMessage) para no romper Twilio.
+ *
+ * En todos los casos: verifica firma del proveedor primero y responde 200
+ * rápido para evitar reintentos.
  */
 async function webhookEntrante(req, res) {
-  let canal = 'whatsapp';
   try {
     const provider = getProvider();
     if (!provider.verifyIncomingSignature(req)) {
@@ -459,115 +589,97 @@ async function webhookEntrante(req, res) {
       return res.status(403).send('Invalid signature');
     }
 
+    if (typeof provider.parseEvents === 'function') {
+      const { messages, statuses } = provider.parseEvents(req);
+      for (const m of messages) {
+        try { await _procesarMensajeEntrante(provider, m); }
+        catch (e) { console.error('[whatsapp] error procesando mensaje:', e?.message || e); }
+      }
+      for (const s of statuses) {
+        try { await _procesarStatusUpdate(s); }
+        catch (e) { console.error('[whatsapp] error procesando status:', e?.message || e); }
+      }
+      return res.status(200).send('OK');
+    }
+
+    // Camino legacy (Twilio sin parseEvents): un único mensaje por webhook.
     const msg = provider.parseIncomingMessage(req);
-    canal = msg.canal || 'whatsapp';
-    const telefono = msg.from;
-    if (!telefono) {
-      return res.status(200).send('OK (sin remitente)');
-    }
-
-    const [pendientes] = await pool.execute(
-      `SELECT id, cotizacion_id, estado, numero_cotizacion,
-              destinatario_usuario_id, destinatario_rol
-         FROM whatsapp_aprobaciones
-        WHERE destinatario_telefono = ?
-          AND estado IN ('PENDIENTE', 'ESPERANDO_MOTIVO_RECHAZO')
-        ORDER BY created_at DESC
-        LIMIT 1`,
-      [telefono]
-    );
-
-    if (pendientes.length === 0) {
-      await provider.sendMessage({ to: telefono, body: RESPUESTAS.sinPendientes, channel: canal });
-      return res.status(200).send('OK');
-    }
-
-    const conv = pendientes[0];
-    const decision = interpretarMensaje(conv.estado, msg.body);
-    const canalActor = canal === 'sms' ? 'SMS' : 'WHATSAPP';
-
-    if (decision === 'APROBAR') {
-      const resultado = await aplicarTransicionExterna({
-        cotizacionId: conv.cotizacion_id,
-        nuevoEstado: 'APROBADA',
-        actor: {
-          canal: canalActor,
-          usuarioId: conv.destinatario_usuario_id,
-          nombre: `${canalActor} (${conv.destinatario_rol || 'destinatario'})`,
-        },
-      });
-      await pool.execute(
-        `UPDATE whatsapp_aprobaciones
-            SET estado = 'APROBADA', respondido_at = NOW()
-          WHERE id = ?`,
-        [conv.id]
-      );
-      const numero = conv.numero_cotizacion || `#${conv.cotizacion_id}`;
-      const cuerpo = resultado.transicionado
-        ? RESPUESTAS.aprobada(numero)
-        : RESPUESTAS.yaResuelta(numero, resultado.cotizacion?.estado || 'APROBADA');
-      await provider.sendMessage({ to: telefono, body: cuerpo, channel: canal });
-      return res.status(200).send('OK');
-    }
-
-    if (decision === 'RECHAZAR_INICIAR') {
-      await pool.execute(
-        `UPDATE whatsapp_aprobaciones SET estado = 'ESPERANDO_MOTIVO_RECHAZO' WHERE id = ?`,
-        [conv.id]
-      );
-      const numero = conv.numero_cotizacion || `#${conv.cotizacion_id}`;
-      await provider.sendMessage({ to: telefono, body: RESPUESTAS.pideMotivo(numero), channel: canal });
-      return res.status(200).send('OK');
-    }
-
-    if (decision === 'RECHAZAR_CON_MOTIVO') {
-      const motivo = String(msg.body || '').trim().slice(0, 1000);
-      const resultado = await aplicarTransicionExterna({
-        cotizacionId: conv.cotizacion_id,
-        nuevoEstado: 'RECHAZADA',
-        motivoRechazo: motivo,
-        actor: {
-          canal: canalActor,
-          usuarioId: conv.destinatario_usuario_id,
-          nombre: `${canalActor} (${conv.destinatario_rol || 'destinatario'})`,
-        },
-      });
-      await pool.execute(
-        `UPDATE whatsapp_aprobaciones
-            SET estado = 'RECHAZADA', motivo_rechazo = ?, respondido_at = NOW()
-          WHERE id = ?`,
-        [motivo, conv.id]
-      );
-      const numero = conv.numero_cotizacion || `#${conv.cotizacion_id}`;
-      const cuerpo = resultado.transicionado
-        ? RESPUESTAS.rechazada(numero)
-        : RESPUESTAS.yaResuelta(numero, resultado.cotizacion?.estado || 'RECHAZADA');
-      await provider.sendMessage({ to: telefono, body: cuerpo, channel: canal });
-      return res.status(200).send('OK');
-    }
-
-    await provider.sendMessage({ to: telefono, body: RESPUESTAS.desconocida, channel: canal });
+    await _procesarMensajeEntrante(provider, msg);
     return res.status(200).send('OK');
   } catch (err) {
     console.error('[whatsapp] webhookEntrante falló:', err?.message || err);
-    try {
-      const provider = getProvider();
-      const msg = provider.parseIncomingMessage(req);
-      if (msg.from) {
-        await provider.sendMessage({ to: msg.from, body: RESPUESTAS.errorInterno, channel: canal });
-      }
-    } catch { /* no-op */ }
     return res.status(200).send('OK');
   }
 }
 
 /**
- * POST /api/whatsapp/status-callback?token=…
- * Twilio hitea esto con cada cambio de estado del mensaje saliente:
- * queued → sent → delivered/undelivered/failed/read.
+ * Procesa UN status update (compartido entre el endpoint dedicado de Twilio
+ * y el webhook unificado de Meta).
  *
- * Cuando vemos `undelivered` o `failed` en un envío WhatsApp, disparamos
- * automáticamente un SMS al mismo número (si el fallback está habilitado).
+ * Si encuentra la fila y el WhatsApp falló (undelivered/failed), dispara el
+ * fallback a SMS — solo cuando el proveedor SMS está configurado. Para Meta
+ * sin Twilio el fallback queda en `skipped` y se loggea.
+ */
+async function _procesarStatusUpdate(evento, opts = {}) {
+  const tokenStatus = String(opts.tokenStatus || '').trim();
+
+  let fila = null;
+  if (tokenStatus) {
+    const [rows] = await pool.execute(
+      `SELECT id, cotizacion_id, destinatario_telefono, estado, canal_envio,
+              sms_enviado_at, mensaje_enviado_sid, sms_enviado_sid
+         FROM whatsapp_aprobaciones
+        WHERE status_callback_token = ?
+        LIMIT 1`,
+      [tokenStatus]
+    );
+    fila = rows[0] || null;
+  }
+  if (!fila && evento.messageSid) {
+    const [rows] = await pool.execute(
+      `SELECT id, cotizacion_id, destinatario_telefono, estado, canal_envio,
+              sms_enviado_at, mensaje_enviado_sid, sms_enviado_sid
+         FROM whatsapp_aprobaciones
+        WHERE mensaje_enviado_sid = ?
+           OR sms_enviado_sid = ?
+        LIMIT 1`,
+      [evento.messageSid, evento.messageSid]
+    );
+    fila = rows[0] || null;
+  }
+  if (!fila) return { ok: true, skipped: true, reason: 'sin fila' };
+
+  const esCallbackDelSms = evento.messageSid && evento.messageSid === fila.sms_enviado_sid;
+
+  if (esCallbackDelSms) {
+    console.log(
+      `[whatsapp] status SMS fila #${fila.id}: ${evento.status}` +
+        (evento.errorCode ? ` (code ${evento.errorCode})` : '')
+    );
+    return { ok: true };
+  }
+
+  await pool.execute(
+    `UPDATE whatsapp_aprobaciones SET estado_entrega_whatsapp = ? WHERE id = ?`,
+    [evento.status, fila.id]
+  );
+
+  const fallidos = new Set(['undelivered', 'failed']);
+  if (fallidos.has(evento.status) && !fila.sms_enviado_at) {
+    const fb = await intentarSmsFallback(fila.id, {
+      motivo: `whatsapp_${evento.status}${evento.errorCode ? `_code_${evento.errorCode}` : ''}`,
+    });
+    if (!fb.ok && !fb.skipped) {
+      console.warn('[whatsapp] fallback SMS no se pudo enviar:', fb.error || fb.reason);
+    }
+  }
+  return { ok: true };
+}
+
+/**
+ * POST /api/whatsapp/status-callback?token=…
+ * Endpoint dedicado de Twilio para status updates (Meta no lo usa: sus status
+ * vienen por el webhook principal y se procesan en `webhookEntrante`).
  */
 async function statusCallbackEntrante(req, res) {
   try {
@@ -579,72 +691,10 @@ async function statusCallbackEntrante(req, res) {
 
     const evento = provider.parseStatusCallback(req);
     const tokenStatus = String(req.query?.token || '').trim();
-
-    // Identificamos la fila por el token (preferido) o por el SID del mensaje.
-    let fila = null;
-    if (tokenStatus) {
-      const [rows] = await pool.execute(
-        `SELECT id, cotizacion_id, destinatario_telefono, estado, canal_envio,
-                sms_enviado_at, mensaje_enviado_sid, sms_enviado_sid
-           FROM whatsapp_aprobaciones
-          WHERE status_callback_token = ?
-          LIMIT 1`,
-        [tokenStatus]
-      );
-      fila = rows[0] || null;
-    }
-    if (!fila && evento.messageSid) {
-      const [rows] = await pool.execute(
-        `SELECT id, cotizacion_id, destinatario_telefono, estado, canal_envio,
-                sms_enviado_at, mensaje_enviado_sid, sms_enviado_sid
-           FROM whatsapp_aprobaciones
-          WHERE mensaje_enviado_sid = ?
-             OR sms_enviado_sid = ?
-          LIMIT 1`,
-        [evento.messageSid, evento.messageSid]
-      );
-      fila = rows[0] || null;
-    }
-    if (!fila) {
-      // Twilio puede hitear status callbacks de mensajes que no tracking
-      // (p. ej. la respuesta de confirmación). No es error: 200 OK.
-      return res.status(200).send('OK (sin fila)');
-    }
-
-    // Diferenciamos si el status corresponde al envío WhatsApp original o al SMS de respaldo.
-    const esCallbackDelSms = evento.messageSid && evento.messageSid === fila.sms_enviado_sid;
-
-    if (!esCallbackDelSms) {
-      // Actualizamos el último estado conocido del WhatsApp.
-      await pool.execute(
-        `UPDATE whatsapp_aprobaciones SET estado_entrega_whatsapp = ? WHERE id = ?`,
-        [evento.status, fila.id]
-      );
-
-      // Disparar fallback si el WhatsApp no se entregó.
-      const fallidos = new Set(['undelivered', 'failed']);
-      if (fallidos.has(evento.status) && !fila.sms_enviado_at) {
-        const fb = await intentarSmsFallback(fila.id, {
-          motivo: `whatsapp_${evento.status}${evento.errorCode ? `_code_${evento.errorCode}` : ''}`,
-        });
-        if (!fb.ok && !fb.skipped) {
-          console.warn('[whatsapp] fallback SMS no se pudo enviar:', fb.error || fb.reason);
-        }
-      }
-    } else {
-      // El callback corresponde al SMS de respaldo. Solo lo loggeamos: si
-      // el SMS también falla no hay otro canal automático para reintentar.
-      console.log(
-        `[whatsapp] status SMS fila #${fila.id}: ${evento.status}` +
-          (evento.errorCode ? ` (code ${evento.errorCode})` : '')
-      );
-    }
-
+    await _procesarStatusUpdate(evento, { tokenStatus });
     return res.status(200).send('OK');
   } catch (err) {
     console.error('[whatsapp] statusCallbackEntrante falló:', err?.message || err);
-    // 200 igual: Twilio reintenta si devolvemos error, y la lógica anti-duplicado
-    // de `intentarSmsFallback` evita doble SMS, pero preferimos no reintentar.
     return res.status(200).send('OK');
   }
 }

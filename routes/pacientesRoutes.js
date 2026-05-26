@@ -7,7 +7,9 @@ const {
   createPaciente,
   updatePaciente,
   deletePaciente,
-  marcarExamenCompletado
+  marcarExamenCompletado,
+  actualizarEstadoMasivoPaciente,
+  obtenerHistorialExamenesPaciente,
 } = require('../controllers/pacientesController');
 const { authenticateToken, requireRole } = require('../middleware/auth');
 
@@ -21,10 +23,46 @@ router.get('/', authenticateToken, getAllPacientes);
 router.get('/:id', authenticateToken, getPacienteById);
 router.post('/', authenticateToken, requireRole('manager', 'vendedor', 'cliente'), pacienteValidation, createPaciente);
 router.put('/:id', authenticateToken, requireRole('manager', 'vendedor', 'cliente'), updatePaciente);
-router.put('/:id/examen', authenticateToken, requireRole('manager', 'vendedor', 'cliente'), [
-  body('examen_id').isInt(),
-  body('completado').optional().isBoolean()
-], marcarExamenCompletado);
+
+/**
+ * Tracking clínico de exámenes (solo manager/vendedor).
+ *
+ * - `PUT /:id/examen`: actualiza el estado de un examen del paciente.
+ *   Acepta tanto el modelo nuevo (`estado`) como el legacy (`completado`).
+ * - `POST /:id/estado-masivo`: aplica un mismo estado (típicamente AUSENTE)
+ *   a todos los exámenes pendientes del paciente.
+ * - `GET /:id/historial-examenes`: timeline auditado de transiciones.
+ */
+router.put(
+  '/:id/examen',
+  authenticateToken,
+  requireRole('manager', 'vendedor'),
+  [
+    body('examen_id').isInt(),
+    body('estado').optional().isString(),
+    body('motivo').optional().isString(),
+    body('completado').optional().isBoolean(),
+  ],
+  marcarExamenCompletado
+);
+router.post(
+  '/:id/estado-masivo',
+  authenticateToken,
+  requireRole('manager', 'vendedor'),
+  [
+    body('estado').isString(),
+    body('motivo').optional().isString(),
+    body('sobrescribir_completados').optional().isBoolean(),
+  ],
+  actualizarEstadoMasivoPaciente
+);
+router.get(
+  '/:id/historial-examenes',
+  authenticateToken,
+  requireRole('manager', 'vendedor'),
+  obtenerHistorialExamenesPaciente
+);
+
 router.delete('/:id', authenticateToken, requireRole('manager', 'vendedor'), deletePaciente);
 
 module.exports = router;

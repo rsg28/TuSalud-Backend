@@ -16,7 +16,8 @@ router.get('/visibles-para-empresa/:empresaId', authenticateToken, emoController
 
 // Guardar set de exámenes por tipo EMO (manager o vendedor)
 router.post('/:perfilId/examenes', authenticateToken, requireRole('manager', 'vendedor'), emoController.guardarExamenesPorTipo);
-router.get('/:perfilId/examenes', authenticateToken, requireRole('manager', 'vendedor'), emoController.obtenerExamenesPorTipo);
+// Lectura: cualquier usuario autenticado (cliente al importar / armar pedido).
+router.get('/:perfilId/examenes', authenticateToken, emoController.obtenerExamenesPorTipo);
 
 // Actualizar / eliminar perfil (manager o vendedor)
 router.patch('/:perfilId', authenticateToken, requireRole('manager', 'vendedor'), emoController.actualizarPerfil);

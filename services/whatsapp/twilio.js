@@ -30,6 +30,7 @@
  */
 
 const crypto = require('node:crypto');
+const { normalizarTelefono } = require('../../utils/normalizarTelefono');
 
 function envOrThrow(name) {
   const v = process.env[name];
@@ -44,15 +45,14 @@ function toTwilioAddressWhatsapp(raw) {
   const s = String(raw || '').trim();
   if (!s) return s;
   if (/^whatsapp:/i.test(s)) return s;
-  return `whatsapp:${s.startsWith('+') ? s : `+${s.replace(/[^\d]/g, '')}`}`;
+  const e164 = normalizarTelefono(s);
+  return e164 ? `whatsapp:${e164}` : s;
 }
 
 /** SMS necesita formato E.164 sin prefijo "whatsapp:". */
 function toTwilioAddressSms(raw) {
-  const s = String(raw || '').replace(/^whatsapp:/i, '').trim();
-  if (!s) return s;
-  if (s.startsWith('+')) return s;
-  return `+${s.replace(/[^\d]/g, '')}`;
+  const e164 = normalizarTelefono(raw);
+  return e164 || String(raw || '').replace(/^whatsapp:/i, '').trim();
 }
 
 /** Inverso: devuelve el E.164 sin `whatsapp:` para guardar/lookup en BD. */

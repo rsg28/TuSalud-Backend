@@ -4,6 +4,7 @@ const {
   helpers: { emitirNotificacionAVendedorDePedido },
 } = require('./notificacionesController');
 const { persistirSnapshotPaciente: persistirSnapshotPacienteBase } = require('../utils/perfilSnapshot');
+const seguimientoSvc = require('../services/seguimientoExamenes');
 
 /**
  * Congela el snapshot histórico de un paciente con el tag «pedidos» para los logs.
@@ -387,16 +388,22 @@ const obtenerPacientesExamenes = async (req, res) => {
 
     let total_examenes_asignados = 0;
     let total_examenes_completados = 0;
+    let total_examenes_ausentes = 0;
+    let total_examenes_no_realizados = 0;
+    let total_examenes_pospuestos = 0;
+    let total_examenes_pendientes = 0;
     const resultado = [];
 
     for (const p of pacientes) {
       const [examenes] = await pool.execute(
-        `SELECT pea.examen_id, ex.nombre,
-                CASE WHEN pec.id IS NOT NULL THEN 1 ELSE 0 END AS completado,
+        `SELECT pea.examen_id, ex.nombre, pea.estado, pea.motivo,
+                pea.fecha_estado, pea.fuente_actualizacion,
+                pea.actualizado_por_usuario_id,
                 pec.fecha_completado
          FROM paciente_examen_asignado pea
          LEFT JOIN examenes ex ON ex.id = pea.examen_id
-         LEFT JOIN paciente_examen_completado pec ON pec.paciente_id = pea.paciente_id AND pec.examen_id = pea.examen_id
+         LEFT JOIN paciente_examen_completado pec
+                ON pec.paciente_id = pea.paciente_id AND pec.examen_id = pea.examen_id
          WHERE pea.paciente_id = ?
          ORDER BY ex.nombre`,
         [p.id]
@@ -404,12 +411,32 @@ const obtenerPacientesExamenes = async (req, res) => {
       const examenesList = examenes.map((e) => ({
         examen_id: e.examen_id,
         nombre: e.nombre || `Examen ${e.examen_id}`,
-        completado: Boolean(e.completado),
-        fecha_completado: e.fecha_completado ? (e.fecha_completado instanceof Date ? e.fecha_completado.toISOString() : String(e.fecha_completado)) : null
+        estado: e.estado || 'PENDIENTE',
+        completado: e.estado === 'COMPLETADO',
+        motivo: e.motivo || null,
+        fecha_estado: e.fecha_estado
+          ? (e.fecha_estado instanceof Date ? e.fecha_estado.toISOString() : String(e.fecha_estado))
+          : null,
+        fuente_actualizacion: e.fuente_actualizacion || 'MANUAL',
+        actualizado_por_usuario_id: e.actualizado_por_usuario_id,
+        fecha_completado: e.fecha_completado
+          ? (e.fecha_completado instanceof Date ? e.fecha_completado.toISOString() : String(e.fecha_completado))
+          : null,
       }));
-      const completadosPaciente = examenesList.filter((e) => e.completado).length;
+
+      const contar = (estado) => examenesList.filter((e) => e.estado === estado).length;
+      const completadosPaciente = contar('COMPLETADO');
+      const ausentesPaciente = contar('AUSENTE');
+      const noRealizadosPaciente = contar('NO_REALIZADO');
+      const pospuestosPaciente = contar('POSPUESTO');
+      const pendientesPaciente = contar('PENDIENTE');
+
       total_examenes_asignados += examenesList.length;
       total_examenes_completados += completadosPaciente;
+      total_examenes_ausentes += ausentesPaciente;
+      total_examenes_no_realizados += noRealizadosPaciente;
+      total_examenes_pospuestos += pospuestosPaciente;
+      total_examenes_pendientes += pendientesPaciente;
 
       resultado.push(sanitizeForJson({
         id: p.id,
@@ -419,7 +446,11 @@ const obtenerPacientesExamenes = async (req, res) => {
         area: p.area,
         examenes: examenesList,
         examenes_completados: completadosPaciente,
-        examenes_total: examenesList.length
+        examenes_ausentes: ausentesPaciente,
+        examenes_no_realizados: noRealizadosPaciente,
+        examenes_pospuestos: pospuestosPaciente,
+        examenes_pendientes: pendientesPaciente,
+        examenes_total: examenesList.length,
       }));
     }
 
@@ -429,8 +460,12 @@ const obtenerPacientesExamenes = async (req, res) => {
       resumen: {
         total_pacientes: resultado.length,
         total_examenes_asignados,
-        total_examenes_completados
-      }
+        total_examenes_completados,
+        total_examenes_ausentes,
+        total_examenes_no_realizados,
+        total_examenes_pospuestos,
+        total_examenes_pendientes,
+      },
     });
   } catch (error) {
     console.error('Error al obtener pacientes y exámenes:', error);
@@ -1125,6 +1160,39 @@ const cancelarPedido = async (req, res) => {
   }
 };
 
+/**
+ * GET /api/pedidos/:pedido_id/ajustes-sugeridos
+ *
+ * Devuelve los exámenes en estado AUSENTE / NO_REALIZADO con el monto
+ * sugerido para una eventual cotización complementaria negativa. NO modifica
+ * cotizaciones ni facturas: solo informa al manager para que decida.
+ */
+const obtenerAjustesSugeridos = async (req, res) => {
+  try {
+    const pedidoId = Number(req.params.pedido_id);
+    if (!Number.isInteger(pedidoId) || pedidoId <= 0) {
+      return res.status(400).json({ error: 'pedido_id inválido' });
+    }
+    const [pedidos] = await pool.execute(
+      'SELECT id, numero_pedido, estado FROM pedidos WHERE id = ?',
+      [pedidoId]
+    );
+    if (pedidos.length === 0) {
+      return res.status(404).json({ error: 'Pedido no encontrado' });
+    }
+    const ajustes = await seguimientoSvc.calcularAjustesSugeridos(pedidoId);
+    return res.json({
+      pedido_id: pedidoId,
+      numero_pedido: pedidos[0].numero_pedido,
+      estado_pedido: pedidos[0].estado,
+      ...ajustes,
+    });
+  } catch (err) {
+    console.error('Error al calcular ajustes sugeridos:', err);
+    res.status(500).json({ error: 'Error al calcular ajustes sugeridos' });
+  }
+};
+
 module.exports = {
   listarPedidos,
   listarMisPedidos,
@@ -1144,5 +1212,6 @@ module.exports = {
   marcarCompletado,
   cancelarPedido,
   cancelarPedidoEnConnection,
-  obtenerArticulosPendientes
+  obtenerArticulosPendientes,
+  obtenerAjustesSugeridos,
 };
