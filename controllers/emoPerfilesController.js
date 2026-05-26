@@ -313,6 +313,13 @@ exports.listarVisiblesParaEmpresa = async (req, res) => {
       )`;
 
     // Trae perfiles + indicadores de origen para esa empresa (sin JOINs amplios que dupliquen filas).
+    //
+    // Orden por relevancia para la empresa:
+    //   1º Perfiles asignados directamente a la empresa (los más específicos).
+    //   2º Perfiles asignados vía grupo empresarial (también específicos pero indirectos).
+    //   3º Perfiles GLOBAL al final (cualquiera puede verlos, son los menos personalizados).
+    // Dentro de cada bucket, alfabético. De esta forma los popups y los pickers
+    // muestran primero "lo de la empresa" antes que el catálogo genérico.
     const [rows] = await pool.execute(
       `SELECT p.id, p.nombre, p.visibilidad,
               CASE WHEN p.visibilidad = 'GLOBAL' THEN 1 ELSE 0 END AS es_global,
@@ -331,8 +338,17 @@ exports.listarVisiblesParaEmpresa = async (req, res) => {
          FROM emo_perfiles p
         WHERE ${visibilidadParaEmpresa}
            ${whereExtra}
-     ORDER BY p.nombre ASC`,
-      params
+     ORDER BY asignado_empresa DESC,
+              (CASE WHEN EXISTS (
+                  SELECT 1
+                    FROM emo_perfil_grupo_asignacion epga2
+                    INNER JOIN empresa_grupo eg2
+                            ON eg2.grupo_id = epga2.grupo_id AND eg2.empresa_id = ?
+                   WHERE epga2.perfil_id = p.id
+                ) THEN 1 ELSE 0 END) DESC,
+              es_global ASC,
+              p.nombre ASC`,
+      [...params, empresaId]
     );
 
     const includeExamenes = String(req.query?.include_examenes ?? '').trim() === '1';

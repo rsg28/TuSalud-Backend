@@ -883,5 +883,7 @@ module.exports = {
     smsFallbackHabilitado,
     MENSAJE_SMS,
     enmascararTelefono,
+    procesarMensajeEntrante: _procesarMensajeEntrante,
+    procesarStatusUpdate: _procesarStatusUpdate,
   },
 };
