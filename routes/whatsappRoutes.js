@@ -27,6 +27,7 @@ const {
   statusCallbackEntrante,
   descargarArchivoPorToken,
   reenviarSolicitud,
+  obtenerEstadoAprobacion,
 } = require('../controllers/whatsappController');
 const { getProvider } = require('../services/whatsapp');
 
@@ -53,6 +54,18 @@ router.post(
   authenticateToken,
   requireRole('manager', 'vendedor'),
   reenviarSolicitud
+);
+
+/**
+ * GET /api/whatsapp/aprobaciones/cotizacion/:cotizacionId
+ * Devuelve el estado del envío WhatsApp/SMS asociado a una cotización
+ * (canal, último status del provider, fechas, motivo de rechazo).
+ * Lo consume el frontend para pintar la tarjeta de estado.
+ */
+router.get(
+  '/aprobaciones/cotizacion/:cotizacionId',
+  authenticateToken,
+  obtenerEstadoAprobacion
 );
 
 module.exports = router;

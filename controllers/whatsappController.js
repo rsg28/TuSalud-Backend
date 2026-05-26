@@ -766,6 +766,106 @@ async function dispararEnvioSiCorresponde(cotizacionId) {
   }
 }
 
+/**
+ * Enmascara un teléfono para mostrarlo en UI sin exponer el número completo.
+ * Ej. "+51987654321" → "+51 *** *** 321".
+ *
+ * No es seguridad real (el número completo igual viaja en BD y logs), es solo
+ * cortesía visual para que un screenshot del frontend no exponga el dato.
+ */
+function enmascararTelefono(telefono) {
+  const limpio = String(telefono || '').trim();
+  if (!limpio) return '';
+  if (limpio.length <= 4) return limpio;
+  const visible = limpio.slice(-3);
+  const prefijo = limpio.startsWith('+') ? limpio.slice(0, 3) : '';
+  return `${prefijo} *** *** ${visible}`.trim();
+}
+
+/**
+ * GET /api/whatsapp/aprobaciones/cotizacion/:cotizacionId  (auth)
+ *
+ * Devuelve el historial de envíos WhatsApp/SMS asociados a una cotización
+ * para que el frontend pueda mostrar el estado actual (canal, último status
+ * del provider, fechas, motivo de rechazo) y habilitar el botón "Reenviar".
+ *
+ * Respuesta:
+ * {
+ *   cotizacionId: number,
+ *   total: number,
+ *   activo: <fila actual o null>,
+ *   historial: [<filas previas, más reciente primero>]
+ * }
+ *
+ * Para roles manager/vendedor devolvemos el teléfono completo (lo necesitan
+ * para hacer follow-up); para el resto solo el enmascarado.
+ */
+async function obtenerEstadoAprobacion(req, res) {
+  try {
+    const cotizacionId = Number(req.params.cotizacionId);
+    if (!Number.isFinite(cotizacionId) || cotizacionId <= 0) {
+      return res.status(400).json({ error: 'cotizacionId inválido' });
+    }
+
+    const [rows] = await pool.execute(
+      `SELECT id, cotizacion_id, destinatario_telefono, destinatario_rol,
+              destinatario_usuario_id, numero_cotizacion, estado, canal_envio,
+              motivo_rechazo, mensaje_enviado_sid, estado_entrega_whatsapp,
+              sms_enviado_sid, sms_enviado_at, enviado_at, respondido_at,
+              created_at, updated_at
+         FROM whatsapp_aprobaciones
+        WHERE cotizacion_id = ?
+        ORDER BY id DESC`,
+      [cotizacionId]
+    );
+
+    const rolUsuario = String(req.user?.rol || '').toLowerCase();
+    const puedeVerTelefono = rolUsuario === 'manager' || rolUsuario === 'vendedor';
+
+    const mapeada = rows.map((r) => ({
+      id: r.id,
+      cotizacion_id: r.cotizacion_id,
+      numero_cotizacion: r.numero_cotizacion,
+      destinatario_rol: r.destinatario_rol,
+      destinatario_usuario_id: r.destinatario_usuario_id,
+      destinatario_telefono_enmascarado: enmascararTelefono(r.destinatario_telefono),
+      destinatario_telefono: puedeVerTelefono ? r.destinatario_telefono : null,
+      estado: r.estado,
+      canal_envio: r.canal_envio,
+      estado_entrega_whatsapp: r.estado_entrega_whatsapp,
+      motivo_rechazo: r.motivo_rechazo,
+      mensaje_enviado_sid: r.mensaje_enviado_sid,
+      sms_enviado_sid: r.sms_enviado_sid,
+      sms_enviado_at: r.sms_enviado_at,
+      enviado_at: r.enviado_at,
+      respondido_at: r.respondido_at,
+      created_at: r.created_at,
+      updated_at: r.updated_at,
+    }));
+
+    const activo =
+      mapeada.find(
+        (r) =>
+          r.estado === 'PENDIENTE' || r.estado === 'ESPERANDO_MOTIVO_RECHAZO'
+      ) || mapeada[0] || null;
+
+    return res.json({
+      cotizacionId,
+      total: mapeada.length,
+      activo,
+      historial: mapeada,
+    });
+  } catch (err) {
+    console.error(
+      '[whatsapp] obtenerEstadoAprobacion falló:',
+      err?.message || err
+    );
+    return res
+      .status(500)
+      .json({ error: 'Error al consultar estado de WhatsApp' });
+  }
+}
+
 module.exports = {
   enviarCotizacionAprobacion,
   intentarSmsFallback,
@@ -774,6 +874,7 @@ module.exports = {
   statusCallbackEntrante,
   descargarArchivoPorToken,
   reenviarSolicitud,
+  obtenerEstadoAprobacion,
   _internals: {
     interpretarMensaje,
     normalizarTexto,
@@ -781,5 +882,6 @@ module.exports = {
     PALABRAS_RECHAZAR,
     smsFallbackHabilitado,
     MENSAJE_SMS,
+    enmascararTelefono,
   },
 };

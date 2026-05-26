@@ -170,7 +170,112 @@ recibe webhooks por la misma ruta `/api/whatsapp/webhook`.
 
 ---
 
-## 7. Fuentes consultadas (mayo 2026)
+## 7. Cómo agregar más números (paso a paso)
+
+La pregunta clave es: ¿qué número aparece como **remitente** del WhatsApp que reciben los vendedores/clientes? Hoy es un número único (sandbox de Twilio en pruebas, o un número de empresa cuando produzcamos). Si quieres tener varios — por ejemplo un número por sede, un número por línea de negocio, o un número distinto para mensajes administrativos vs. comerciales — depende del provider.
+
+### 7.1 Mientras estés en Twilio Sandbox (estado actual)
+
+El sandbox es **un único número compartido por Twilio para todos los desarrolladores** (`+1 415 523 8886`). No se puede cambiar ni agregar números en sandbox. Lo que sí puedes hacer:
+
+**Agregar más destinatarios al sandbox (cada usuario de prueba se auto-suscribe):**
+
+1. El usuario abre WhatsApp y envía `join <dos-palabras>` al `+1 415 523 8886`.
+2. El código `<dos-palabras>` lo ves en la consola: <https://console.twilio.com/us1/develop/sms/try-it-out/whatsapp-learn>.
+3. Twilio responde *"You are all set!"* y queda suscrito por 72 h sin actividad (ó indefinidamente si sigue chateando con el sandbox).
+4. Verifica el cel registrado en "Sandbox Participants" en la misma consola.
+
+> **Limitaciones del sandbox**: solo soporta plantillas de Twilio pre-aprobadas para iniciar conversación, y los mensajes salen con prefijo *"Sandbox:"*. Para producción real, salta al punto 7.2.
+
+### 7.2 Agregar números en Twilio (producción)
+
+Cada número Twilio se compra/asigna a la cuenta y se asocia a un **WhatsApp Sender** vía Twilio + Meta. Cuesta dinero **por cada número** que sumes (no se comparte un único número entre varias líneas):
+
+| Concepto | Costo |
+|---|---|
+| Alta del número WhatsApp en Twilio (one-time) | ~$25 USD |
+| Renta mensual del número WhatsApp | ~$5 USD/mes |
+| Mensajes (conversation pricing) | igual que cualquier provider Meta |
+
+**Pasos para agregar un número adicional en Twilio:**
+
+1. **Comprar/registrar el número** en Twilio Console → *Phone Numbers* → *Buy a Number* (o `Verified Caller IDs` si es un número tuyo propio).
+2. **Crear un WhatsApp Sender** en *Messaging* → *Senders* → *WhatsApp Senders* → *Create new Sender*. Twilio te guía con un wizard que te conecta con Meta Business Manager para verificar la titularidad del número.
+3. **Configurar el webhook** del nuevo sender apuntando a `https://api.tu-salud.xyz/api/whatsapp/webhook` y `https://api.tu-salud.xyz/api/whatsapp/status-callback` (igual que el del sandbox actual).
+4. **Esperar la aprobación de Meta** (24-72 h normalmente).
+5. **Cambiar la variable de entorno** en el backend para usar el nuevo número:
+
+   ```ini
+   TWILIO_WHATSAPP_FROM=whatsapp:+51XXXXXXXXX
+   ```
+
+   Reinicias el proceso con `pm2 restart all --update-env` y listo.
+
+> Si quieres usar **varios números en paralelo** (no solo uno a la vez), no basta con cambiar la env var: hay que extender el provider (`services/whatsapp/twilio.js`) para que reciba el `from` por argumento. Ver punto 7.5.
+
+### 7.3 Agregar números en Meta WhatsApp Cloud API
+
+Meta es más permisivo: hasta **25 números por WhatsApp Business Account (WABA)** sin costo adicional por número (solo pagas conversation pricing). Cada número tiene su propio `phone_number_id`.
+
+**Pasos:**
+
+1. Entra a Meta Business Manager → *WhatsApp Manager* → *Phone Numbers* → *Add phone number*.
+2. Verifica el número (SMS o llamada). El número **NO** debe estar registrado actualmente en la app de WhatsApp normal — Meta lo absorbe en su plataforma.
+3. Te da un nuevo `WHATSAPP_PHONE_NUMBER_ID` que copias.
+4. Si vas a usar plantillas de iniciación, solicita aprobación en *Message templates* (24-72 h por plantilla, por número).
+5. Configura el webhook en *Configuration* → *Webhook* → *Edit* apuntando a `https://api.tu-salud.xyz/api/whatsapp/webhook`. El verify token es el mismo (`WHATSAPP_WEBHOOK_VERIFY_TOKEN`).
+6. En el backend, para alternar entre números, cambias:
+
+   ```ini
+   WHATSAPP_PHONE_NUMBER_ID=<id-del-nuevo-numero>
+   WHATSAPP_ACCESS_TOKEN=<mismo-token-de-la-WABA>
+   ```
+
+   Reinicias y listo.
+
+### 7.4 Verificar el número del negocio (Business Verification)
+
+Para producción Meta exige verificar el negocio (no solo el número). Sin esto el límite de mensajes es 250/día y no puedes desbloquear plantillas marketing. Pasos:
+
+1. *Business Manager* → *Settings* → *Business Info* → *Start Verification*.
+2. Subes: ficha RUC SUNAT (Perú), comprobante de domicilio fiscal y, opcionalmente, un correo corporativo del dominio.
+3. Meta verifica en 1-5 días hábiles. Si falla, lees el motivo en el inbox de Business Manager y corriges.
+4. Una vez verificado, puedes solicitar el **Green Tick** (insignia verde de cuenta oficial) por separado — útil para clientes B2C porque transmite confianza.
+
+### 7.5 Multi-from en el backend (si necesitas elegir número por contexto)
+
+Hoy `services/whatsapp/twilio.js` y `services/whatsapp/meta.js` usan **un único número** leído de las env vars. Si en el futuro quieres elegir el número según la sede, el rol o la empresa, hay que extender la firma:
+
+```js
+provider.sendMessage({
+  from: 'whatsapp:+51999111222', // ← nuevo
+  to: 'whatsapp:+51987654321',
+  body: '…',
+});
+```
+
+Y el lookup del número correcto se haría en `whatsappController.js → resolverDestinatario()` agregando una columna `numero_whatsapp_origen` en `usuarios` o `sedes`, o un mapa estático en `services/whatsapp/numerosOrigen.js`. El cambio es chico (~30 líneas) pero requiere también extender el lado del provider para no romper la firma `sendMessage`.
+
+**Cuándo conviene hacerlo:**
+
+- Tienes vendedores en distintas regiones y quieres que el cliente vea un número local.
+- Quieres separar marketing/notificaciones/transaccional para no quemar plantillas.
+- Te impusieron límites por número (en Meta el límite es por número-rating: 1k → 10k → 100k → ilimitado, sube cuando demuestras calidad).
+
+**Cuándo NO conviene**: si estás por debajo de ~5 k mensajes/mes con un único número, agregar más números solo te complica la operación.
+
+### 7.6 Cheatsheet — ¿qué número uso hoy?
+
+| Escenario | Provider | Variable que cambias | Costo extra |
+|---|---|---|---|
+| Probar el flujo end-to-end ya mismo | Twilio Sandbox | Ninguna (sandbox por defecto) | $0 |
+| Mandar a clientes reales en Perú, número Twilio dedicado | Twilio | `TWILIO_WHATSAPP_FROM=whatsapp:+51…` | ~$5/mes + ~$25 alta |
+| Lo mismo pero con Meta Cloud (recomendado largo plazo) | Meta | `WHATSAPP_PHONE_NUMBER_ID=…` + `WHATSAPP_ACCESS_TOKEN=…` | $0/mes de número |
+| Múltiples sedes con números distintos | Meta + multi-from | Extensión de código (7.5) | $0/número en Meta |
+
+---
+
+## 8. Fuentes consultadas (mayo 2026)
 
 - Meta WhatsApp Business Platform – Conversation pricing
   <https://developers.facebook.com/docs/whatsapp/pricing/>
