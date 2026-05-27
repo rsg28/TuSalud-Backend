@@ -188,6 +188,23 @@ const crearCotizacionComplementariaConConnection = async (connection, opts) => {
   for (const it of itemsNorm) {
     await insertarCotizacionItem(connection, cotizacionId, it);
   }
+
+  const porAusencia = total < 0;
+  const descHistorial = porAusencia
+    ? `Cotización complementaria ${numero_cotizacion} generada por exámenes de paciente(s) ausente(s) o no realizados (monto sugerido S/ ${Math.abs(total).toFixed(2)}).`
+    : `Cotización complementaria ${numero_cotizacion} creada (${itemsNorm.length} línea${itemsNorm.length === 1 ? '' : 's'}).`;
+  try {
+    await connection.execute(
+      `INSERT INTO historial_pedido (
+         pedido_id, cotizacion_id, tipo_evento, descripcion, usuario_id, usuario_nombre
+       ) VALUES (?, ?, 'COTIZACION_COMPLEMENTARIA', ?, ?, NULL)`,
+      [pedido_id, cotizacionId, descHistorial, creador_id ?? null]
+    );
+  } catch (histErr) {
+    // Si la BD aún no tiene el enum ampliado, no bloqueamos la creación de la cotización.
+    console.warn('[cotizaciones] historial complementaria omitido:', histErr?.message || histErr);
+  }
+
   return { cotizacionId, numero_cotizacion };
 };
 
