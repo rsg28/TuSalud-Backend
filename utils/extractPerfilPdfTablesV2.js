@@ -2444,6 +2444,14 @@ function looksLikeProtocolEmoContextLine(s) {
  * `sortedYDesc`: líneas horizontales Y ordenadas de mayor a menor (eje PDF.js).
  * `startRowIndex`: índice de fila de matriz = banda entre sortedYDesc[i] y sortedYDesc[i+1].
  */
+function lineLooksLikeCompanyRucMetadata(text) {
+  const t = normalizeCell(text);
+  if (!t) return false;
+  if (/\bRUC\b/i.test(t)) return true;
+  if (/\b\d{11}\b/.test(t) && t.length < 160) return true;
+  return false;
+}
+
 function collectContextTextAboveTableRow(items, sortedYDesc, startRowIndex) {
   if (!Array.isArray(items) || !items.length) return '';
   if (!Array.isArray(sortedYDesc) || sortedYDesc.length < 2) return '';
@@ -2474,7 +2482,7 @@ function collectContextTextAboveTableRow(items, sortedYDesc, startRowIndex) {
       .join(' ')
       .replace(/\s+/g, ' ')
       .trim();
-    if (txt.length >= 4) lines.push(txt);
+    if (txt.length >= 4 && !lineLooksLikeCompanyRucMetadata(txt)) lines.push(txt);
     cur = [];
     curY = null;
   };
