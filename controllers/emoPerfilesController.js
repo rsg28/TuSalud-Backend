@@ -636,11 +636,20 @@ exports.eliminarPerfil = async (req, res) => {
     const perfilId = parseInt(String(req.params?.perfilId ?? ''), 10);
     if (!Number.isInteger(perfilId) || perfilId <= 0) return res.status(400).json({ error: 'perfilId inválido' });
 
+    const [exists] = await pool.execute('SELECT id FROM emo_perfiles WHERE id = ? LIMIT 1', [perfilId]);
+    if (exists.length === 0) return res.status(404).json({ error: 'Perfil no encontrado' });
+
     const [result] = await pool.execute('DELETE FROM emo_perfiles WHERE id = ?', [perfilId]);
     if (result.affectedRows === 0) return res.status(404).json({ error: 'Perfil no encontrado' });
 
     res.json({ message: 'Perfil EMO eliminado' });
   } catch (error) {
+    if (error?.code === 'ER_ROW_IS_REFERENCED_2' || error?.errno === 1451) {
+      return res.status(409).json({
+        error:
+          'No se puede eliminar el perfil porque está en uso en pedidos, cotizaciones o facturas.',
+      });
+    }
     console.error('Error al eliminar perfil EMO:', error);
     res.status(500).json({ error: 'Error al eliminar perfil EMO', details: error.message });
   }

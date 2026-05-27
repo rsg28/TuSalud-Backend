@@ -232,6 +232,76 @@ const setEmpresaByUsuarioId = async (req, res) => {
   }
 };
 
+/**
+ * Actualiza datos de la empresa ya vinculada al usuario (contacto, dirección, email).
+ * Solo el propio usuario o un manager; el cliente solo puede editar SU empresa asignada.
+ */
+const patchEmpresaByUsuarioId = async (req, res) => {
+  try {
+    const userId = parseInt(req.params.id, 10);
+    if (!Number.isInteger(userId) || userId <= 0) {
+      return res.status(400).json({ error: 'ID de usuario no válido' });
+    }
+    if (!sameUsuarioId(req.user.id, userId) && req.user.rol !== 'manager') {
+      return res.status(403).json({ error: 'No puedes modificar la empresa de otro usuario' });
+    }
+
+    const [users] = await pool.execute('SELECT empresa_id FROM usuarios WHERE id = ?', [userId]);
+    if (users.length === 0) {
+      return res.status(404).json({ error: 'Usuario no encontrado' });
+    }
+    const empresaId = users[0].empresa_id;
+    if (empresaId == null) {
+      return res.status(404).json({ error: 'No tienes una empresa vinculada' });
+    }
+
+    const body = req.body || {};
+    const allowed = ['direccion', 'contacto', 'email', 'ruc'];
+    const sets = [];
+    const params = [];
+
+    for (const key of allowed) {
+      if (Object.prototype.hasOwnProperty.call(body, key)) {
+        const raw = body[key];
+        if (key === 'ruc') {
+          const digits = String(raw ?? '').replace(/\D/g, '');
+          if (digits && (digits.length < 9 || digits.length > 11)) {
+            return res.status(400).json({ error: 'El RUC debe tener entre 9 y 11 dígitos' });
+          }
+          if (digits) {
+            const [dup] = await pool.execute('SELECT id FROM empresas WHERE ruc = ? AND id != ?', [
+              digits,
+              empresaId,
+            ]);
+            if (dup.length > 0) {
+              return res.status(400).json({ error: 'El RUC ya está registrado en otra empresa' });
+            }
+          }
+          sets.push('ruc = ?');
+          params.push(digits || null);
+        } else {
+          const val = raw == null ? null : String(raw).trim() || null;
+          sets.push(`${key} = ?`);
+          params.push(val);
+        }
+      }
+    }
+
+    if (sets.length === 0) {
+      return res.status(400).json({ error: 'Indica al menos un campo: direccion, contacto, email o ruc' });
+    }
+
+    params.push(empresaId);
+    await pool.execute(`UPDATE empresas SET ${sets.join(', ')} WHERE id = ?`, params);
+
+    const [empresas] = await pool.execute('SELECT * FROM empresas WHERE id = ?', [empresaId]);
+    res.json({ message: 'Datos de empresa actualizados', empresa: empresas[0] });
+  } catch (error) {
+    console.error('Error al actualizar datos de empresa del usuario:', error);
+    res.status(500).json({ error: 'Error al actualizar datos de la empresa' });
+  }
+};
+
 // Activar/desactivar usuario
 const toggleUsuarioActivo = async (req, res) => {
   try {
@@ -272,6 +342,7 @@ const empresaMe = (handler) => (req, res, next) => {
 router.get('/me/empresa', authenticateToken, empresaMe(getEmpresaByUsuarioId));
 router.delete('/me/empresa', authenticateToken, empresaMe(deleteEmpresaByUsuarioId));
 router.post('/me/empresa', authenticateToken, empresaMe(setEmpresaByUsuarioId));
+router.patch('/me/empresa', authenticateToken, empresaMe(patchEmpresaByUsuarioId));
 
 router.get('/:id/empresa', authenticateToken, getEmpresaByUsuarioId);
 router.delete('/:id/empresa', authenticateToken, deleteEmpresaByUsuarioId);
