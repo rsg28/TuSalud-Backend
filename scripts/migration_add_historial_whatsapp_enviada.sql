@@ -1,0 +1,19 @@
+-- Añade WHATSAPP_COTIZACION_ENVIADA al historial del pedido.
+-- Ejecutar en RDS/MySQL antes de desplegar el backend actualizado.
+
+ALTER TABLE historial_pedido
+  MODIFY COLUMN tipo_evento ENUM(
+    'CREACION',
+    'COTIZACION_ENVIADA',
+    'COTIZACION_APROBADA',
+    'COTIZACION_RECHAZADA',
+    'SOLICITUD_MANAGER',
+    'PRECIO_APROBADO',
+    'FACTURA_EMITIDA',
+    'FACTURA_ANULADA',
+    'FACTURA_ENVIADA_CLIENTE',
+    'PAGO_RECIBIDO',
+    'COTIZACION_ELIMINADA',
+    'PEDIDO_COMPLETADO',
+    'WHATSAPP_COTIZACION_ENVIADA'
+  ) NOT NULL;

@@ -178,11 +178,72 @@ async function resolverDestinatario(cotizacionId) {
       rol: 'vendedor',
     };
   }
+
+  // Pedidos creados por el cliente no tienen vendedor_id; mismo criterio que
+  // emitirNotificacionAVendedorDePedido: primer manager/vendedor activo con teléfono.
+  const [candidatos] = await pool.execute(
+    `SELECT id, telefono, rol FROM usuarios
+      WHERE rol IN ('manager', 'vendedor') AND activo = 1
+        AND telefono IS NOT NULL AND TRIM(telefono) <> ''
+      ORDER BY (rol = 'manager') DESC, id ASC
+      LIMIT 1`
+  );
+  if (candidatos.length > 0) {
+    const c = candidatos[0];
+    return {
+      telefono: normalizarTelefono(c.telefono),
+      usuarioId: c.id,
+      rol: c.rol === 'manager' ? 'manager' : 'vendedor',
+    };
+  }
+
   const fallback = normalizarTelefono(process.env.WHATSAPP_MANAGER_FALLBACK_PHONE || '');
   if (fallback) {
     return { telefono: fallback, usuarioId: null, rol: 'manager' };
   }
   return { telefono: null, usuarioId: null, rol: null };
+}
+
+/**
+ * Enmascara un teléfono para mostrarlo en UI sin exponer el número completo.
+ * Ej. "+51987654321" → "+51 *** *** 321".
+ */
+function enmascararTelefono(telefono) {
+  const limpio = String(telefono || '').trim();
+  if (!limpio) return '';
+  if (limpio.length <= 4) return limpio;
+  const visible = limpio.slice(-3);
+  const prefijo = limpio.startsWith('+') ? limpio.slice(0, 3) : '';
+  return `${prefijo} *** *** ${visible}`.trim();
+}
+
+/** Registra en historial_pedido un envío exitoso por WhatsApp/SMS (best-effort). */
+async function registrarHistorialWhatsappEnvio(cotizacionId, { telefono, numeroCotizacion, canal = 'WhatsApp' }) {
+  try {
+    const [rows] = await pool.execute(
+      `SELECT c.pedido_id, c.numero_cotizacion FROM cotizaciones c WHERE c.id = ? LIMIT 1`,
+      [cotizacionId]
+    );
+    if (rows.length === 0) return;
+    const pedidoId = rows[0].pedido_id;
+    const num = numeroCotizacion || rows[0].numero_cotizacion || '—';
+    const mask = enmascararTelefono(telefono);
+    await pool.execute(
+      `INSERT INTO historial_pedido (
+         pedido_id, cotizacion_id, tipo_evento, descripcion, usuario_id, usuario_nombre
+       ) VALUES (?, ?, 'WHATSAPP_COTIZACION_ENVIADA', ?, NULL, 'Sistema')`,
+      [
+        pedidoId,
+        cotizacionId,
+        `Solicitud de aprobación enviada por ${canal} a ${mask || 'destinatario'} (cotización ${num}).`,
+      ]
+    );
+  } catch (err) {
+    console.warn(
+      '[whatsapp] no se pudo registrar historial (¿migración WHATSAPP_COTIZACION_ENVIADA?):',
+      err?.message || err
+    );
+  }
 }
 
 /** Reúne el resumen de la cotización para construir los mensajes (XLSX y SMS). */
@@ -328,6 +389,11 @@ async function enviarCotizacionAprobacion(cotizacionId) {
         );
         throw sendErr;
       }
+      await registrarHistorialWhatsappEnvio(cotizacionId, {
+        telefono: destino.telefono,
+        numeroCotizacion: resumen.numero,
+        canal: 'SMS',
+      });
       return { ok: true, pendienteId: ins.insertId, telefono: destino.telefono, sid: null, fallback: fb };
     }
 
@@ -337,6 +403,12 @@ async function enviarCotizacionAprobacion(cotizacionId) {
         [sid, ins.insertId]
       );
     }
+
+    await registrarHistorialWhatsappEnvio(cotizacionId, {
+      telefono: destino.telefono,
+      numeroCotizacion: resumen.numero,
+      canal: 'WhatsApp',
+    });
 
     return {
       ok: true,
@@ -753,33 +825,25 @@ async function dispararEnvioSiCorresponde(cotizacionId) {
     const { estado, creador_tipo: creadorTipo, pendientes_abiertas: pend } = rows[0];
 
     if (estado !== 'ENVIADA' || creadorTipo !== 'CLIENTE') {
-      return { ok: false, skipped: true, reason: `estado=${estado}, creador=${creadorTipo}` };
+      const reason = `estado=${estado}, creador=${creadorTipo}`;
+      console.info('[whatsapp] envío omitido:', reason, { cotizacionId });
+      return { ok: false, skipped: true, reason };
     }
     if (Number(pend) > 0) {
-      return { ok: false, skipped: true, reason: 'ya hay un envío pendiente abierto' };
+      const reason = 'ya hay un envío pendiente abierto';
+      console.info('[whatsapp] envío omitido:', reason, { cotizacionId });
+      return { ok: false, skipped: true, reason };
     }
 
-    return await enviarCotizacionAprobacion(cotizacionId);
+    const out = await enviarCotizacionAprobacion(cotizacionId);
+    if (out.skipped || !out.ok) {
+      console.warn('[whatsapp] envío no realizado:', out.reason || out.error, { cotizacionId });
+    }
+    return out;
   } catch (err) {
     console.error('[whatsapp] dispararEnvioSiCorresponde falló:', err?.message || err);
     return { ok: false, error: err?.message || String(err) };
   }
-}
-
-/**
- * Enmascara un teléfono para mostrarlo en UI sin exponer el número completo.
- * Ej. "+51987654321" → "+51 *** *** 321".
- *
- * No es seguridad real (el número completo igual viaja en BD y logs), es solo
- * cortesía visual para que un screenshot del frontend no exponga el dato.
- */
-function enmascararTelefono(telefono) {
-  const limpio = String(telefono || '').trim();
-  if (!limpio) return '';
-  if (limpio.length <= 4) return limpio;
-  const visible = limpio.slice(-3);
-  const prefijo = limpio.startsWith('+') ? limpio.slice(0, 3) : '';
-  return `${prefijo} *** *** ${visible}`.trim();
 }
 
 /**
