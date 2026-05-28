@@ -274,14 +274,30 @@ async function calcularAjustesSugeridos(pedidoId) {
     };
   }
 
-  // 2) Precios desde cotización(es) aprobada(s) del pedido.
+  // 2) Precios desde cotización(es) del pedido.
+  // Preferimos APROBADA / APROBADA_POR_MANAGER (precios firmes); si no hay,
+  // caemos a estados intermedios (ENVIADA_AL_CLIENTE → manager ya aprobó;
+  // ENVIADA_AL_MANAGER y ENVIADA → propuestas que sirven como referencia para
+  // testear o estimar el ajuste antes de la aprobación final).
   const [items] = await pool.execute(
     `SELECT ci.tipo_item, ci.examen_id, ci.perfil_id, ci.tipo_emo,
-            ci.precio_final, ci.examenes_snapshot_json
+            ci.precio_final, ci.examenes_snapshot_json,
+            CASE c.estado
+              WHEN 'APROBADA'              THEN 1
+              WHEN 'APROBADA_POR_MANAGER'  THEN 2
+              WHEN 'ENVIADA_AL_CLIENTE'    THEN 3
+              WHEN 'ENVIADA_AL_MANAGER'    THEN 4
+              WHEN 'ENVIADA'               THEN 5
+              ELSE 99
+            END AS prioridad_estado
        FROM cotizacion_items ci
        JOIN cotizaciones c ON c.id = ci.cotizacion_id
       WHERE c.pedido_id = ?
-        AND c.estado IN ('APROBADA','APROBADA_POR_MANAGER')`,
+        AND c.estado IN (
+          'APROBADA','APROBADA_POR_MANAGER','ENVIADA_AL_CLIENTE',
+          'ENVIADA_AL_MANAGER','ENVIADA'
+        )
+      ORDER BY prioridad_estado ASC, c.id DESC, ci.id ASC`,
     [pid]
   );
 
