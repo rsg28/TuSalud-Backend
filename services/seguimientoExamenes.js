@@ -282,24 +282,42 @@ async function calcularAjustesSugeridos(pedidoId) {
   const [items] = await pool.execute(
     `SELECT ci.tipo_item, ci.examen_id, ci.perfil_id, ci.tipo_emo,
             ci.precio_final, ci.examenes_snapshot_json,
+            c.id AS cotizacion_id, c.estado AS cotizacion_estado,
+            c.es_complementaria,
             CASE c.estado
               WHEN 'APROBADA'              THEN 1
               WHEN 'APROBADA_POR_MANAGER'  THEN 2
               WHEN 'ENVIADA_AL_CLIENTE'    THEN 3
               WHEN 'ENVIADA_AL_MANAGER'    THEN 4
               WHEN 'ENVIADA'               THEN 5
+              WHEN 'BORRADOR'              THEN 6
               ELSE 99
             END AS prioridad_estado
        FROM cotizacion_items ci
        JOIN cotizaciones c ON c.id = ci.cotizacion_id
       WHERE c.pedido_id = ?
+        AND c.es_complementaria = 0
         AND c.estado IN (
           'APROBADA','APROBADA_POR_MANAGER','ENVIADA_AL_CLIENTE',
-          'ENVIADA_AL_MANAGER','ENVIADA'
+          'ENVIADA_AL_MANAGER','ENVIADA','BORRADOR'
         )
       ORDER BY prioridad_estado ASC, c.id DESC, ci.id ASC`,
     [pid]
   );
+
+  // Detectamos la cotización principal activa (si no hay aprobada, la de mayor
+  // prioridad entre ENVIADA*/BORRADOR). Se usa para decidir si el ajuste se
+  // aplica directamente sobre la principal (cuando no está aprobada) o si hay
+  // que crear una cotización complementaria negativa.
+  let cotizacionPrincipal = null;
+  if (items.length > 0) {
+    const top = items[0];
+    cotizacionPrincipal = {
+      id: Number(top.cotizacion_id),
+      estado: top.cotizacion_estado,
+      puede_editar: !['APROBADA', 'APROBADA_POR_MANAGER'].includes(top.cotizacion_estado),
+    };
+  }
 
   // Indexamos: precio por examen suelto y precio por examen dentro de perfil.
   const precioExamen = new Map(); // examen_id → precio_unitario
@@ -362,8 +380,165 @@ async function calcularAjustesSugeridos(pedidoId) {
     tiene_ajustes: true,
     total_examenes_no_realizados: noRealizados.length,
     monto_sugerido: Math.round(montoTotal * 100) / 100,
+    cotizacion_principal: cotizacionPrincipal,
     items: itemsAjuste,
   };
+}
+
+/**
+ * Aplica los ajustes (exámenes AUSENTE/NO_REALIZADO) directamente sobre la
+ * cotización principal del pedido. Solo se permite cuando la principal NO
+ * está aprobada (estados APROBADA/APROBADA_POR_MANAGER).
+ *
+ * Estrategia:
+ *   - Por cada par (paciente, examen) no realizado, busca un cotizacion_item
+ *     tipo EXAMEN con el mismo examen_id en la principal y decrementa cantidad.
+ *     Si la cantidad cae a 0, elimina la fila.
+ *   - Para PERFIL items se reporta "en perfil" sin tocarlos (modificar un
+ *     perfil afectaría a todos los pacientes con ese perfil).
+ *   - Actualiza el total de la cotización.
+ *   - Inserta una entrada en historial_pedido describiendo lo ocurrido.
+ *
+ * Devuelve { cotizacion_id, modificados, eliminados, en_perfil, sin_match }.
+ */
+async function aplicarAjustesDirectos(pedidoId, opts = {}) {
+  const pid = Number(pedidoId);
+  if (!Number.isInteger(pid) || pid <= 0) {
+    throw Object.assign(new Error('pedidoId inválido'), { code: 'PARAM_INVALIDO' });
+  }
+  const usuario = opts.usuario || null;
+
+  // Sacamos primero los ajustes y la principal candidata.
+  const ajustes = await calcularAjustesSugeridos(pid);
+  if (!ajustes.tiene_ajustes || !ajustes.cotizacion_principal) {
+    return {
+      cotizacion_id: null,
+      modificados: 0,
+      eliminados: 0,
+      en_perfil: 0,
+      sin_match: 0,
+      mensaje: 'No hay exámenes no realizados o cotización principal para modificar.',
+    };
+  }
+  const principal = ajustes.cotizacion_principal;
+  if (!principal.puede_editar) {
+    const err = new Error(
+      'La cotización principal ya fue aprobada. Use cotización complementaria.'
+    );
+    err.code = 'COTIZACION_APROBADA';
+    throw err;
+  }
+
+  const connection = await pool.getConnection();
+  await connection.beginTransaction();
+  try {
+    // Cargamos items actuales de la principal.
+    const [itemsCot] = await connection.execute(
+      `SELECT id, tipo_item, examen_id, perfil_id, cantidad, precio_final
+         FROM cotizacion_items
+        WHERE cotizacion_id = ?`,
+      [principal.id]
+    );
+
+    // Resumen de qué examen × cuántas veces aparece en los ajustes.
+    const conteoPorExamen = new Map(); // examen_id → veces
+    for (const it of ajustes.items) {
+      const ex = Number(it.examen_id);
+      if (!Number.isFinite(ex) || ex <= 0) continue;
+      conteoPorExamen.set(ex, (conteoPorExamen.get(ex) || 0) + 1);
+    }
+
+    let modificados = 0;
+    let eliminados = 0;
+    let enPerfil = 0;
+    let sinMatch = 0;
+
+    for (const [examenId, veces] of conteoPorExamen.entries()) {
+      const filaExamen = itemsCot.find(
+        (i) => i.tipo_item === 'EXAMEN' && Number(i.examen_id) === examenId
+      );
+      if (filaExamen) {
+        const nuevaCantidad = Math.max(0, Number(filaExamen.cantidad) - veces);
+        if (nuevaCantidad <= 0) {
+          await connection.execute('DELETE FROM cotizacion_items WHERE id = ?', [filaExamen.id]);
+          eliminados += 1;
+        } else {
+          const nuevoSubtotal = nuevaCantidad * Number(filaExamen.precio_final || 0);
+          await connection.execute(
+            'UPDATE cotizacion_items SET cantidad = ?, subtotal = ? WHERE id = ?',
+            [nuevaCantidad, nuevoSubtotal, filaExamen.id]
+          );
+          modificados += 1;
+        }
+        continue;
+      }
+      // No hay fila EXAMEN: ¿existe como parte de un PERFIL?
+      const dentroDePerfil = itemsCot.some((i) => i.tipo_item === 'PERFIL');
+      if (dentroDePerfil) {
+        enPerfil += 1;
+      } else {
+        sinMatch += 1;
+      }
+    }
+
+    // Recalculamos el total de la cotización con los items restantes.
+    const [totRows] = await connection.execute(
+      `SELECT COALESCE(SUM(cantidad * precio_final), 0) AS total
+         FROM cotizacion_items WHERE cotizacion_id = ?`,
+      [principal.id]
+    );
+    const nuevoTotal = Number(totRows[0]?.total ?? 0);
+    await connection.execute('UPDATE cotizaciones SET total = ? WHERE id = ?', [
+      nuevoTotal,
+      principal.id,
+    ]);
+
+    // Historial.
+    const descripcionPartes = [];
+    if (modificados > 0) descripcionPartes.push(`${modificados} ítem(s) con cantidad reducida`);
+    if (eliminados > 0) descripcionPartes.push(`${eliminados} ítem(s) eliminado(s)`);
+    if (enPerfil > 0) descripcionPartes.push(`${enPerfil} examen(es) dentro de perfil sin tocar`);
+    if (sinMatch > 0) descripcionPartes.push(`${sinMatch} sin coincidencia`);
+    const descripcion = descripcionPartes.length > 0
+      ? `Ajustes aplicados a cotización principal: ${descripcionPartes.join(', ')}.`
+      : 'Ajustes aplicados a cotización principal (sin cambios efectivos).';
+    // Usamos COTIZACION_COMPLEMENTARIA porque semánticamente representa el
+    // mismo flujo (ajuste por exámenes no realizados), pero aplicado en
+    // caliente sobre la principal en vez de crear una complementaria. Si la
+    // BD soporta un tipo_evento más específico se ignora el fallo.
+    try {
+      await connection.execute(
+        `INSERT INTO historial_pedido (
+           pedido_id, cotizacion_id, tipo_evento, descripcion, usuario_id, usuario_nombre
+         ) VALUES (?, ?, 'COTIZACION_COMPLEMENTARIA', ?, ?, ?)`,
+        [
+          pid,
+          principal.id,
+          descripcion,
+          usuario?.id ?? null,
+          usuario?.nombre ?? null,
+        ]
+      );
+    } catch (histErr) {
+      console.warn('[seguimiento] historial ajuste directo omitido:', histErr?.message || histErr);
+    }
+
+    await connection.commit();
+    return {
+      cotizacion_id: principal.id,
+      cotizacion_estado: principal.estado,
+      modificados,
+      eliminados,
+      en_perfil: enPerfil,
+      sin_match: sinMatch,
+      nuevo_total: Math.round(nuevoTotal * 100) / 100,
+    };
+  } catch (err) {
+    await connection.rollback();
+    throw err;
+  } finally {
+    connection.release();
+  }
 }
 
 module.exports = {
@@ -373,4 +548,5 @@ module.exports = {
   actualizarEstadoExamen,
   actualizarEstadoMasivoPaciente,
   calcularAjustesSugeridos,
+  aplicarAjustesDirectos,
 };

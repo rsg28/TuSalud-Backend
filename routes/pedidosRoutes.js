@@ -39,6 +39,21 @@ router.get(
   pedidosController.obtenerAjustesSugeridos
 );
 
+/**
+ * POST /api/pedidos/:pedido_id/aplicar-ajustes-directos
+ *
+ * Aplica los ajustes (AUSENTE/NO_REALIZADO) directamente sobre la cotización
+ * principal del pedido (reduce cantidades / elimina líneas). Solo es válido
+ * cuando la principal NO está aprobada todavía (de lo contrario se debe usar
+ * cotización complementaria negativa).
+ */
+router.post(
+  '/:pedido_id/aplicar-ajustes-directos',
+  authenticateToken,
+  requireRole('manager', 'vendedor'),
+  pedidosController.aplicarAjustesDirectos
+);
+
 // GET /api/pedidos/:pedido_id/estado — Solo el estado del pedido
 router.get('/:pedido_id/estado', authenticateToken, pedidosController.obtenerEstadoPedido);
 

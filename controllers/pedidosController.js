@@ -1193,6 +1193,45 @@ const obtenerAjustesSugeridos = async (req, res) => {
   }
 };
 
+/**
+ * POST /api/pedidos/:pedido_id/aplicar-ajustes-directos
+ *
+ * Aplica los ajustes (exámenes AUSENTE/NO_REALIZADO) directamente sobre la
+ * cotización principal del pedido, reduciendo cantidades o eliminando líneas.
+ * Solo válido si la cotización principal NO está aprobada todavía.
+ */
+const aplicarAjustesDirectos = async (req, res) => {
+  try {
+    const pedidoId = Number(req.params.pedido_id);
+    if (!Number.isInteger(pedidoId) || pedidoId <= 0) {
+      return res.status(400).json({ error: 'pedido_id inválido' });
+    }
+    const [pedidos] = await pool.execute(
+      'SELECT id, numero_pedido FROM pedidos WHERE id = ?',
+      [pedidoId]
+    );
+    if (pedidos.length === 0) {
+      return res.status(404).json({ error: 'Pedido no encontrado' });
+    }
+    const resultado = await seguimientoSvc.aplicarAjustesDirectos(pedidoId, {
+      usuario: req.user
+        ? { id: req.user.id, nombre: req.user.nombre_completo || req.user.nombre || null }
+        : null,
+    });
+    return res.json({
+      pedido_id: pedidoId,
+      numero_pedido: pedidos[0].numero_pedido,
+      ...resultado,
+    });
+  } catch (err) {
+    if (err && err.code === 'COTIZACION_APROBADA') {
+      return res.status(409).json({ error: err.message, code: err.code });
+    }
+    console.error('Error al aplicar ajustes directos:', err);
+    res.status(500).json({ error: 'Error al aplicar ajustes directos' });
+  }
+};
+
 module.exports = {
   listarPedidos,
   listarMisPedidos,
@@ -1214,4 +1253,5 @@ module.exports = {
   cancelarPedidoEnConnection,
   obtenerArticulosPendientes,
   obtenerAjustesSugeridos,
+  aplicarAjustesDirectos,
 };
