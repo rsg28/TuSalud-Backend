@@ -164,9 +164,9 @@ function parseItems(textContent) {
  *  hay forma fiable de saber, devuelve []. El llamador filtra después los
  *  text items cuya bbox cae dentro de alguna caja oculta.
  */
-async function detectHiddenTextBoxes(page, pdfjsLib) {
+async function detectHiddenTextBoxes(page, pdfjsLib, operatorListIn = null) {
   const OPS = pdfjsLib.OPS;
-  const operatorList = await page.getOperatorList();
+  const operatorList = operatorListIn || (await page.getOperatorList());
   const events = [];
 
   let fillColor = null; // [r,g,b] (0..255)
@@ -1251,9 +1251,9 @@ function computeStackDeltaY(mergedItems, nextPageItems, gap) {
  *    las dibuje como trazos y no como `re` + fill). Esto es clave para tablas cuyas columnas
  *    internas no se detectaban porque solo los cuadros exteriores eran rectángulos rellenos.
  */
-async function extractRectanglesFromPage(page, pdfjsLib) {
+async function extractRectanglesFromPage(page, pdfjsLib, operatorListIn = null) {
   const OPS = pdfjsLib.OPS;
-  const operatorList = await page.getOperatorList();
+  const operatorList = operatorListIn || (await page.getOperatorList());
   const rects = [];
   const SEGMENT_AXIS_TOL = 0.8;
   const SEGMENT_MIN_LENGTH = 3;
@@ -2799,14 +2799,17 @@ async function extractPerfilPdfTablesFromBuffer(buffer, options = {}) {
     let totalHiddenFiltered = 0;
     for (let pi = 1; pi <= numpages; pi++) {
       const page = await pdf.getPage(pi);
+      // getOperatorList() es costoso (~varios s/página). Una sola pasada por página
+      // para texto oculto + bordes de tabla; antes se llamaba dos veces y bloqueaba el hilo.
+      const operatorList = await page.getOperatorList();
       const textContent = await page.getTextContent({ normalizeWhitespace: false, disableCombineTextItems: false });
       const pageItemsRaw = parseItems(textContent);
-      const hiddenBoxes = await detectHiddenTextBoxes(page, pdfjsLib).catch(() => []);
+      const hiddenBoxes = await detectHiddenTextBoxes(page, pdfjsLib, operatorList).catch(() => []);
       const pageItems = hiddenBoxes.length > 0
         ? filterOutHiddenItems(pageItemsRaw, hiddenBoxes)
         : pageItemsRaw;
       totalHiddenFiltered += pageItemsRaw.length - pageItems.length;
-      const pageRects = await extractRectanglesFromPage(page, pdfjsLib);
+      const pageRects = await extractRectanglesFromPage(page, pdfjsLib, operatorList);
       perPage.push({ items: pageItems, rects: pageRects });
     }
     if (debug && totalHiddenFiltered > 0) {

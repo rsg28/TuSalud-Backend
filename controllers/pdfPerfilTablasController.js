@@ -34,7 +34,23 @@ async function extraerPdfPerfilTablas(req, res) {
 
     const debugRaw = String(req.query?.debug || '').trim().toLowerCase();
     const debug = debugRaw === '1' || debugRaw === 'true' || debugRaw === 'yes';
-    const result = await extractPerfilPdfTablesFromBuffer(buffer, { debug });
+    const timeoutMs = Math.max(
+      15_000,
+      parseInt(process.env.PDF_PERFIL_EXTRACT_TIMEOUT_MS || '120000', 10) || 120_000
+    );
+    const t0 = Date.now();
+    const result = await Promise.race([
+      extractPerfilPdfTablesFromBuffer(buffer, { debug }),
+      new Promise((_, reject) => {
+        setTimeout(
+          () => reject(new Error(`El PDF tardó más de ${Math.round(timeoutMs / 1000)}s en procesarse. Intente de nuevo o use un archivo más liviano.`)),
+          timeoutMs
+        );
+      }),
+    ]);
+    if (process.env.PDF_PERFIL_LOG_TIMING === '1') {
+      console.log(`[pdf-perfil-tablas] ${buffer.length} bytes en ${Date.now() - t0}ms`);
+    }
 
     if (result && result.ok === false && result.error) {
       return res.status(400).json({ error: String(result.error) });
