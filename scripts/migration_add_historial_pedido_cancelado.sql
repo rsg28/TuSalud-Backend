@@ -1,0 +1,21 @@
+-- Tipo de evento para cancelación suave del pedido (vendedor).
+-- Ejecutar en RDS/MySQL si el INSERT de historial con PEDIDO_CANCELADO falla.
+
+ALTER TABLE historial_pedido
+  MODIFY COLUMN tipo_evento ENUM(
+    'CREACION',
+    'COTIZACION_ENVIADA',
+    'COTIZACION_APROBADA',
+    'COTIZACION_RECHAZADA',
+    'SOLICITUD_MANAGER',
+    'PRECIO_APROBADO',
+    'FACTURA_EMITIDA',
+    'FACTURA_ANULADA',
+    'FACTURA_ENVIADA_CLIENTE',
+    'PAGO_RECIBIDO',
+    'COTIZACION_ELIMINADA',
+    'PEDIDO_COMPLETADO',
+    'WHATSAPP_COTIZACION_ENVIADA',
+    'COTIZACION_COMPLEMENTARIA',
+    'PEDIDO_CANCELADO'
+  ) NOT NULL;

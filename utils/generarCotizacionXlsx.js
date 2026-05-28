@@ -12,7 +12,8 @@
  *     - Empresa, Pedido, Fecha
  *     - Total final
  *   Tabla:
- *     - # | Tipo | Nombre | Tipo EMO | Cantidad | Precio base | Variación % | Precio final | Subtotal
+ *     - # | Tipo | Nombre | Tipo EMO | Cantidad | Precio base | Variación % | P. unitario | Importe línea
+ *   «Importe línea» = cantidad × precio unitario (no es duplicado del unitario si cantidad > 1).
  *
  * No depende de Express ni de la request: recibe `pool` y `cotizacionId` y
  * devuelve un buffer. Eso lo vuelve trivialmente testeable.
@@ -114,7 +115,7 @@ async function generarXlsxCotizacion(cotizacionId) {
 
   ws.getRow(7).values = [
     '#', 'Tipo', 'Nombre', 'Tipo EMO', 'Cantidad',
-    'Precio base', 'Variación %', 'Precio final', 'Subtotal',
+    'Precio base', 'Variación %', 'P. unitario', 'Importe línea',
   ];
   ws.getRow(7).font = { bold: true, color: { argb: 'FFFFFFFF' } };
   ws.getRow(7).alignment = { vertical: 'middle', horizontal: 'center' };

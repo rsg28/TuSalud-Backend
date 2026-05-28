@@ -1088,9 +1088,46 @@ const obtenerArticulosPendientes = async (req, res) => {
 };
 
 /**
- * Lógica reutilizable de cancelación de pedido (borrado en cascada).
+ * Marca el pedido como CANCELADO sin borrar datos (cancelación suave).
+ * Usado cuando el vendedor «elimina» un pedido desde el listado.
+ */
+async function marcarPedidoCanceladoEnConnection(connection, pedidoId, usuarioId, usuarioNombre = null) {
+  const [rows] = await connection.execute('SELECT id, estado, numero_pedido FROM pedidos WHERE id = ?', [pedidoId]);
+  if (rows.length === 0) {
+    const err = new Error('Pedido no encontrado');
+    err.code = 'NOT_FOUND';
+    throw err;
+  }
+  const prev = String(rows[0].estado);
+  if (prev === 'CANCELADO') {
+    return { already: true, numero: rows[0].numero_pedido };
+  }
+  await connection.execute("UPDATE pedidos SET estado = 'CANCELADO' WHERE id = ?", [pedidoId]);
+  try {
+    await registrarHistorial(
+      connection,
+      pedidoId,
+      'PEDIDO_CANCELADO',
+      `Pedido cancelado (${prev} → CANCELADO)`,
+      usuarioId,
+      null,
+      {
+        usuario_nombre: usuarioNombre,
+        valor_anterior: prev,
+        valor_nuevo: 'CANCELADO',
+      }
+    );
+  } catch (histErr) {
+    console.warn('[TuSalud] historial cancelación suave (no bloquea):', histErr?.message || histErr);
+  }
+  return { already: false, numero: rows[0].numero_pedido };
+}
+
+/**
+ * Borrado en cascada del pedido y todo lo asociado.
  * Debe ejecutarse dentro de una transacción abierta sobre `connection`.
  * No hace commit ni release; es responsabilidad del caller.
+ * (p. ej. aprobación de solicitud de cancelación del cliente con eliminación total)
  */
 async function cancelarPedidoEnConnection(connection, pedidoId) {
   // 1. Quitar referencias del pedido para poder borrar facturas y cotizaciones
@@ -1141,18 +1178,34 @@ const cancelarPedido = async (req, res) => {
   const connection = await pool.getConnection();
   try {
     const { pedido_id } = req.params;
-    const [pedido] = await connection.execute('SELECT id, estado, empresa_id FROM pedidos WHERE id = ?', [pedido_id]);
-    if (pedido.length === 0) {
-      connection.release();
-      return res.status(404).json({ error: 'Pedido no encontrado' });
-    }
+    const usuarioId = req.user?.id ?? null;
+    const usuarioNombre = req.user?.nombre_completo ?? req.user?.nombre_usuario ?? null;
 
     await connection.beginTransaction();
-    await cancelarPedidoEnConnection(connection, pedido_id);
+    const result = await marcarPedidoCanceladoEnConnection(
+      connection,
+      pedido_id,
+      usuarioId,
+      usuarioNombre
+    );
     await connection.commit();
-    res.json({ message: 'Pedido cancelado y eliminado correctamente' });
+    if (result.already) {
+      return res.json({
+        message: 'El pedido ya estaba cancelado',
+        estado: 'CANCELADO',
+        soft_cancel: true,
+      });
+    }
+    res.json({
+      message: 'Pedido marcado como cancelado',
+      estado: 'CANCELADO',
+      soft_cancel: true,
+    });
   } catch (error) {
     await connection.rollback();
+    if (error?.code === 'NOT_FOUND') {
+      return res.status(404).json({ error: 'Pedido no encontrado' });
+    }
     console.error('Error al cancelar pedido:', error);
     res.status(500).json({ error: 'Error al cancelar pedido' });
   } finally {
@@ -1250,6 +1303,7 @@ module.exports = {
   cargarEmpleados,
   marcarCompletado,
   cancelarPedido,
+  marcarPedidoCanceladoEnConnection,
   cancelarPedidoEnConnection,
   obtenerArticulosPendientes,
   obtenerAjustesSugeridos,
