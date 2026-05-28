@@ -1,5 +1,8 @@
 const pool = require('../config/database');
 const { validationResult } = require('express-validator');
+const {
+  helpers: { emitirNotificacionAVendedorDePedido },
+} = require('./notificacionesController');
 
 // Nuevo esquema: facturas (pedido_id), factura_cotizacion (vincula cotizaciones), factura_detalle (líneas)
 
@@ -102,10 +105,19 @@ const getFacturaById = async (req, res) => {
       [id]
     );
 
+    const pedidoId = facturas[0].pedido_id;
+    const [histReporte] = await pool.execute(
+      `SELECT 1 FROM historial_pedido
+       WHERE pedido_id = ? AND tipo_evento = 'PAGO_CLIENTE_REPORTADO'
+       LIMIT 1`,
+      [pedidoId]
+    );
+
     res.json({
       factura: facturas[0],
       cotizaciones,
-      detalles
+      detalles,
+      cliente_reporto_pago: histReporte.length > 0,
     });
   } catch (error) {
     console.error('Error al obtener factura:', error);
@@ -254,9 +266,16 @@ const updateFactura = async (req, res) => {
     }
 
     if (estado !== undefined) {
-      if (estado === 'PAGADA' && !['vendedor', 'manager'].includes(req.user?.rol)) {
-        return res.status(403).json({ error: 'Solo el vendedor o manager pueden marcar la factura como pagada' });
+      const rol = req.user?.rol;
+
+      if (estado === 'PAGADA') {
+        if (!['vendedor', 'manager'].includes(rol)) {
+          return res.status(403).json({
+            error: 'Solo el vendedor o manager puede marcar la factura como pagada',
+          });
+        }
       }
+
       await pool.execute(
         'UPDATE facturas SET estado = ?, fecha_pago = COALESCE(?, fecha_pago) WHERE id = ?',
         [estado, fecha_pago || null, id]
@@ -296,6 +315,103 @@ const updateFactura = async (req, res) => {
   } catch (error) {
     console.error('Error al actualizar factura:', error);
     res.status(500).json({ error: 'Error al actualizar factura' });
+  }
+};
+
+/**
+ * POST /api/facturas/:id/reportar-pago-cliente
+ * El cliente avisa que pagó; no cambia el estado de la factura ni del pedido.
+ */
+const reportarPagoPorCliente = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { fecha_pago, comentario } = req.body || {};
+    const userId = req.user?.id;
+    if (!userId) {
+      return res.status(403).json({ error: 'No autorizado' });
+    }
+
+    const [rows] = await pool.execute(
+      `SELECT f.id, f.numero_factura, f.estado, f.pedido_id, p.numero_pedido
+       FROM facturas f
+       JOIN pedidos p ON f.pedido_id = p.id
+       WHERE f.id = ? AND (
+         p.cliente_usuario_id = ? OR
+         p.empresa_id = (SELECT empresa_id FROM usuarios WHERE id = ?)
+       )`,
+      [id, userId, userId]
+    );
+    if (rows.length === 0) {
+      return res.status(403).json({ error: 'No tiene permiso para esta factura' });
+    }
+
+    const factura = rows[0];
+    if (factura.estado === 'PAGADA') {
+      return res.status(400).json({ error: 'La factura ya está pagada' });
+    }
+
+    const [yaReportado] = await pool.execute(
+      `SELECT 1 FROM historial_pedido
+       WHERE pedido_id = ? AND tipo_evento = 'PAGO_CLIENTE_REPORTADO'
+       LIMIT 1`,
+      [factura.pedido_id]
+    );
+    if (yaReportado.length > 0) {
+      return res.status(400).json({
+        error: 'Ya notificaste el pago. Tu vendedor lo revisará y confirmará cuando corresponda.',
+      });
+    }
+
+    const fechaTxt =
+      fecha_pago && String(fecha_pago).trim()
+        ? ` el ${String(fecha_pago).trim()}`
+        : '';
+    const comentarioTxt =
+      comentario && String(comentario).trim()
+        ? ` Comentario: ${String(comentario).trim()}`
+        : '';
+    const descripcion = `El cliente indicó que realizó el pago${fechaTxt}.${comentarioTxt}`;
+
+    await pool.execute(
+      `INSERT INTO historial_pedido (pedido_id, cotizacion_id, tipo_evento, descripcion, usuario_id, usuario_nombre, valor_anterior, valor_nuevo, atendidos, no_atendidos)
+       VALUES (?, NULL, 'PAGO_CLIENTE_REPORTADO', ?, ?, ?, NULL, NULL, NULL, NULL)`,
+      [factura.pedido_id, descripcion, userId, req.user?.nombre_completo || null]
+    );
+
+    try {
+      const conn = await pool.getConnection();
+      try {
+        await emitirNotificacionAVendedorDePedido(conn, {
+          pedidoId: factura.pedido_id,
+          tipo: 'MENSAJE',
+          titulo: `Pago reportado — factura ${factura.numero_factura}`,
+          mensaje: `El cliente avisó que pagó${fechaTxt}. Revisa el comprobante y marca la factura como pagada cuando lo confirmes.`,
+          contextoJson: {
+            evento: 'PAGO_CLIENTE_REPORTADO',
+            pedido_id: factura.pedido_id,
+            factura_id: factura.id,
+            numero_factura: factura.numero_factura,
+            numero_pedido: factura.numero_pedido,
+            fecha_pago: fecha_pago || null,
+          },
+          remitenteUsuarioId: userId,
+        });
+      } finally {
+        conn.release();
+      }
+    } catch (notifErr) {
+      console.warn('No se pudo notificar al vendedor sobre pago reportado:', notifErr?.message);
+    }
+
+    const [updated] = await pool.execute('SELECT * FROM facturas WHERE id = ?', [id]);
+    res.json({
+      message: 'Aviso enviado. Tu vendedor revisará el pago y confirmará la factura.',
+      factura: updated[0],
+      cliente_reporto_pago: true,
+    });
+  } catch (error) {
+    console.error('Error al reportar pago del cliente:', error);
+    res.status(500).json({ error: 'Error al notificar el pago' });
   }
 };
 
@@ -365,6 +481,7 @@ module.exports = {
   getFacturaById,
   createFactura,
   updateFactura,
+  reportarPagoPorCliente,
   enviarFacturaAlCliente,
   deleteFactura
 };

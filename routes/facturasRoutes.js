@@ -6,6 +6,7 @@ const {
   getFacturaById,
   createFactura,
   updateFactura,
+  reportarPagoPorCliente,
   enviarFacturaAlCliente,
   deleteFactura
 } = require('../controllers/facturasController');
@@ -19,6 +20,7 @@ router.get('/', authenticateToken, getAllFacturas);
 router.get('/:id', authenticateToken, getFacturaById);
 router.post('/', authenticateToken, requireRole('manager', 'vendedor'), createFacturaValidation, createFactura);
 router.put('/:id', authenticateToken, requireRole('manager', 'vendedor'), updateFactura);
+router.post('/:id/reportar-pago-cliente', authenticateToken, requireRole('cliente'), reportarPagoPorCliente);
 router.post('/:id/enviar-cliente', authenticateToken, requireRole('manager', 'vendedor'), enviarFacturaAlCliente);
 router.delete('/:id', authenticateToken, requireRole('vendedor'), deleteFactura);
 
