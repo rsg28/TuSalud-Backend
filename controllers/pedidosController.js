@@ -113,15 +113,24 @@ const listarPedidos = async (req, res) => {
     // GET /api/pedidos solo permite vendedor/manager (ruta). Listado = todos los pedidos
     // (equivalente a SELECT p.* …) salvo filtros opcionales en query. Los clientes usan GET /mios.
 
+    // `ultima_actividad_at` = MAX(created_at) del historial del pedido (timestamp real
+    // del último cambio). Fallback a `updated_at` / `created_at` del pedido. Se usa para
+    // mostrar la hora correcta en las cards (la columna `fecha_creacion` solo guarda DATE).
     let query = `
       SELECT p.*,
         e.razon_social AS empresa_nombre, e.ruc AS empresa_ruc,
         s.nombre AS sede_nombre,
-        u.nombre_completo AS vendedor_nombre
+        u.nombre_completo AS vendedor_nombre,
+        COALESCE(hp.ultimo_evento_at, p.updated_at, p.created_at) AS ultima_actividad_at
       FROM pedidos p
       LEFT JOIN empresas e ON p.empresa_id = e.id
       LEFT JOIN sedes s ON p.sede_id = s.id
       LEFT JOIN usuarios u ON p.vendedor_id = u.id
+      LEFT JOIN (
+        SELECT pedido_id, MAX(created_at) AS ultimo_evento_at
+        FROM historial_pedido
+        GROUP BY pedido_id
+      ) hp ON hp.pedido_id = p.id
       WHERE 1=1
     `;
     const params = [];
@@ -192,11 +201,17 @@ const listarMisPedidos = async (req, res) => {
       SELECT p.*,
         e.razon_social AS empresa_nombre, e.ruc AS empresa_ruc,
         s.nombre AS sede_nombre,
-        u.nombre_completo AS vendedor_nombre
+        u.nombre_completo AS vendedor_nombre,
+        COALESCE(hp.ultimo_evento_at, p.updated_at, p.created_at) AS ultima_actividad_at
       FROM pedidos p
       LEFT JOIN empresas e ON p.empresa_id = e.id
       LEFT JOIN sedes s ON p.sede_id = s.id
       LEFT JOIN usuarios u ON p.vendedor_id = u.id
+      LEFT JOIN (
+        SELECT pedido_id, MAX(created_at) AS ultimo_evento_at
+        FROM historial_pedido
+        GROUP BY pedido_id
+      ) hp ON hp.pedido_id = p.id
       WHERE p.cliente_usuario_id = ?
         AND p.estado <> 'CANCELADO'
       ORDER BY p.id DESC
@@ -240,11 +255,17 @@ const listarPedidosConCotizacionAprobada = async (req, res) => {
       SELECT p.*,
         e.razon_social AS empresa_nombre, e.ruc AS empresa_ruc,
         s.nombre AS sede_nombre,
-        u.nombre_completo AS vendedor_nombre
+        u.nombre_completo AS vendedor_nombre,
+        COALESCE(hp.ultimo_evento_at, p.updated_at, p.created_at) AS ultima_actividad_at
       FROM pedidos p
       JOIN empresas e ON p.empresa_id = e.id
       JOIN sedes s ON p.sede_id = s.id
       LEFT JOIN usuarios u ON p.vendedor_id = u.id
+      LEFT JOIN (
+        SELECT pedido_id, MAX(created_at) AS ultimo_evento_at
+        FROM historial_pedido
+        GROUP BY pedido_id
+      ) hp ON hp.pedido_id = p.id
       WHERE p.estado != 'CANCELADO'
         AND EXISTS (SELECT 1 FROM cotizaciones c WHERE c.pedido_id = p.id AND c.estado = 'APROBADA')
     `;

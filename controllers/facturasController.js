@@ -67,8 +67,14 @@ const getFacturaById = async (req, res) => {
     /**
      * `examenes_snapshot_json` no se copia en `factura_detalle`; se recupera
      * desde `cotizacion_items` con un JOIN por (cotizacion_id + tipo_item +
-     * perfil_id ó examen_id) para que el frontend pueda reconstruir grupos
-     * por perfil EMO en la vista de la factura.
+     * perfil_id + tipo_emo + examen_id) para que el frontend pueda reconstruir
+     * grupos por perfil EMO en la vista de la factura.
+     *
+     * IMPORTANTE: El JOIN tiene que incluir `tipo_emo` y limitarse a un único
+     * cotizacion_item por línea (subconsulta `MIN(id)`), para no multiplicar las
+     * filas de la factura cuando una cotización tiene varios PERFIL con el mismo
+     * `perfil_id` pero distinto `tipo_emo`, o ítems históricos duplicados con
+     * idéntica clave (cotizacion_id, tipo_item, perfil_id, tipo_emo, examen_id).
      */
     const [detalles] = await pool.execute(
       `SELECT fd.*,
@@ -82,9 +88,15 @@ const getFacturaById = async (req, res) => {
        LEFT JOIN emo_perfiles pf ON fd.perfil_id = pf.id
        LEFT JOIN cotizaciones c ON fd.cotizacion_id = c.id
        LEFT JOIN cotizacion_items ci
-              ON ci.cotizacion_id = fd.cotizacion_id
-             AND ci.tipo_item = fd.tipo_item
-             AND ((ci.perfil_id <=> fd.perfil_id) AND (ci.examen_id <=> fd.examen_id))
+              ON ci.id = (
+                SELECT MIN(ci2.id)
+                FROM cotizacion_items ci2
+                WHERE ci2.cotizacion_id = fd.cotizacion_id
+                  AND ci2.tipo_item = fd.tipo_item
+                  AND (ci2.perfil_id <=> fd.perfil_id)
+                  AND (ci2.tipo_emo <=> fd.tipo_emo)
+                  AND (ci2.examen_id <=> fd.examen_id)
+              )
        WHERE fd.factura_id = ?
        ORDER BY c.es_complementaria ASC, c.id ASC, fd.id`,
       [id]
