@@ -61,9 +61,11 @@ const getFacturaById = async (req, res) => {
     }
 
     const [cotizaciones] = await pool.execute(
-      `SELECT fc.*, c.numero_cotizacion FROM factura_cotizacion fc
+      `SELECT fc.*, c.numero_cotizacion, c.es_complementaria, c.total AS cotizacion_total
+       FROM factura_cotizacion fc
        JOIN cotizaciones c ON fc.cotizacion_id = c.id
-       WHERE fc.factura_id = ?`,
+       WHERE fc.factura_id = ?
+       ORDER BY fc.es_principal DESC, c.es_complementaria ASC, c.id ASC`,
       [id]
     );
 
@@ -151,27 +153,38 @@ const createFactura = async (req, res) => {
       return res.status(400).json({ error: 'El pedido no tiene cotización principal aprobada' });
     }
 
-    // Cotizaciones aprobadas del pedido que aún no están en ninguna factura
+    // Cotización principal aprobada + todas las complementarias aprobadas del pedido
+    // (incluye ajustes negativos por exámenes no realizados). Antes solo se tomaban
+    // las que tenían cotizacion_base_id = principalId y se perdían complementarias
+    // huérfanas o con base distinta.
     const [cotizacionesParaFacturar] = await pool.execute(
-      `SELECT c.id, c.total, c.es_complementaria
+      `SELECT c.id, c.total, c.es_complementaria, c.numero_cotizacion
        FROM cotizaciones c
-       WHERE c.pedido_id = ? AND c.estado = 'APROBADA'
-         AND (c.id = ? OR c.cotizacion_base_id = ?)
-         AND NOT EXISTS (SELECT 1 FROM factura_cotizacion fc WHERE fc.cotizacion_id = c.id)`,
-      [pedido_id, principalId, principalId]
+       WHERE c.pedido_id = ?
+         AND c.estado = 'APROBADA'
+         AND NOT EXISTS (SELECT 1 FROM factura_cotizacion fc WHERE fc.cotizacion_id = c.id)
+         AND (c.id = ? OR c.es_complementaria = 1)`,
+      [pedido_id, principalId]
     );
 
     if (cotizacionesParaFacturar.length === 0) {
       return res.status(400).json({ error: 'No hay cotizaciones aprobadas pendientes de facturar para este pedido' });
     }
 
+    const incluyePrincipal = cotizacionesParaFacturar.some((c) => Number(c.id) === Number(principalId));
+    if (!incluyePrincipal) {
+      return res.status(400).json({
+        error: 'La cotización principal aprobada del pedido debe estar pendiente de facturar antes de emitir la factura',
+      });
+    }
+
     const connection = await pool.getConnection();
     await connection.beginTransaction();
 
     try {
-      const subtotal = cotizacionesParaFacturar.reduce((s, c) => s + Number(c.total), 0);
-      const igv = subtotal * 0.18;
-      const total = subtotal + igv;
+      const subtotal = cotizacionesParaFacturar.reduce((s, c) => s + Number(c.total || 0), 0);
+      const igv = Math.round(subtotal * 0.18 * 100) / 100;
+      const total = Math.round((subtotal + igv) * 100) / 100;
 
       const [seq] = await connection.execute('SELECT COALESCE(MAX(id), 0) + 1 AS n FROM facturas');
       const numero_factura = `FAC-${new Date().getFullYear()}-${String(seq[0].n).padStart(6, '0')}`;
