@@ -248,13 +248,16 @@ function mergeNombresClienteEnPerfilSnapshot(snap, pairs) {
   return snap;
 }
 
+const { resolvePrecioExamen } = require('./examenPrecio');
+
 /**
  * Mapa examen_id → precio vigente (sede específica o tarifa general; 0 si no hay fila).
  * @param {import('mysql2/promise').Pool | import('mysql2/promise').PoolConnection} dbConn
  * @param {number[]} examenIds
  * @param {number|null|undefined} sedeId
+ * @param {number} [numPacientes=0]
  */
-async function getPreciosMapPorExamenIds(dbConn, examenIds, sedeId) {
+async function getPreciosMapPorExamenIds(dbConn, examenIds, sedeId, numPacientes = 0) {
   const map = new Map();
   const ids = [...new Set(
     (examenIds || [])
@@ -270,7 +273,9 @@ async function getPreciosMapPorExamenIds(dbConn, examenIds, sedeId) {
   if (sede != null) {
     [rows] = await dbConn.query(
       `SELECT e.id AS examen_id,
-              COALESCE(ep_sede.precio, ep_gen.precio, 0) AS precio
+              COALESCE(ep_sede.precio_hasta_15, ep_gen.precio_hasta_15) AS precio_hasta_15,
+              COALESCE(ep_sede.precio_desde_16, ep_gen.precio_desde_16) AS precio_desde_16,
+              COALESCE(ep_sede.precio, ep_gen.precio) AS precio
          FROM examenes e
          LEFT JOIN examen_precio ep_sede
            ON ep_sede.examen_id = e.id
@@ -286,6 +291,8 @@ async function getPreciosMapPorExamenIds(dbConn, examenIds, sedeId) {
   } else {
     [rows] = await dbConn.query(
       `SELECT e.id AS examen_id,
+              ep_gen.precio_hasta_15 AS precio_hasta_15,
+              ep_gen.precio_desde_16 AS precio_desde_16,
               COALESCE(ep_gen.precio, 0) AS precio
          FROM examenes e
          LEFT JOIN examen_precio ep_gen
@@ -298,7 +305,7 @@ async function getPreciosMapPorExamenIds(dbConn, examenIds, sedeId) {
   }
 
   for (const r of rows || []) {
-    map.set(Number(r.examen_id), Number(r.precio) || 0);
+    map.set(Number(r.examen_id), resolvePrecioExamen(r, numPacientes));
   }
   for (const id of ids) {
     if (!map.has(id)) map.set(id, 0);

@@ -172,11 +172,16 @@ CREATE TABLE `examenes` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 -- Precio base por examen y sede de TuSalud. Referencia para items sueltos de cotización.
+-- `precio` = espejo de precio_desde_16 (compatibilidad). Tramos del tarifario Excel:
+--   precio_hasta_15  → pedidos de 1 a 15 pacientes
+--   precio_desde_16  → pedidos de 16+ pacientes
 CREATE TABLE `examen_precio` (
   `id` int NOT NULL AUTO_INCREMENT,
   `examen_id` int NOT NULL,
   `sede_id` int DEFAULT NULL COMMENT 'NULL = precio base global (cualquier sede)',
   `precio` decimal(12,2) NOT NULL,
+  `precio_hasta_15` decimal(12,2) DEFAULT NULL COMMENT 'Tarifa retail (1-15 pacientes)',
+  `precio_desde_16` decimal(12,2) DEFAULT NULL COMMENT 'Tarifa mayorista (16+ pacientes)',
   `vigente_desde` date DEFAULT (curdate()),
   `vigente_hasta` date DEFAULT NULL,
   `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,

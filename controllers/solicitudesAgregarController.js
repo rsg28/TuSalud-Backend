@@ -1,4 +1,5 @@
 const pool = require('../config/database');
+const { fetchPrecioExamen } = require('../utils/examenPrecio');
 const { crearCotizacionComplementariaConConnection } = require('./cotizacionesController');
 const { persistirSnapshotPaciente: persistirSnapshotPacienteBase } = require('../utils/perfilSnapshot');
 
@@ -238,7 +239,7 @@ const actualizarEstado = async (req, res) => {
 
     if (estadoUpper === 'APROBADA') {
       const pedido_id = sols[0].pedido_id;
-      const [pedidoRow] = await connection.execute('SELECT id, sede_id FROM pedidos WHERE id = ?', [pedido_id]);
+      const [pedidoRow] = await connection.execute('SELECT id, sede_id, total_empleados FROM pedidos WHERE id = ?', [pedido_id]);
       const sede_id = pedidoRow[0].sede_id;
 
       const [pacientesRows] = await connection.execute(
@@ -267,16 +268,14 @@ const actualizarEstado = async (req, res) => {
         [pedido_id]
       );
       const todosPacienteIds = pacientesPedido.map((p) => p.id);
+      const numPacientes =
+        Number(pedidoRow[0].total_empleados) || todosPacienteIds.length || 0;
       const itemsComplementaria = new Map();
 
       for (const row of examenesRows) {
         const examen_id = row.examen_id;
         const cantidad = Math.max(1, row.cantidad || 1);
-        const [precio] = await connection.execute(
-          `SELECT precio FROM examen_precio WHERE examen_id = ? AND (sede_id = ? OR sede_id IS NULL) AND (vigente_hasta IS NULL OR vigente_hasta >= CURDATE()) ORDER BY sede_id IS NOT NULL DESC LIMIT 1`,
-          [examen_id, sede_id]
-        );
-        const precio_base = precio.length > 0 ? Number(precio[0].precio) : 0;
+        const precio_base = await fetchPrecioExamen(connection, examen_id, sede_id, numPacientes);
 
         // Si la solicitud de examen es "para todos" (sin paciente específico),
         // la cantidad total para el pedido y la cotización debe reflejar

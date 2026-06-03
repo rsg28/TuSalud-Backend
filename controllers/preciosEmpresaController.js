@@ -1,4 +1,10 @@
 const pool = require('../config/database');
+const {
+  sqlPrecioExamenExpr,
+  sqlPrecioHasta15Expr,
+  sqlPrecioDesde16Expr,
+  parseNumPacientesQuery,
+} = require('../utils/examenPrecio');
 
 // =====================================================
 // PRECIOS - Nuevo esquema: examenes + examen_precio (por sede)
@@ -11,11 +17,13 @@ const SQL_CATEGORIA_EXAMEN = `COALESCE(NULLIF(TRIM(ec.nombre), ''), 'Otros')`;
 // Obtener matriz de artículos (exámenes con precios por sede)
 exports.obtenerMatrizArticulos = async (req, res) => {
   try {
-    const { empresa_id, sede_id } = req.query;
+    const { empresa_id, sede_id, num_pacientes } = req.query;
 
     if (!sede_id) {
       return res.status(400).json({ error: 'sede_id es requerido' });
     }
+    const numPacientes = parseNumPacientesQuery(num_pacientes);
+    const precioExpr = sqlPrecioExamenExpr('ep', 'ep_general', String(numPacientes));
 
     // Precios: examen_precio con sede_id = X o sede_id IS NULL (precio general)
     const [articulos] = await pool.query(
@@ -24,8 +32,10 @@ exports.obtenerMatrizArticulos = async (req, res) => {
         e.nombre AS nombre_examen,
         ${SQL_CATEGORIA_EXAMEN} AS examen_principal,
         e.codigo,
-        COALESCE(ep.precio, ep_general.precio) AS precio_lista,
-        COALESCE(ep.precio, ep_general.precio) AS precio_aplicable
+        ${precioExpr} AS precio_aplicable,
+        ${sqlPrecioHasta15Expr('ep', 'ep_general')} AS precio_hasta_15,
+        ${sqlPrecioDesde16Expr('ep', 'ep_general')} AS precio_desde_16,
+        ${precioExpr} AS precio_lista
       FROM examenes e
       LEFT JOIN emo_categorias ec ON ec.id = e.categoria_id
       LEFT JOIN examen_precio ep ON e.id = ep.examen_id AND ep.sede_id = ?
@@ -95,7 +105,7 @@ function sqlNombreComparableSinTilde(alias = 'e.nombre') {
 
 exports.buscarExamenes = async (req, res) => {
   try {
-    const { sede_id, q } = req.query;
+    const { sede_id, q, num_pacientes } = req.query;
     if (!sede_id) {
       return res.status(400).json({ error: 'sede_id es requerido' });
     }
@@ -103,6 +113,8 @@ exports.buscarExamenes = async (req, res) => {
     if (!term || term.length < 2) {
       return res.json({ examenes: [] });
     }
+    const numPacientes = parseNumPacientesQuery(num_pacientes);
+    const precioExpr = sqlPrecioExamenExpr('ep', 'ep_general', String(numPacientes));
 
     const termComparable = term
       .toLowerCase()
@@ -120,7 +132,9 @@ exports.buscarExamenes = async (req, res) => {
         e.id AS examen_id,
         e.nombre AS nombre_examen,
         ${SQL_CATEGORIA_EXAMEN} AS examen_principal,
-        COALESCE(MIN(ep.precio), MIN(ep_general.precio), 0) AS precio
+        ${precioExpr} AS precio,
+        ${sqlPrecioHasta15Expr('ep', 'ep_general')} AS precio_hasta_15,
+        ${sqlPrecioDesde16Expr('ep', 'ep_general')} AS precio_desde_16
       FROM examenes e
       LEFT JOIN emo_categorias ec ON ec.id = e.categoria_id
       LEFT JOIN examen_precio ep ON e.id = ep.examen_id AND ep.sede_id = ? AND (ep.vigente_hasta IS NULL OR ep.vigente_hasta >= CURDATE())
@@ -138,7 +152,6 @@ exports.buscarExamenes = async (req, res) => {
       const [rows] = await pool.query(
         `${baseSelect}
           AND (${tokenWhere})
-        GROUP BY e.id, e.nombre, e.categoria_id, ec.id, ec.nombre
         ORDER BY CHAR_LENGTH(e.nombre), e.nombre
         LIMIT 50`,
         params
@@ -156,7 +169,6 @@ exports.buscarExamenes = async (req, res) => {
             INSTR(${nomCol}, ?) > 0
             OR INSTR(${codCol}, ?) > 0
           )
-        GROUP BY e.id, e.nombre, e.categoria_id, ec.id, ec.nombre
         ORDER BY CHAR_LENGTH(e.nombre), e.nombre
         LIMIT 50`,
         [sedeIdInt, termComparable, termComparable]
@@ -194,7 +206,15 @@ exports.listarCategorias = async (req, res) => {
       `SELECT
          ${SQL_CATEGORIA_EXAMEN} AS nombre,
          COUNT(*) AS cantidad,
-         SUM(CASE WHEN COALESCE(ep.precio, ep_general.precio) IS NULL OR COALESCE(ep.precio, ep_general.precio) = 0
+         SUM(CASE WHEN COALESCE(
+                  ${sqlPrecioDesde16Expr('ep', 'ep_general')},
+                  ${sqlPrecioHasta15Expr('ep', 'ep_general')}
+                ) IS NULL
+                  OR COALESCE(
+                  ${sqlPrecioDesde16Expr('ep', 'ep_general')},
+                  ${sqlPrecioHasta15Expr('ep', 'ep_general')},
+                  0
+                ) = 0
                   THEN 1 ELSE 0 END) AS sin_precio
        FROM examenes e
        LEFT JOIN emo_categorias ec ON ec.id = e.categoria_id
@@ -216,10 +236,12 @@ exports.listarCategorias = async (req, res) => {
 exports.listarExamenesPorCategoria = async (req, res) => {
   try {
     const { categoria } = req.params;
-    const { sede_id } = req.query;
+    const { sede_id, num_pacientes } = req.query;
     if (!sede_id) {
       return res.status(400).json({ error: 'sede_id es requerido' });
     }
+    const numPacientes = parseNumPacientesQuery(num_pacientes);
+    const precioExpr = sqlPrecioExamenExpr('ep', 'ep_general', String(numPacientes));
     const categoriaDecoded = decodeURIComponent(categoria || '');
     const [examenes] = await pool.query(
       `SELECT
@@ -227,7 +249,9 @@ exports.listarExamenesPorCategoria = async (req, res) => {
         e.nombre AS nombre_examen,
         ${SQL_CATEGORIA_EXAMEN} AS examen_principal,
         e.codigo,
-        COALESCE(ep.precio, ep_general.precio) AS precio,
+        ${precioExpr} AS precio,
+        ${sqlPrecioHasta15Expr('ep', 'ep_general')} AS precio_hasta_15,
+        ${sqlPrecioDesde16Expr('ep', 'ep_general')} AS precio_desde_16,
         ep.id AS precio_sede_id,
         ep_general.id AS precio_general_id
        FROM examenes e
@@ -367,11 +391,19 @@ exports.setPrecioExamen = async (req, res) => {
     if (!Number.isInteger(examenId) || examenId <= 0) {
       return res.status(400).json({ error: 'examen_id inválido' });
     }
-    let { sede_id, precio } = req.body || {};
+    let { sede_id, precio, precio_hasta_15, precio_desde_16 } = req.body || {};
     if (precio == null || isNaN(Number(precio)) || Number(precio) < 0) {
       return res.status(400).json({ error: 'precio inválido' });
     }
     const precioNum = Number(precio);
+    const hasta15Num =
+      precio_hasta_15 != null && !isNaN(Number(precio_hasta_15))
+        ? Number(precio_hasta_15)
+        : precioNum;
+    const desde16Num =
+      precio_desde_16 != null && !isNaN(Number(precio_desde_16))
+        ? Number(precio_desde_16)
+        : precioNum;
     const sedeIdNum = sede_id == null || sede_id === '' ? null : parseInt(String(sede_id), 10);
     if (sedeIdNum != null && (!Number.isInteger(sedeIdNum) || sedeIdNum <= 0)) {
       return res.status(400).json({ error: 'sede_id inválido' });
@@ -398,16 +430,29 @@ exports.setPrecioExamen = async (req, res) => {
     }
     if (existRows.length > 0) {
       await pool.execute(
-        'UPDATE examen_precio SET precio = ?, vigente_desde = COALESCE(vigente_desde, CURDATE()) WHERE id = ?',
-        [precioNum, existRows[0].id]
+        `UPDATE examen_precio SET
+           precio = ?,
+           precio_hasta_15 = ?,
+           precio_desde_16 = ?,
+           vigente_desde = COALESCE(vigente_desde, CURDATE())
+         WHERE id = ?`,
+        [desde16Num, hasta15Num, desde16Num, existRows[0].id]
       );
     } else {
       await pool.execute(
-        'INSERT INTO examen_precio (examen_id, sede_id, precio, vigente_desde) VALUES (?, ?, ?, CURDATE())',
-        [examenId, sedeIdNum, precioNum]
+        `INSERT INTO examen_precio (examen_id, sede_id, precio, precio_hasta_15, precio_desde_16, vigente_desde)
+         VALUES (?, ?, ?, ?, ?, CURDATE())`,
+        [examenId, sedeIdNum, desde16Num, hasta15Num, desde16Num]
       );
     }
-    res.json({ message: 'Precio actualizado', examen_id: examenId, sede_id: sedeIdNum, precio: precioNum });
+    res.json({
+      message: 'Precio actualizado',
+      examen_id: examenId,
+      sede_id: sedeIdNum,
+      precio: desde16Num,
+      precio_hasta_15: hasta15Num,
+      precio_desde_16: desde16Num,
+    });
   } catch (error) {
     console.error('Error al actualizar precio de examen:', error);
     res.status(500).json({ error: 'Error al actualizar precio del examen' });

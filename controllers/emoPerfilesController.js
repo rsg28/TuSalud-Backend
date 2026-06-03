@@ -1,5 +1,10 @@
 const pool = require('../config/database');
 const {
+  sqlPrecioExamenExpr,
+  sqlPrecioDesde16Expr,
+  parseNumPacientesQuery,
+} = require('../utils/examenPrecio');
+const {
   helpers: { emitirNotificacionAClientesDeEmpresa },
 } = require('./notificacionesController');
 
@@ -706,7 +711,10 @@ exports.precio = async (req, res) => {
     let precio_sugerido = null;
     if (precio == null) {
       const [sumRows] = await pool.execute(
-        `SELECT COALESCE(SUM(COALESCE(ep.precio, ep_general.precio, 0)), 0) AS suma
+        `SELECT COALESCE(SUM(COALESCE(
+           ${sqlPrecioDesde16Expr('ep', 'ep_general')},
+           0
+         )), 0) AS suma
          FROM emo_perfil_examenes mpe
          LEFT JOIN examen_precio ep
            ON ep.examen_id = mpe.examen_id
@@ -743,6 +751,8 @@ exports.resolve = async (req, res) => {
     const perfilNombreRaw = String(req.query?.perfilNombre ?? '').trim();
     const emoTipoRaw = String(req.query?.emoTipo ?? '').trim().toUpperCase();
     const sede_id = req.query?.sede_id ? parseInt(String(req.query.sede_id), 10) : null;
+    const numPacientes = parseNumPacientesQuery(req.query?.num_pacientes);
+    const precioExpr = sqlPrecioExamenExpr('ep', 'ep_general', String(numPacientes));
 
     if (!perfilNombreRaw) return res.status(400).json({ error: 'perfilNombre es requerido' });
     if (!emoTipoRaw || !EMO_TIPOS_VALIDOS.includes(emoTipoRaw)) return res.status(400).json({ error: 'emoTipo inválido' });
@@ -776,7 +786,9 @@ exports.resolve = async (req, res) => {
           e.id AS examen_id,
           e.nombre AS nombre_examen,
           ec.nombre AS examen_principal,
-          COALESCE(MIN(ep.precio), MIN(ep_general.precio), 0) AS precio
+          ${precioExpr} AS precio,
+          ${sqlPrecioDesde16Expr('ep', 'ep_general')} AS precio_desde_16,
+          COALESCE(ep.precio_hasta_15, ep_general.precio_hasta_15) AS precio_hasta_15
        FROM emo_perfil_examenes mpe
        JOIN examenes e ON e.id = mpe.examen_id
        LEFT JOIN emo_categorias ec ON ec.id = e.categoria_id
@@ -791,7 +803,6 @@ exports.resolve = async (req, res) => {
        WHERE mpe.perfil_id = ?
          AND mpe.tipo_emo = ?
          AND e.activo = 1
-       GROUP BY e.id, e.nombre, ec.nombre
        ORDER BY e.nombre ASC`,
       [sede_id, perfil_id, emoTipoRaw]
     );

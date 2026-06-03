@@ -4,6 +4,7 @@ const {
   helpers: { emitirNotificacionAVendedorDePedido },
 } = require('./notificacionesController');
 const { persistirSnapshotPaciente: persistirSnapshotPacienteBase } = require('../utils/perfilSnapshot');
+const { fetchPrecioExamen } = require('../utils/examenPrecio');
 const seguimientoSvc = require('../services/seguimientoExamenes');
 
 /**
@@ -568,14 +569,7 @@ const crearPedido = async (req, res) => {
       let precio_base = Number(raw.precio_base);
       if (!Number.isFinite(precio_base) || precio_base <= 0) {
         if (it.tipo_item === 'EXAMEN') {
-          const [precio] = await connection.execute(
-            `SELECT precio FROM examen_precio
-             WHERE examen_id = ? AND (sede_id = ? OR sede_id IS NULL)
-               AND (vigente_hasta IS NULL OR vigente_hasta >= CURDATE())
-             ORDER BY sede_id IS NOT NULL DESC LIMIT 1`,
-            [it.examen_id, sede_id]
-          );
-          precio_base = precio.length > 0 ? Number(precio[0].precio) : 0;
+          precio_base = await fetchPrecioExamen(connection, it.examen_id, sede_id, totalEmpleadosInicial);
         } else {
           // PERFIL: jerarquía empresa+sede → empresa → global
           const [precio] = await connection.execute(
@@ -722,7 +716,7 @@ const agregarExamen = async (req, res) => {
     const { pedido_id } = req.params;
     const body = req.body || {};
 
-    const [pedido] = await pool.execute('SELECT id, estado, sede_id, empresa_id FROM pedidos WHERE id = ?', [pedido_id]);
+    const [pedido] = await pool.execute('SELECT id, estado, sede_id, empresa_id, total_empleados FROM pedidos WHERE id = ?', [pedido_id]);
     if (pedido.length === 0) {
       return res.status(404).json({ error: 'Pedido no encontrado' });
     }
@@ -740,14 +734,8 @@ const agregarExamen = async (req, res) => {
     let precio_base = Number(body.precio_base);
     if (!Number.isFinite(precio_base) || precio_base <= 0) {
       if (it.tipo_item === 'EXAMEN') {
-        const [precio] = await pool.execute(
-          `SELECT precio FROM examen_precio
-           WHERE examen_id = ? AND (sede_id = ? OR sede_id IS NULL)
-             AND (vigente_hasta IS NULL OR vigente_hasta >= CURDATE())
-           ORDER BY sede_id IS NOT NULL DESC LIMIT 1`,
-          [it.examen_id, pedido[0].sede_id]
-        );
-        precio_base = precio.length > 0 ? Number(precio[0].precio) : 0;
+        const numPacientes = Number(pedido[0].total_empleados) || 0;
+        precio_base = await fetchPrecioExamen(pool, it.examen_id, pedido[0].sede_id, numPacientes);
       } else {
         const [precio] = await pool.execute(
           `SELECT precio FROM emo_perfil_precio
