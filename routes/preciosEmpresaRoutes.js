@@ -16,6 +16,7 @@ router.get('/categorias', verificarToken, preciosController.listarCategorias);
 
 // Listar perfiles EMO con sus precios para una sede (query: sede_id)
 router.get('/perfiles', verificarToken, preciosController.listarPerfilesConPrecio);
+router.get('/perfiles/:perfilId/examenes', verificarToken, preciosController.obtenerExamenesPerfil);
 
 // Buscar exámenes por texto (query: q, sede_id)
 router.get('/buscar', verificarToken, preciosController.buscarExamenes);

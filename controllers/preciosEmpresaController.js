@@ -294,6 +294,7 @@ exports.listarPerfilesConPrecio = async (req, res) => {
          p.tipo,
          p.descripcion,
          p.visibilidad,
+         p.created_at,
          (SELECT COUNT(DISTINCT examen_id) FROM emo_perfil_examenes WHERE perfil_id = p.id) AS total_examenes
        FROM emo_perfiles p
        ORDER BY p.visibilidad DESC, p.nombre`
@@ -366,6 +367,7 @@ exports.listarPerfilesConPrecio = async (req, res) => {
         tipo: p.tipo,
         descripcion: p.descripcion,
         visibilidad: p.visibilidad ?? 'GLOBAL',
+        created_at: p.created_at ?? null,
         total_examenes: Number(p.total_examenes ?? 0),
         precios: entry?.tipos ?? [],
         empresas: entry?.empresas ?? [],
@@ -376,6 +378,43 @@ exports.listarPerfilesConPrecio = async (req, res) => {
   } catch (error) {
     console.error('Error al listar perfiles con precio:', error);
     res.status(500).json({ error: 'Error al listar perfiles con precio' });
+  }
+};
+
+/**
+ * Exámenes del perfil agrupados por tipo EMO (para expandir en catálogo de precios).
+ */
+exports.obtenerExamenesPerfil = async (req, res) => {
+  try {
+    const perfilId = parseInt(String(req.params?.perfilId ?? ''), 10);
+    if (!Number.isInteger(perfilId) || perfilId <= 0) {
+      return res.status(400).json({ error: 'perfilId inválido' });
+    }
+    const [exists] = await pool.execute('SELECT id FROM emo_perfiles WHERE id = ? LIMIT 1', [perfilId]);
+    if (!exists.length) return res.status(404).json({ error: 'Perfil no encontrado' });
+
+    const [rows] = await pool.query(
+      `SELECT mpe.tipo_emo, e.id AS examen_id, e.nombre AS nombre_examen
+       FROM emo_perfil_examenes mpe
+       JOIN examenes e ON e.id = mpe.examen_id AND e.activo = 1
+       WHERE mpe.perfil_id = ?
+       ORDER BY mpe.tipo_emo ASC, e.nombre ASC`,
+      [perfilId]
+    );
+    const TIPOS = ['PREOC', 'ANUAL', 'RETIRO', 'VISITA'];
+    const examenes_por_tipo = Object.fromEntries(TIPOS.map((t) => [t, []]));
+    for (const row of rows) {
+      const tipo = String(row.tipo_emo || '').toUpperCase();
+      if (!examenes_por_tipo[tipo]) examenes_por_tipo[tipo] = [];
+      examenes_por_tipo[tipo].push({
+        examen_id: row.examen_id,
+        nombre_examen: row.nombre_examen,
+      });
+    }
+    res.json({ perfil_id: perfilId, examenes_por_tipo });
+  } catch (error) {
+    console.error('Error al obtener exámenes del perfil:', error);
+    res.status(500).json({ error: 'Error al obtener exámenes del perfil' });
   }
 };
 
