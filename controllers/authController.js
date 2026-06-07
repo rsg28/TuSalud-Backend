@@ -123,10 +123,15 @@ const register = async (req, res) => {
       ]
     );
 
-    // Generar token JWT (sin expiración)
+    // JWT con expiración configurable (`JWT_EXPIRES_IN`, por defecto 30 días).
+    // Antes no caducaba: un token robado o un empleado desactivado seguía
+    // operativo indefinidamente (el middleware revalida `activo` en cada
+    // request, pero no había límite absoluto). 30 días sigue siendo cómodo
+    // para apps móviles sin refresh token.
     const token = jwt.sign(
       { userId: result.insertId, email, rol: rolSolicitado },
-      process.env.JWT_SECRET
+      process.env.JWT_SECRET,
+      { expiresIn: process.env.JWT_EXPIRES_IN || '30d' }
     );
 
     res.status(201).json({
@@ -190,10 +195,10 @@ const login = async (req, res) => {
       return res.status(401).json({ error: 'Credenciales inválidas' });
     }
 
-    // Generar token JWT (sin expiración)
     const token = jwt.sign(
       { userId: user.id, email: user.email, rol: user.rol },
-      process.env.JWT_SECRET
+      process.env.JWT_SECRET,
+      { expiresIn: process.env.JWT_EXPIRES_IN || '30d' }
     );
 
     res.json({

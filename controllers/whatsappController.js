@@ -47,8 +47,10 @@ const MENSAJE_WHATSAPP = (resumen, opciones) => {
     `Total: *S/ ${Number(resumen.total || 0).toFixed(2)}*`,
     '',
     'Responde:',
-    '✅ *APROBAR*  para aceptarla',
-    '❌ *RECHAZAR*  para rechazarla (luego envía el motivo)',
+    `✅ *APROBAR ${resumen.numero}* para aceptarla`,
+    `❌ *RECHAZAR ${resumen.numero}* (luego envía el motivo)`,
+    '',
+    'Si tienes varias cotizaciones pendientes, incluye el N° en tu respuesta.',
   ];
   if (opciones?.adjuntoMensaje) lineas.push('', opciones.adjuntoMensaje);
   return lineas.join('\n');
@@ -117,9 +119,14 @@ function interpretarMensaje(estadoConversacion, textoCrudo) {
     return 'RECHAZAR_CON_MOTIVO';
   }
   if (!texto) return 'DESCONOCIDA';
-  const primera = texto.split(' ')[0];
-  if (PALABRAS_APROBAR.has(primera)) return 'APROBAR';
-  if (PALABRAS_RECHAZAR.has(primera)) return 'RECHAZAR_INICIAR';
+  // Aceptamos APROBAR/RECHAZAR en cualquier posición del mensaje, ignorando
+  // tokens como "RE:", "FWD:" o el N° de cotización (COT-YYYY-NNNNNN). Eso
+  // evita que "Re: COT-2026-000123 APROBAR" caiga como DESCONOCIDA.
+  const palabras = texto.split(' ').filter(Boolean);
+  for (const p of palabras) {
+    if (PALABRAS_APROBAR.has(p)) return 'APROBAR';
+    if (PALABRAS_RECHAZAR.has(p)) return 'RECHAZAR_INICIAR';
+  }
   return 'DESCONOCIDA';
 }
 
@@ -294,23 +301,48 @@ async function enviarCotizacionAprobacion(cotizacionId) {
     const tokenStatus = generarToken(16);
     const expiraEn = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000);
 
-    const [ins] = await pool.execute(
-      `INSERT INTO whatsapp_aprobaciones (
-         cotizacion_id, destinatario_telefono, destinatario_usuario_id, destinatario_rol,
-         numero_cotizacion, estado, canal_envio,
-         token_archivo, token_archivo_expira_en, status_callback_token, enviado_at
-       ) VALUES (?, ?, ?, ?, ?, 'PENDIENTE', 'WHATSAPP', ?, ?, ?, NOW())`,
-      [
-        cotizacionId,
-        destino.telefono,
-        destino.usuarioId,
-        destino.rol,
-        resumen.numero,
-        tokenArchivo,
-        expiraEn,
-        tokenStatus,
-      ]
+    // Cierra cualquier conversación abierta previa para esta cotización
+    // (deja libre el UNIQUE parcial `uq_wa_cotizacion_abierta`).
+    await pool.execute(
+      `UPDATE whatsapp_aprobaciones
+          SET estado = 'CANCELADA', updated_at = NOW()
+        WHERE cotizacion_id = ?
+          AND estado IN ('PENDIENTE','ESPERANDO_MOTIVO_RECHAZO')`,
+      [cotizacionId]
     );
+
+    let ins;
+    try {
+      [ins] = await pool.execute(
+        `INSERT INTO whatsapp_aprobaciones (
+           cotizacion_id, destinatario_telefono, destinatario_usuario_id, destinatario_rol,
+           numero_cotizacion, estado, canal_envio,
+           token_archivo, token_archivo_expira_en, status_callback_token, enviado_at
+         ) VALUES (?, ?, ?, ?, ?, 'PENDIENTE', 'WHATSAPP', ?, ?, ?, NOW())`,
+        [
+          cotizacionId,
+          destino.telefono,
+          destino.usuarioId,
+          destino.rol,
+          resumen.numero,
+          tokenArchivo,
+          expiraEn,
+          tokenStatus,
+        ]
+      );
+    } catch (err) {
+      if (err && err.code === 'ER_DUP_ENTRY') {
+        // Carrera: otro proceso justo abrió una conversación PENDIENTE para
+        // esta cotización entre nuestro UPDATE y el INSERT. Abortamos sin
+        // duplicar — la otra request ya envió el WhatsApp.
+        return {
+          ok: false,
+          skipped: true,
+          reason: 'Ya existe una conversación abierta para esta cotización.',
+        };
+      }
+      throw err;
+    }
 
     archivoCache.set(tokenArchivo, {
       buffer,
@@ -560,23 +592,66 @@ async function _procesarMensajeEntrante(provider, msg) {
   const telefono = normalizarTelefono(msg.from);
   if (!telefono) return;
 
-  const [pendientes] = await pool.execute(
+  // Si el usuario menciona un N° de cotización en su mensaje (ej.
+  // "APROBAR COT-2026-000123" o "Re: COT-2026-000123 RECHAZAR"), preferimos
+  // emparejarlo a esa conversación en lugar de a la "más reciente por
+  // teléfono". Esto evita responder accidentalmente la cotización
+  // equivocada cuando hay varias abiertas al mismo destinatario.
+  const bodyTxt = String(msg.body || '');
+  const numeroMencionado = (() => {
+    const m = bodyTxt.match(/\b(COT-\d{4}-\d{4,8})\b/i);
+    return m ? m[1].toUpperCase() : null;
+  })();
+
+  const [pendientesPorTelefono] = await pool.execute(
     `SELECT id, cotizacion_id, estado, numero_cotizacion,
             destinatario_usuario_id, destinatario_rol
        FROM whatsapp_aprobaciones
       WHERE destinatario_telefono = ?
         AND estado IN ('PENDIENTE', 'ESPERANDO_MOTIVO_RECHAZO')
-      ORDER BY created_at DESC
-      LIMIT 1`,
+      ORDER BY created_at DESC`,
     [telefono]
   );
 
-  if (pendientes.length === 0) {
+  if (pendientesPorTelefono.length === 0) {
     await provider.sendMessage({ to: telefono, body: RESPUESTAS.sinPendientes, channel: canal });
     return;
   }
 
-  const conv = pendientes[0];
+  let conv = null;
+  if (numeroMencionado) {
+    conv =
+      pendientesPorTelefono.find(
+        (p) => (p.numero_cotizacion || '').toUpperCase() === numeroMencionado
+      ) || null;
+    if (!conv) {
+      // Mencionó un N° pero no coincide con ninguna abierta para él.
+      await provider.sendMessage({
+        to: telefono,
+        body: `No encuentro la cotización ${numeroMencionado} entre tus pendientes. Tus pendientes son: ${pendientesPorTelefono
+          .map((p) => p.numero_cotizacion || `#${p.cotizacion_id}`)
+          .join(', ')}.`,
+        channel: canal,
+      });
+      return;
+    }
+  }
+  if (!conv) {
+    if (pendientesPorTelefono.length > 1) {
+      // Hay ambigüedad: pedimos que indique el número.
+      await provider.sendMessage({
+        to: telefono,
+        body: `Tienes ${pendientesPorTelefono.length} cotizaciones pendientes (${pendientesPorTelefono
+          .map((p) => p.numero_cotizacion || `#${p.cotizacion_id}`)
+          .join(
+            ', '
+          )}). Responde indicando el número, p. ej. "APROBAR COT-2026-000123".`,
+        channel: canal,
+      });
+      return;
+    }
+    conv = pendientesPorTelefono[0];
+  }
   const decision = interpretarMensaje(conv.estado, msg.body);
   const canalActor = canal === 'sms' ? 'SMS' : 'WHATSAPP';
   const numero = conv.numero_cotizacion || `#${conv.cotizacion_id}`;

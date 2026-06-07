@@ -155,17 +155,18 @@ async function insertarCotizacionItem(connection, cotizacionId, it) {
   );
 }
 
-const generarNumeroCotizacion = async () => {
-  const [rows] = await pool.query('SELECT COALESCE(MAX(id), 0) + 1 AS nextId FROM cotizaciones');
-  const year = new Date().getFullYear();
-  return `COT-${year}-${String(rows[0].nextId).padStart(6, '0')}`;
-};
+const {
+  siguienteNumeroCotizacion,
+  siguienteNumeroCotizacionComplementaria,
+} = require('../utils/numeracion');
 
-const generarNumeroCotizacionComplementaria = async () => {
-  const [rows] = await pool.query('SELECT COALESCE(MAX(id), 0) + 1 AS nextId FROM cotizaciones');
-  const year = new Date().getFullYear();
-  return `COT-COMP-${year}-${String(rows[0].nextId).padStart(6, '0')}`;
-};
+/**
+ * Numeración atómica vía tabla `serie_numeracion`. Si se invoca dentro de una
+ * transacción debe pasarse la `connection`; si no, cae al pool global.
+ */
+const generarNumeroCotizacion = async (connection) => siguienteNumeroCotizacion(connection);
+const generarNumeroCotizacionComplementaria = async (connection) =>
+  siguienteNumeroCotizacionComplementaria(connection);
 
 /** Crea una cotización complementaria usando la conexión dada (sin commit). Usado por solicitudes aprobadas o por POST /complementarias. */
 const crearCotizacionComplementariaConConnection = async (connection, opts) => {
@@ -174,7 +175,7 @@ const crearCotizacionComplementariaConConnection = async (connection, opts) => {
     throw new Error('pedido_id, cotizacion_base_id e items (array no vacío) son requeridos');
   }
   const tipo = (creador_tipo === 'CLIENTE' ? 'CLIENTE' : 'VENDEDOR');
-  const numero_cotizacion = await generarNumeroCotizacionComplementaria();
+  const numero_cotizacion = await generarNumeroCotizacionComplementaria(connection);
   const itemsNorm = items.map(normalizeItem);
   const total = itemsNorm.reduce((acc, it) => acc + it.subtotal, 0);
   const [result] = await connection.execute(
@@ -411,7 +412,7 @@ const createCotizacion = async (req, res) => {
     await connection.beginTransaction();
 
     try {
-      const numero_cotizacion = await generarNumeroCotizacion();
+      const numero_cotizacion = await generarNumeroCotizacion(connection);
       const itemsNorm = items.map(normalizeItem);
       const total = itemsNorm.reduce((acc, it) => acc + it.subtotal, 0);
 
@@ -436,6 +437,27 @@ const createCotizacion = async (req, res) => {
       for (const it of itemsNorm) {
         await insertarCotizacionItem(connection, cotizacionId, it);
       }
+
+      try {
+        const { registrarAuditoria } = require('../utils/audit');
+        await registrarAuditoria(
+          req,
+          {
+            accion: 'CREAR_COTIZACION',
+            recurso_tipo: 'COTIZACION',
+            recurso_id: cotizacionId,
+            descripcion: `Creó cotización ${numero_cotizacion} para pedido ${pedido_id} (S/ ${Number(total).toFixed(2)}).`,
+            detalle: {
+              numero_cotizacion,
+              pedido_id,
+              total: Number(total),
+              n_items: itemsNorm.length,
+              creador_tipo: creadorTipo,
+            },
+          },
+          connection
+        );
+      } catch (_) { /* best-effort */ }
 
       await connection.commit();
 
@@ -530,6 +552,26 @@ const createCotizacionComplementaria = async (req, res) => {
         creador_id: userId,
         creador_tipo: creadorTipo,
       });
+      try {
+        const { registrarAuditoria } = require('../utils/audit');
+        await registrarAuditoria(
+          req,
+          {
+            accion: 'CREAR_COTIZACION_COMPLEMENTARIA',
+            recurso_tipo: 'COTIZACION',
+            recurso_id: cotizacionId,
+            descripcion: `Creó cotización complementaria ${numero_cotizacion} para pedido ${pedido_id}.`,
+            detalle: {
+              numero_cotizacion,
+              pedido_id,
+              cotizacion_base_id: baseId,
+              creador_tipo: creadorTipo,
+              n_items: items.length,
+            },
+          },
+          connection
+        );
+      } catch (_) { /* best-effort */ }
       await connection.commit();
       const [newCot] = await pool.execute('SELECT * FROM cotizaciones WHERE id = ?', [cotizacionId]);
       res.status(201).json({
@@ -549,6 +591,18 @@ const createCotizacionComplementaria = async (req, res) => {
   }
 };
 
+/**
+ * Estados de cotización en los que YA NO se permite editar ítems ni cambiar
+ * libremente el estado (la cotización quedó "cerrada"). Cualquier intento de
+ * PUT con `items` o cambio de estado fuera del flujo natural se bloquea con 403.
+ */
+const ESTADOS_COTIZACION_BLOQUEADOS = new Set([
+  'APROBADA',
+  'APROBADA_POR_MANAGER', // ya pasó por manager: si vendedor edita los ítems, cambiarían los precios aprobados
+  'RECHAZADA',
+  'CANCELADA',
+]);
+
 const updateCotizacion = async (req, res) => {
   try {
     const errors = validationResult(req);
@@ -557,23 +611,76 @@ const updateCotizacion = async (req, res) => {
     }
 
     const { id } = req.params;
-    const { estado, solicitud_manager_pendiente, mensaje_rechazo, notas_manager, items } = req.body;
-
-    const [existing] = await pool.execute(
-      'SELECT id, estado, pedido_id, es_complementaria, creador_tipo FROM cotizaciones WHERE id = ?',
-      [id]
-    );
-    if (existing.length === 0) {
-      return res.status(404).json({ error: 'Cotización no encontrada' });
-    }
-    if (existing[0].estado === 'APROBADA') {
-      return res.status(403).json({ error: 'No se pueden modificar cotizaciones ya aprobadas.' });
-    }
+    const {
+      estado,
+      solicitud_manager_pendiente,
+      mensaje_rechazo,
+      notas_manager,
+      items,
+      expected_updated_at, // versionado optimista opcional (ISO/datetime)
+    } = req.body;
 
     const connection = await pool.getConnection();
     await connection.beginTransaction();
+    let existing;
 
     try {
+      // Lock pesimista sobre la cotización para que la verificación de estado
+      // y `updated_at` sea atómica con el resto de la transacción.
+      const [rows] = await connection.execute(
+        `SELECT id, estado, pedido_id, es_complementaria, creador_tipo, updated_at
+           FROM cotizaciones WHERE id = ? FOR UPDATE`,
+        [id]
+      );
+      if (rows.length === 0) {
+        await connection.rollback();
+        connection.release();
+        return res.status(404).json({ error: 'Cotización no encontrada' });
+      }
+      existing = rows;
+
+      if (ESTADOS_COTIZACION_BLOQUEADOS.has(existing[0].estado)) {
+        // Permitimos cambios "menores" (mensaje_rechazo, notas_manager) solo
+        // si NO se intentan modificar ítems ni reabrir el estado.
+        const intentaModificarEstado = estado !== undefined && estado !== existing[0].estado;
+        const intentaModificarItems = Array.isArray(items);
+        if (intentaModificarEstado || intentaModificarItems) {
+          await connection.rollback();
+          connection.release();
+          return res.status(403).json({
+            error: `No se puede modificar una cotización en estado ${existing[0].estado}.`,
+            estado_actual: existing[0].estado,
+          });
+        }
+      }
+
+      // Versionado optimista: si el cliente envió `expected_updated_at` y no
+      // coincide con el actual, alguien más editó la cotización entre
+      // tanto. Rechazamos para que el usuario refresque.
+      if (expected_updated_at) {
+        const actual = existing[0].updated_at instanceof Date
+          ? existing[0].updated_at.toISOString()
+          : String(existing[0].updated_at);
+        const esperado = new Date(expected_updated_at);
+        if (!Number.isNaN(esperado.getTime())) {
+          const esperadoIso = esperado.toISOString();
+          // Comparación tolerante (la BD trunca a segundos en TIMESTAMP).
+          const actualSec = new Date(actual).getTime();
+          const esperadoSec = esperado.getTime();
+          if (Math.abs(actualSec - esperadoSec) > 1500) {
+            await connection.rollback();
+            connection.release();
+            return res.status(409).json({
+              error:
+                'La cotización fue modificada por otra persona mientras la editabas. Refresca para ver los cambios.',
+              codigo: 'COTIZACION_DESACTUALIZADA',
+              updated_at_actual: actual,
+              updated_at_esperado: esperadoIso,
+            });
+          }
+        }
+      }
+
       if (estado !== undefined) {
         if (!ESTADOS_COTIZACION.includes(estado)) {
           throw new Error(`estado debe ser uno de: ${ESTADOS_COTIZACION.join(', ')}`);
@@ -681,6 +788,30 @@ const updateCotizacion = async (req, res) => {
         }
         await connection.execute('UPDATE cotizaciones SET total = ? WHERE id = ?', [total, id]);
       }
+
+      // Auditoría dentro de la transacción: si algo falla, no queda rastro inconsistente.
+      try {
+        const { registrarAuditoria } = require('../utils/audit');
+        await registrarAuditoria(
+          req,
+          {
+            accion: estado ? `COTIZACION_${String(estado).toUpperCase()}` : 'COTIZACION_EDITADA',
+            recurso_tipo: 'COTIZACION',
+            recurso_id: id,
+            descripcion: estado
+              ? `Cotización ${id} cambiada a estado ${estado}.`
+              : `Cotización ${id} editada (ítems o notas).`,
+            detalle: {
+              estado_anterior: existing[0].estado,
+              estado_nuevo: estado ?? null,
+              cambio_items: Array.isArray(items),
+              cantidad_items: Array.isArray(items) ? items.length : null,
+              mensaje_rechazo: mensaje_rechazo ?? null,
+            },
+          },
+          connection
+        );
+      } catch (_) { /* best-effort */ }
 
       await connection.commit();
 
@@ -818,17 +949,37 @@ const updateEstadoCotizacion = async (req, res) => {
     const connection = await pool.getConnection();
     await connection.beginTransaction();
     try {
+      // Compare-and-swap: re-bloquea la fila y comprueba que el estado actual
+      // siga siendo el que vimos al validar la transición. Si en paralelo otro
+      // actor (HTTP del vendedor + WhatsApp, dos managers, etc.) ya cambió el
+      // estado, abortamos con 409 y dejamos que el cliente reintente con datos
+      // frescos. Evita doble-aprobación, aprobación-tras-rechazo, etc.
+      const estadoEsperado = existing[0].estado;
+      const [lockRows] = await connection.execute(
+        'SELECT estado FROM cotizaciones WHERE id = ? FOR UPDATE',
+        [id]
+      );
+      if (lockRows.length === 0 || lockRows[0].estado !== estadoEsperado) {
+        await connection.rollback();
+        connection.release();
+        return res.status(409).json({
+          error: 'La cotización cambió de estado mientras se procesaba la solicitud. Vuelve a cargarla e inténtalo de nuevo.',
+          estado_actual: lockRows[0]?.estado ?? null,
+          estado_esperado: estadoEsperado,
+        });
+      }
+
       const esAprobada = estado === 'APROBADA' || estado === 'APROBADA_POR_MANAGER';
       const incluirNotasManager = notas_manager !== undefined && (estado === 'APROBADA_POR_MANAGER' || estado === 'APROBADA' || estado === 'ENVIADA_AL_MANAGER');
       if (incluirNotasManager) {
         await connection.execute(
-          'UPDATE cotizaciones SET estado = ?, mensaje_rechazo = COALESCE(?, mensaje_rechazo), notas_manager = COALESCE(?, notas_manager), fecha_envio = IF(?, NOW(), fecha_envio), fecha_aprobacion = IF(?, NOW(), fecha_aprobacion) WHERE id = ?',
-          [estado, mensaje_rechazo !== undefined ? mensaje_rechazo : null, typeof notas_manager === 'string' ? notas_manager : null, estado === 'ENVIADA_AL_MANAGER', esAprobada, id]
+          'UPDATE cotizaciones SET estado = ?, mensaje_rechazo = COALESCE(?, mensaje_rechazo), notas_manager = COALESCE(?, notas_manager), fecha_envio = IF(?, NOW(), fecha_envio), fecha_aprobacion = IF(?, NOW(), fecha_aprobacion) WHERE id = ? AND estado = ?',
+          [estado, mensaje_rechazo !== undefined ? mensaje_rechazo : null, typeof notas_manager === 'string' ? notas_manager : null, estado === 'ENVIADA_AL_MANAGER', esAprobada, id, estadoEsperado]
         );
       } else {
         await connection.execute(
-          'UPDATE cotizaciones SET estado = ?, mensaje_rechazo = COALESCE(?, mensaje_rechazo), fecha_envio = IF(?, NOW(), fecha_envio), fecha_aprobacion = IF(?, NOW(), fecha_aprobacion) WHERE id = ?',
-          [estado, mensaje_rechazo !== undefined ? mensaje_rechazo : null, estado === 'ENVIADA_AL_MANAGER' || estado === 'ENVIADA_AL_CLIENTE', esAprobada, id]
+          'UPDATE cotizaciones SET estado = ?, mensaje_rechazo = COALESCE(?, mensaje_rechazo), fecha_envio = IF(?, NOW(), fecha_envio), fecha_aprobacion = IF(?, NOW(), fecha_aprobacion) WHERE id = ? AND estado = ?',
+          [estado, mensaje_rechazo !== undefined ? mensaje_rechazo : null, estado === 'ENVIADA_AL_MANAGER' || estado === 'ENVIADA_AL_CLIENTE', esAprobada, id, estadoEsperado]
         );
       }
       const pedido_id = existing[0].pedido_id;
@@ -889,8 +1040,15 @@ const updateEstadoCotizacion = async (req, res) => {
         );
       } else if (estado === 'APROBADA' && !es_complementaria) {
         if (!pedidoCerrado) {
+          // Solo aceptamos sobreescribir `cotizacion_principal_id` si el pedido
+          // sigue abierto y no tiene ya otra cotización principal aprobada — así
+          // si dos vendedores aprueban cotizaciones distintas casi a la vez, la
+          // segunda no pisa la primera (regla "first approval wins").
           await connection.execute(
-            "UPDATE pedidos SET estado = 'COTIZACION_APROBADA', cotizacion_principal_id = ? WHERE id = ?",
+            `UPDATE pedidos
+             SET estado = 'COTIZACION_APROBADA',
+                 cotizacion_principal_id = COALESCE(cotizacion_principal_id, ?)
+             WHERE id = ? AND estado NOT IN ('FACTURADO', 'FALTA_PAGO_FACTURA', 'COMPLETADO', 'CANCELADO')`,
             [id, pedido_id]
           );
         }
@@ -909,8 +1067,14 @@ const updateEstadoCotizacion = async (req, res) => {
         );
       } else if (estado === 'RECHAZADA' && !es_complementaria) {
         if (!pedidoCerrado) {
+          // No retroceder a RECHAZADA si otra cotización del mismo pedido ya
+          // fue aprobada en paralelo (estado COTIZACION_APROBADA) o si el
+          // pedido ya pasó a estados posteriores.
           await connection.execute(
-            "UPDATE pedidos SET estado = 'COTIZACION_RECHAZADA' WHERE id = ?",
+            `UPDATE pedidos
+                SET estado = 'COTIZACION_RECHAZADA'
+              WHERE id = ?
+                AND estado NOT IN ('FACTURADO', 'FALTA_PAGO_FACTURA', 'COMPLETADO', 'CANCELADO', 'COTIZACION_APROBADA')`,
             [pedido_id]
           );
         }
@@ -926,6 +1090,26 @@ const updateEstadoCotizacion = async (req, res) => {
           [pedido_id, id, descRechazo, req.user?.id || null, req.user?.nombre_completo || null]
         );
       }
+      try {
+        const { registrarAuditoria } = require('../utils/audit');
+        await registrarAuditoria(
+          req,
+          {
+            accion: `COTIZACION_${String(estado).toUpperCase()}`,
+            recurso_tipo: 'COTIZACION',
+            recurso_id: id,
+            descripcion: `Cotización ${id} → ${estado}.`,
+            detalle: {
+              estado_anterior: existing[0].estado,
+              estado_nuevo: estado,
+              mensaje_rechazo: mensaje_rechazo || null,
+              notas_manager: notas_manager || null,
+              numero_cotizacion: existing[0].numero_cotizacion || null,
+            },
+          },
+          connection
+        );
+      } catch (_) { /* best-effort */ }
       await connection.commit();
       const [updated] = await pool.execute('SELECT * FROM cotizaciones WHERE id = ?', [id]);
 

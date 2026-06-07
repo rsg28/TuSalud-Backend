@@ -223,29 +223,67 @@ const marcarExamenCompletado = async (req, res) => {
       return res.status(400).json({ error: 'examen_id es requerido' });
     }
 
-    const [pac] = await pool.execute('SELECT id FROM pedido_pacientes WHERE id = ?', [id]);
-    if (pac.length === 0) {
-      return res.status(404).json({ error: 'Paciente no encontrado' });
-    }
-
     let estadoFinal = estado;
     if (!estadoFinal) {
       estadoFinal = completado === false ? 'PENDIENTE' : 'COMPLETADO';
     }
 
-    const resultado = await seguimientoSvc.actualizarEstadoExamen({
-      pacienteId: Number(id),
-      examenId: Number(examen_id),
-      estado: estadoFinal,
-      motivo: motivo || null,
-      usuarioId: req.user?.id || null,
-      fuente: 'MANUAL',
-    });
+    const connection = await pool.getConnection();
+    await connection.beginTransaction();
+    try {
+      const [pac] = await connection.execute(
+        'SELECT id FROM pedido_pacientes WHERE id = ? FOR UPDATE',
+        [id]
+      );
+      if (pac.length === 0) {
+        await connection.rollback();
+        connection.release();
+        return res.status(404).json({ error: 'Paciente no encontrado' });
+      }
 
-    return res.json({
-      message: `Examen actualizado a ${resultado.estadoNuevo}`,
-      ...resultado,
-    });
+      const resultado = await seguimientoSvc.actualizarEstadoExamen(
+        {
+          pacienteId: Number(id),
+          examenId: Number(examen_id),
+          estado: estadoFinal,
+          motivo: motivo || null,
+          usuarioId: req.user?.id || null,
+          fuente: 'MANUAL',
+        },
+        connection
+      );
+
+      try {
+        const { registrarAuditoria } = require('../utils/audit');
+        await registrarAuditoria(
+          req,
+          {
+            accion: 'EXAMEN_ESTADO_ACTUALIZADO',
+            recurso_tipo: 'PACIENTE_EXAMEN',
+            recurso_id: `${id}:${examen_id}`,
+            descripcion: `Examen ${examen_id} del paciente ${id} → ${resultado.estadoNuevo}`,
+            detalle: {
+              estado_anterior: resultado.estadoAnterior,
+              estado_nuevo: resultado.estadoNuevo,
+              motivo: motivo || null,
+            },
+          },
+          connection
+        );
+      } catch (_) { /* best-effort */ }
+
+      await connection.commit();
+      connection.release();
+
+      return res.json({
+        message: `Examen actualizado a ${resultado.estadoNuevo}`,
+        ...resultado,
+      });
+    } catch (err) {
+      try { await connection.rollback(); } catch (_) {}
+      connection.release();
+      throw err;
+    }
   } catch (error) {
     if (error.code === 'ESTADO_INVALIDO' || error.code === 'PARAM_INVALIDO') {
       return res.status(400).json({ error: error.message });

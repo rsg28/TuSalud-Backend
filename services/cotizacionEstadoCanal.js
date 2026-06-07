@@ -53,43 +53,65 @@ async function aplicarTransicionExterna(opts) {
     throw new Error(`aplicarTransicionExterna: estado inválido "${nuevoEstado}"`);
   }
 
-  const [existing] = await pool.execute(
-    `SELECT id, estado, pedido_id, es_complementaria, creador_tipo, creador_id, numero_cotizacion
-       FROM cotizaciones
-      WHERE id = ?`,
-    [cotizacionId]
-  );
-  if (existing.length === 0) {
-    throw new Error(`Cotización ${cotizacionId} no encontrada`);
-  }
-  const cot = existing[0];
-
-  // Idempotencia: si ya está APROBADA o RECHAZADA, devolvemos info sin tocar.
-  if (cot.estado === 'APROBADA' || cot.estado === 'RECHAZADA') {
-    return {
-      cotizacion: cot,
-      transicionado: false,
-      mensaje: `La cotización ya estaba en estado ${cot.estado}.`,
-    };
-  }
-
   const connection = await pool.getConnection();
   await connection.beginTransaction();
+  let cot;
   try {
+    // Lock pesimista de la fila para serializar respecto a otras
+    // transiciones simultáneas (HTTP del manager, otro webhook de WhatsApp,
+    // etc.). Releemos el estado dentro de la TX y dejamos pasar solo si la
+    // cotización todavía está abierta.
+    const [existing] = await connection.execute(
+      `SELECT id, estado, pedido_id, es_complementaria, creador_tipo, creador_id, numero_cotizacion
+         FROM cotizaciones
+        WHERE id = ?
+        FOR UPDATE`,
+      [cotizacionId]
+    );
+    if (existing.length === 0) {
+      await connection.rollback();
+      connection.release();
+      throw new Error(`Cotización ${cotizacionId} no encontrada`);
+    }
+    cot = existing[0];
+
+    if (cot.estado === 'APROBADA' || cot.estado === 'RECHAZADA') {
+      await connection.rollback();
+      connection.release();
+      return {
+        cotizacion: cot,
+        transicionado: false,
+        mensaje: `La cotización ya estaba en estado ${cot.estado}.`,
+      };
+    }
+
     const esAprobada = nuevoEstado === 'APROBADA';
-    await connection.execute(
+    // Compare-and-swap explícito: el UPDATE solo aplica si el estado sigue
+    // siendo el que vimos al leer. Si entre el SELECT y el UPDATE otro proceso
+    // cambió el estado, `affectedRows` será 0 y abortamos sin tocar nada.
+    const [updRes] = await connection.execute(
       `UPDATE cotizaciones
           SET estado = ?,
               mensaje_rechazo = COALESCE(?, mensaje_rechazo),
               fecha_aprobacion = IF(?, NOW(), fecha_aprobacion)
-        WHERE id = ?`,
+        WHERE id = ? AND estado = ?`,
       [
         nuevoEstado,
         nuevoEstado === 'RECHAZADA' && motivoRechazo ? String(motivoRechazo).slice(0, 1000) : null,
         esAprobada,
         cotizacionId,
+        cot.estado,
       ]
     );
+    if (!updRes || updRes.affectedRows === 0) {
+      await connection.rollback();
+      connection.release();
+      return {
+        cotizacion: cot,
+        transicionado: false,
+        mensaje: 'La cotización cambió de estado en paralelo; no se aplicó la transición externa.',
+      };
+    }
 
     const pedidoId = cot.pedido_id;
     const esComplementaria = !!cot.es_complementaria;
@@ -104,13 +126,22 @@ async function aplicarTransicionExterna(opts) {
 
     if (!esComplementaria && !pedidoCerrado) {
       if (esAprobada) {
+        // Respeta una principal previa (first-approval-wins) y nunca pisa
+        // estados terminales del pedido.
         await connection.execute(
-          "UPDATE pedidos SET estado = 'COTIZACION_APROBADA', cotizacion_principal_id = ? WHERE id = ?",
+          `UPDATE pedidos
+             SET estado = 'COTIZACION_APROBADA',
+                 cotizacion_principal_id = COALESCE(cotizacion_principal_id, ?)
+           WHERE id = ?
+             AND estado NOT IN ('FACTURADO', 'FALTA_PAGO_FACTURA', 'COMPLETADO', 'CANCELADO')`,
           [cotizacionId, pedidoId]
         );
       } else {
         await connection.execute(
-          "UPDATE pedidos SET estado = 'COTIZACION_RECHAZADA' WHERE id = ?",
+          `UPDATE pedidos
+             SET estado = 'COTIZACION_RECHAZADA'
+           WHERE id = ?
+             AND estado NOT IN ('FACTURADO', 'FALTA_PAGO_FACTURA', 'COMPLETADO', 'CANCELADO', 'COTIZACION_APROBADA')`,
           [pedidoId]
         );
       }

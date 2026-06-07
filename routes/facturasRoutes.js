@@ -11,6 +11,7 @@ const {
   deleteFactura
 } = require('../controllers/facturasController');
 const { authenticateToken, requireRole } = require('../middleware/auth');
+const idempotency = require('../middleware/idempotency');
 
 const createFacturaValidation = [
   body('pedido_id').isInt().withMessage('pedido_id es requerido')
@@ -18,7 +19,14 @@ const createFacturaValidation = [
 
 router.get('/', authenticateToken, getAllFacturas);
 router.get('/:id', authenticateToken, getFacturaById);
-router.post('/', authenticateToken, requireRole('manager', 'vendedor'), createFacturaValidation, createFactura);
+router.post(
+  '/',
+  authenticateToken,
+  requireRole('manager', 'vendedor'),
+  idempotency('POST:/api/facturas'),
+  createFacturaValidation,
+  createFactura
+);
 router.put('/:id', authenticateToken, requireRole('manager', 'vendedor'), updateFactura);
 router.post('/:id/reportar-pago-cliente', authenticateToken, requireRole('cliente'), reportarPagoPorCliente);
 router.post('/:id/enviar-cliente', authenticateToken, requireRole('manager', 'vendedor'), enviarFacturaAlCliente);

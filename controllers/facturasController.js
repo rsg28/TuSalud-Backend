@@ -1,5 +1,6 @@
 const pool = require('../config/database');
 const { validationResult } = require('express-validator');
+const { siguienteNumeroFactura } = require('../utils/numeracion');
 const {
   helpers: { emitirNotificacionAVendedorDePedido },
 } = require('./notificacionesController');
@@ -140,54 +141,76 @@ const createFactura = async (req, res) => {
       return res.status(400).json({ error: 'pedido_id es requerido' });
     }
 
-    const [pedido] = await pool.execute(
-      'SELECT id, empresa_id, cotizacion_principal_id FROM pedidos WHERE id = ?',
-      [pedido_id]
-    );
-    if (pedido.length === 0) {
-      return res.status(404).json({ error: 'Pedido no encontrado' });
-    }
-
-    const principalId = pedido[0].cotizacion_principal_id;
-    if (!principalId) {
-      return res.status(400).json({ error: 'El pedido no tiene cotización principal aprobada' });
-    }
-
-    // Cotización principal aprobada + todas las complementarias aprobadas del pedido
-    // (incluye ajustes negativos por exámenes no realizados). Antes solo se tomaban
-    // las que tenían cotizacion_base_id = principalId y se perdían complementarias
-    // huérfanas o con base distinta.
-    const [cotizacionesParaFacturar] = await pool.execute(
-      `SELECT c.id, c.total, c.es_complementaria, c.numero_cotizacion
-       FROM cotizaciones c
-       WHERE c.pedido_id = ?
-         AND c.estado = 'APROBADA'
-         AND NOT EXISTS (SELECT 1 FROM factura_cotizacion fc WHERE fc.cotizacion_id = c.id)
-         AND (c.id = ? OR c.es_complementaria = 1)`,
-      [pedido_id, principalId]
-    );
-
-    if (cotizacionesParaFacturar.length === 0) {
-      return res.status(400).json({ error: 'No hay cotizaciones aprobadas pendientes de facturar para este pedido' });
-    }
-
-    const incluyePrincipal = cotizacionesParaFacturar.some((c) => Number(c.id) === Number(principalId));
-    if (!incluyePrincipal) {
-      return res.status(400).json({
-        error: 'La cotización principal aprobada del pedido debe estar pendiente de facturar antes de emitir la factura',
-      });
-    }
-
+    // Concurrencia: dos managers podrían pulsar "Emitir factura" del mismo pedido
+    // a la vez. Sin lock, ambos ven las mismas cotizaciones como "pendientes" y
+    // crean dos facturas. Tomamos un lock pesimista sobre la fila del pedido al
+    // inicio de la transacción para serializar la emisión por pedido. Además, la
+    // UNIQUE en `factura_cotizacion(cotizacion_id)` (migration_concurrencia_fixes.sql)
+    // bloquea el peor caso si dos peticiones logran pasar el lock.
     const connection = await pool.getConnection();
     await connection.beginTransaction();
+
+    let pedido;
+    let principalId;
+    let cotizacionesParaFacturar;
+    try {
+      const [pedidoRows] = await connection.execute(
+        'SELECT id, empresa_id, cotizacion_principal_id FROM pedidos WHERE id = ? FOR UPDATE',
+        [pedido_id]
+      );
+      if (pedidoRows.length === 0) {
+        await connection.rollback();
+        connection.release();
+        return res.status(404).json({ error: 'Pedido no encontrado' });
+      }
+      pedido = pedidoRows;
+      principalId = pedido[0].cotizacion_principal_id;
+      if (!principalId) {
+        await connection.rollback();
+        connection.release();
+        return res.status(400).json({ error: 'El pedido no tiene cotización principal aprobada' });
+      }
+
+      // Releemos las cotizaciones DENTRO de la TX y bloqueamos sus filas para que
+      // no se aprueben/desaprueben durante la facturación.
+      const [filas] = await connection.execute(
+        `SELECT c.id, c.total, c.es_complementaria, c.numero_cotizacion
+         FROM cotizaciones c
+         WHERE c.pedido_id = ?
+           AND c.estado = 'APROBADA'
+           AND NOT EXISTS (SELECT 1 FROM factura_cotizacion fc WHERE fc.cotizacion_id = c.id)
+           AND (c.id = ? OR c.es_complementaria = 1)
+         FOR UPDATE`,
+        [pedido_id, principalId]
+      );
+      cotizacionesParaFacturar = filas;
+
+      if (cotizacionesParaFacturar.length === 0) {
+        await connection.rollback();
+        connection.release();
+        return res.status(400).json({ error: 'No hay cotizaciones aprobadas pendientes de facturar para este pedido' });
+      }
+
+      const incluyePrincipal = cotizacionesParaFacturar.some((c) => Number(c.id) === Number(principalId));
+      if (!incluyePrincipal) {
+        await connection.rollback();
+        connection.release();
+        return res.status(400).json({
+          error: 'La cotización principal aprobada del pedido debe estar pendiente de facturar antes de emitir la factura',
+        });
+      }
+    } catch (lockErr) {
+      try { await connection.rollback(); } catch (_) {}
+      connection.release();
+      throw lockErr;
+    }
 
     try {
       const subtotal = cotizacionesParaFacturar.reduce((s, c) => s + Number(c.total || 0), 0);
       const igv = Math.round(subtotal * 0.18 * 100) / 100;
       const total = Math.round((subtotal + igv) * 100) / 100;
 
-      const [seq] = await connection.execute('SELECT COALESCE(MAX(id), 0) + 1 AS n FROM facturas');
-      const numero_factura = `FAC-${new Date().getFullYear()}-${String(seq[0].n).padStart(6, '0')}`;
+      const numero_factura = await siguienteNumeroFactura(connection);
 
       const [result] = await connection.execute(
         `INSERT INTO facturas (numero_factura, pedido_id, subtotal, igv, total, estado, fecha_emision)
@@ -248,6 +271,26 @@ const createFactura = async (req, res) => {
           req.user?.nombre_completo || null,
         ]
       );
+
+      try {
+        const { registrarAuditoria } = require('../utils/audit');
+        await registrarAuditoria(
+          req,
+          {
+            accion: 'EMITIR_FACTURA',
+            recurso_tipo: 'FACTURA',
+            recurso_id: factura_id,
+            descripcion: `Emitió factura ${numero_factura} por S/ ${Number(total).toFixed(2)} (pedido ${pedido_id}).`,
+            detalle: {
+              numero_factura,
+              pedido_id,
+              total: Number(total),
+              cotizaciones_facturadas: cotizacionesParaFacturar.map((c) => c.id),
+            },
+          },
+          connection
+        );
+      } catch (_) { /* best-effort */ }
 
       await connection.commit();
 

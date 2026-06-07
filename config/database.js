@@ -1,7 +1,17 @@
 const mysql = require('mysql2/promise');
 require('dotenv').config();
 
-// Configuración de la base de datos
+// Configuración del pool. Antes el límite estaba en 10 conexiones con cola
+// ilimitada (`queueLimit: 0`), lo que en multi-vendedor producía starvation y
+// crecimiento de memoria sin freno bajo ráfagas. Subimos el `connectionLimit`
+// y acotamos la cola para que las requests fallen rápido en lugar de quedarse
+// colgadas para siempre. Configurable por env por si hace falta ajustar sin
+// tocar código en cada entorno.
+const parsePositiveInt = (raw, def) => {
+  const n = parseInt(String(raw ?? ''), 10);
+  return Number.isFinite(n) && n > 0 ? n : def;
+};
+
 const dbConfig = {
   host: process.env.DB_HOST || 'localhost',
   user: process.env.DB_USER || 'root',
@@ -9,12 +19,13 @@ const dbConfig = {
   database: process.env.DB_NAME || 'tusalud',
   port: parseInt(process.env.DB_PORT || '3306', 10),
   waitForConnections: true,
-  connectionLimit: 10,
-  queueLimit: 0,
+  connectionLimit: parsePositiveInt(process.env.DB_POOL_LIMIT, 50),
+  queueLimit: parsePositiveInt(process.env.DB_POOL_QUEUE_LIMIT, 200),
+  connectTimeout: parsePositiveInt(process.env.DB_CONNECT_TIMEOUT_MS, 10000),
   enableKeepAlive: true,
   keepAliveInitialDelay: 0,
   timezone: '+00:00',
-  charset: 'utf8mb4'
+  charset: 'utf8mb4',
 };
 
 // Crear pool de conexiones

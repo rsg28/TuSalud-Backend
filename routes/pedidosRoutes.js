@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const pedidosController = require('../controllers/pedidosController');
 const { authenticateToken, requireRole } = require('../middleware/auth');
+const idempotency = require('../middleware/idempotency');
 
 // GET /api/pedidos — Lista todos los pedidos (filtros por query: empresa_id, estado, vendedor_id, user_id, etc.). Solo vendedor y manager.
 router.get('/', authenticateToken, requireRole('vendedor', 'manager'), pedidosController.listarPedidos);
@@ -70,10 +71,22 @@ router.patch('/:pedido_id/estado', authenticateToken, requireRole('vendedor', 'm
 router.post('/:pedido_id/completar', authenticateToken, requireRole('vendedor', 'manager'), pedidosController.marcarCompletado);
 
 // POST /api/pedidos — Crea un nuevo pedido (vendedor, manager o cliente)
-router.post('/', authenticateToken, requireRole('vendedor', 'manager', 'cliente'), pedidosController.crearPedido);
+router.post(
+  '/',
+  authenticateToken,
+  requireRole('vendedor', 'manager', 'cliente'),
+  idempotency('POST:/api/pedidos'),
+  pedidosController.crearPedido
+);
 
 // POST /api/pedidos/:pedido_id/examenes — Agrega un examen al pedido (vendedor o manager)
-router.post('/:pedido_id/examenes', authenticateToken, requireRole('vendedor', 'manager'), pedidosController.agregarExamen);
+router.post(
+  '/:pedido_id/examenes',
+  authenticateToken,
+  requireRole('vendedor', 'manager'),
+  idempotency('POST:/api/pedidos/items'),
+  pedidosController.agregarExamen
+);
 
 // POST /api/pedidos/:pedido_id/cancelar — Cancela el pedido (solo vendedor o manager).
 // Los clientes NO pueden cancelar directamente: deben crear una solicitud de

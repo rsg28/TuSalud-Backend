@@ -59,6 +59,8 @@ app.use('/api/reniec', require('./routes/reniecRoutes'));
 app.use('/api/import', require('./routes/pdfTextoEmbebidoRoutes'));
 app.use('/api/whatsapp', require('./routes/whatsappRoutes'));
 app.use('/api/integraciones', require('./routes/integracionesRoutes'));
+app.use('/api/auditoria', require('./routes/auditoriaRoutes'));
+app.use('/api/presencia', require('./routes/presenciaRoutes'));
 
 // 404 handler
 app.use((req, res) => {

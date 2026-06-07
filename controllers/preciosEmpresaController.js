@@ -359,8 +359,50 @@ exports.listarPerfilesConPrecio = async (req, res) => {
       const entry = indexPerfil.get(row.perfil_id);
       if (entry) entry.grupos.push({ grupo_id: row.grupo_id, nombre: row.nombre });
     }
+
+    const h15Expr = sqlPrecioHasta15Expr('ep', 'ep_general');
+    const d16Expr = sqlPrecioDesde16Expr('ep', 'ep_general');
+    const [examRows] = await pool.query(
+      `SELECT mpe.perfil_id, mpe.examen_id,
+              ${h15Expr} AS precio_hasta_15,
+              ${d16Expr} AS precio_desde_16
+       FROM emo_perfil_examenes mpe
+       JOIN examenes e ON e.id = mpe.examen_id AND e.activo = 1
+       LEFT JOIN examen_precio ep ON e.id = ep.examen_id AND ep.sede_id = ?
+       LEFT JOIN examen_precio ep_general ON e.id = ep_general.examen_id AND ep_general.sede_id IS NULL
+       WHERE mpe.perfil_id IN (${placeholders})`,
+      [sede_id, ...ids]
+    );
+
+    const sumasPorPerfil = new Map();
+    const examenTienePrecio = (h15, d16) => {
+      const a = Number(h15);
+      const b = Number(d16);
+      return (Number.isFinite(a) && a > 0) || (Number.isFinite(b) && b > 0);
+    };
+    for (const row of examRows) {
+      const pid = row.perfil_id;
+      if (!sumasPorPerfil.has(pid)) {
+        sumasPorPerfil.set(pid, { sumH15: 0, sumD16: 0, sinPrecio: 0, total: 0 });
+      }
+      const acc = sumasPorPerfil.get(pid);
+      acc.total += 1;
+      const h15 = Number(row.precio_hasta_15);
+      const d16 = Number(row.precio_desde_16);
+      if (!examenTienePrecio(h15, d16)) {
+        acc.sinPrecio += 1;
+        continue;
+      }
+      acc.sumH15 += Number.isFinite(h15) && h15 > 0 ? h15 : Number.isFinite(d16) && d16 > 0 ? d16 : 0;
+      acc.sumD16 += Number.isFinite(d16) && d16 > 0 ? d16 : Number.isFinite(h15) && h15 > 0 ? h15 : 0;
+    }
+
     const out = perfiles.map((p) => {
       const entry = indexPerfil.get(p.perfil_id);
+      const sumas = sumasPorPerfil.get(p.perfil_id);
+      const totalExamenes = Number(p.total_examenes ?? 0);
+      const completo =
+        totalExamenes > 0 && sumas && sumas.total === totalExamenes && sumas.sinPrecio === 0;
       return {
         perfil_id: p.perfil_id,
         nombre: p.nombre,
@@ -368,10 +410,14 @@ exports.listarPerfilesConPrecio = async (req, res) => {
         descripcion: p.descripcion,
         visibilidad: p.visibilidad ?? 'GLOBAL',
         created_at: p.created_at ?? null,
-        total_examenes: Number(p.total_examenes ?? 0),
+        total_examenes: totalExamenes,
         precios: entry?.tipos ?? [],
         empresas: entry?.empresas ?? [],
         grupos: entry?.grupos ?? [],
+        precio_perfil_completo: completo,
+        precio_suma_hasta_15: completo ? Math.round(sumas.sumH15 * 100) / 100 : null,
+        precio_suma_desde_16: completo ? Math.round(sumas.sumD16 * 100) / 100 : null,
+        examenes_sin_precio: sumas?.sinPrecio ?? 0,
       };
     });
     res.json({ perfiles: out });
@@ -386,6 +432,10 @@ exports.listarPerfilesConPrecio = async (req, res) => {
  */
 exports.obtenerExamenesPerfil = async (req, res) => {
   try {
+    const { sede_id } = req.query;
+    if (!sede_id) {
+      return res.status(400).json({ error: 'sede_id es requerido' });
+    }
     const perfilId = parseInt(String(req.params?.perfilId ?? ''), 10);
     if (!Number.isInteger(perfilId) || perfilId <= 0) {
       return res.status(400).json({ error: 'perfilId inválido' });
@@ -393,13 +443,19 @@ exports.obtenerExamenesPerfil = async (req, res) => {
     const [exists] = await pool.execute('SELECT id FROM emo_perfiles WHERE id = ? LIMIT 1', [perfilId]);
     if (!exists.length) return res.status(404).json({ error: 'Perfil no encontrado' });
 
+    const h15Expr = sqlPrecioHasta15Expr('ep', 'ep_general');
+    const d16Expr = sqlPrecioDesde16Expr('ep', 'ep_general');
     const [rows] = await pool.query(
-      `SELECT mpe.tipo_emo, e.id AS examen_id, e.nombre AS nombre_examen
+      `SELECT mpe.tipo_emo, e.id AS examen_id, e.nombre AS nombre_examen,
+              ${h15Expr} AS precio_hasta_15,
+              ${d16Expr} AS precio_desde_16
        FROM emo_perfil_examenes mpe
        JOIN examenes e ON e.id = mpe.examen_id AND e.activo = 1
+       LEFT JOIN examen_precio ep ON e.id = ep.examen_id AND ep.sede_id = ?
+       LEFT JOIN examen_precio ep_general ON e.id = ep_general.examen_id AND ep_general.sede_id IS NULL
        WHERE mpe.perfil_id = ?
        ORDER BY mpe.tipo_emo ASC, e.nombre ASC`,
-      [perfilId]
+      [sede_id, perfilId]
     );
     const TIPOS = ['PREOC', 'ANUAL', 'RETIRO', 'VISITA'];
     const examenes_por_tipo = Object.fromEntries(TIPOS.map((t) => [t, []]));
@@ -409,6 +465,8 @@ exports.obtenerExamenesPerfil = async (req, res) => {
       examenes_por_tipo[tipo].push({
         examen_id: row.examen_id,
         nombre_examen: row.nombre_examen,
+        precio_hasta_15: row.precio_hasta_15 != null ? Number(row.precio_hasta_15) : null,
+        precio_desde_16: row.precio_desde_16 != null ? Number(row.precio_desde_16) : null,
       });
     }
     res.json({ perfil_id: perfilId, examenes_por_tipo });
@@ -454,36 +512,23 @@ exports.setPrecioExamen = async (req, res) => {
       return res.status(404).json({ error: 'Examen no encontrado' });
     }
 
-    // Buscar fila existente para (examen, sede) — sede_id = NULL se busca con IS NULL.
-    let existRows;
-    if (sedeIdNum == null) {
-      [existRows] = await pool.execute(
-        'SELECT id FROM examen_precio WHERE examen_id = ? AND sede_id IS NULL LIMIT 1',
-        [examenId]
-      );
-    } else {
-      [existRows] = await pool.execute(
-        'SELECT id FROM examen_precio WHERE examen_id = ? AND sede_id = ? LIMIT 1',
-        [examenId, sedeIdNum]
-      );
-    }
-    if (existRows.length > 0) {
-      await pool.execute(
-        `UPDATE examen_precio SET
-           precio = ?,
-           precio_hasta_15 = ?,
-           precio_desde_16 = ?,
-           vigente_desde = COALESCE(vigente_desde, CURDATE())
-         WHERE id = ?`,
-        [desde16Num, hasta15Num, desde16Num, existRows[0].id]
-      );
-    } else {
-      await pool.execute(
-        `INSERT INTO examen_precio (examen_id, sede_id, precio, precio_hasta_15, precio_desde_16, vigente_desde)
-         VALUES (?, ?, ?, ?, ?, CURDATE())`,
-        [examenId, sedeIdNum, desde16Num, hasta15Num, desde16Num]
-      );
-    }
+    // Upsert atómico. La migración `migration_concurrencia_fixes.sql` añade un
+    // UNIQUE sobre (examen_id, sede_key) — donde sede_key = COALESCE(sede_id, 0)
+    // — para que `ON DUPLICATE KEY UPDATE` funcione tanto con sede explícita
+    // como con precio general (sede_id IS NULL). Esto evita la condición de
+    // carrera SELECT + INSERT/UPDATE que duplicaba filas cuando dos managers
+    // editaban el mismo precio a la vez.
+    await pool.execute(
+      `INSERT INTO examen_precio
+         (examen_id, sede_id, precio, precio_hasta_15, precio_desde_16, vigente_desde)
+       VALUES (?, ?, ?, ?, ?, CURDATE())
+       ON DUPLICATE KEY UPDATE
+         precio          = VALUES(precio),
+         precio_hasta_15 = VALUES(precio_hasta_15),
+         precio_desde_16 = VALUES(precio_desde_16),
+         vigente_desde   = COALESCE(vigente_desde, CURDATE())`,
+      [examenId, sedeIdNum, desde16Num, hasta15Num, desde16Num]
+    );
     res.json({
       message: 'Precio actualizado',
       examen_id: examenId,
@@ -529,28 +574,14 @@ exports.setPrecioPerfil = async (req, res) => {
       return res.status(404).json({ error: 'Perfil no encontrado' });
     }
 
-    // Para uniqueness, MySQL trata múltiples NULLs como distintos. Buscamos
-    // la fila explícita (perfil, NULL empresa, sede or NULL, tipo_emo).
-    let existRows;
-    if (sedeIdNum == null) {
-      [existRows] = await pool.execute(
-        'SELECT id FROM emo_perfil_precio WHERE perfil_id = ? AND empresa_id IS NULL AND sede_id IS NULL AND tipo_emo = ? LIMIT 1',
-        [perfilId, tipo_emo]
-      );
-    } else {
-      [existRows] = await pool.execute(
-        'SELECT id FROM emo_perfil_precio WHERE perfil_id = ? AND empresa_id IS NULL AND sede_id = ? AND tipo_emo = ? LIMIT 1',
-        [perfilId, sedeIdNum, tipo_emo]
-      );
-    }
-    if (existRows.length > 0) {
-      await pool.execute('UPDATE emo_perfil_precio SET precio = ? WHERE id = ?', [precioNum, existRows[0].id]);
-    } else {
-      await pool.execute(
-        'INSERT INTO emo_perfil_precio (perfil_id, empresa_id, sede_id, tipo_emo, precio) VALUES (?, NULL, ?, ?, ?)',
-        [perfilId, sedeIdNum, tipo_emo, precioNum]
-      );
-    }
+    // Upsert atómico apoyado en el UNIQUE de migration_concurrencia_fixes.sql
+    // (perfil_id, empresa_key, sede_key, tipo_emo) con coalesce de NULLs a 0.
+    await pool.execute(
+      `INSERT INTO emo_perfil_precio (perfil_id, empresa_id, sede_id, tipo_emo, precio)
+       VALUES (?, NULL, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE precio = VALUES(precio)`,
+      [perfilId, sedeIdNum, tipo_emo, precioNum]
+    );
     res.json({
       message: 'Precio de perfil actualizado',
       perfil_id: perfilId,

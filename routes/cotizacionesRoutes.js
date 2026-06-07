@@ -13,6 +13,7 @@ const {
   deleteCotizacion
 } = require('../controllers/cotizacionesController');
 const { authenticateToken, requireRole } = require('../middleware/auth');
+const idempotency = require('../middleware/idempotency');
 
 const cotizacionValidation = [
   body('pedido_id').isInt().withMessage('pedido_id es requerido'),
@@ -21,10 +22,23 @@ const cotizacionValidation = [
 
 router.get('/', authenticateToken, getAllCotizaciones);
 router.get('/enviadas-al-manager', authenticateToken, requireRole('manager'), getCotizacionesEnviadasAlManager);
-router.post('/complementarias', authenticateToken, requireRole('vendedor', 'manager', 'cliente'), createCotizacionComplementaria);
+router.post(
+  '/complementarias',
+  authenticateToken,
+  requireRole('vendedor', 'manager', 'cliente'),
+  idempotency('POST:/api/cotizaciones/complementarias'),
+  createCotizacionComplementaria
+);
 router.get('/:id/items', authenticateToken, getCotizacionItems);
 router.get('/:id', authenticateToken, getCotizacionById);
-router.post('/', authenticateToken, requireRole('manager', 'vendedor', 'cliente'), cotizacionValidation, createCotizacion);
+router.post(
+  '/',
+  authenticateToken,
+  requireRole('manager', 'vendedor', 'cliente'),
+  idempotency('POST:/api/cotizaciones'),
+  cotizacionValidation,
+  createCotizacion
+);
 router.put('/:id', authenticateToken, requireRole('manager', 'vendedor', 'cliente'), updateCotizacion);
 router.patch('/:id/estado', authenticateToken, requireRole('manager', 'vendedor', 'cliente'), updateEstadoCotizacion);
 router.delete('/:id', authenticateToken, requireRole('manager', 'vendedor'), deleteCotizacion);

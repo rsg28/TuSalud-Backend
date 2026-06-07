@@ -81,11 +81,15 @@ function parseExamenIdRef(raw) {
   return Number.isFinite(n) && n > 0 ? n : null;
 }
 
-const generarNumeroPedido = async () => {
-  const [rows] = await pool.execute('SELECT COALESCE(MAX(id), 0) + 1 AS n FROM pedidos');
-  const year = new Date().getFullYear();
-  return `PED-${year}-${String(rows[0].n).padStart(6, '0')}`;
-};
+const { siguienteNumeroPedido } = require('../utils/numeracion');
+
+/**
+ * Genera el siguiente N° de pedido de forma atómica usando `serie_numeracion`.
+ * Debe llamarse con la conexión transaccional para que la asignación quede
+ * dentro del mismo BEGIN/COMMIT que el INSERT del pedido (evita saltos si la
+ * transacción hace rollback por una FK posterior).
+ */
+const generarNumeroPedido = async (connection) => siguienteNumeroPedido(connection);
 
 const registrarHistorial = async (connection, pedido_id, tipo_evento, descripcion, usuario_id, cotizacion_id = null, extra = {}) => {
   const usuario_nombre = extra.usuario_nombre || null;
@@ -526,7 +530,7 @@ const crearPedido = async (req, res) => {
       return res.status(400).json({ error: 'Sede no encontrada' });
     }
 
-    const numero_pedido = await generarNumeroPedido();
+    const numero_pedido = await generarNumeroPedido(connection);
     const empleadosList = Array.isArray(empleados) ? empleados : [];
     const rawTotal = totalEmpleadosBody ?? totalEmpleadosCamel;
     const totalEmpleadosInicial = empleadosList.length > 0
@@ -666,6 +670,26 @@ const crearPedido = async (req, res) => {
     }
 
     await registrarHistorial(connection, pedido_id, 'CREACION', `Pedido ${numero_pedido} creado`, vendedor_id, null, { usuario_nombre: req.user ? req.user.nombre_completo : null });
+    try {
+      const { registrarAuditoria } = require('../utils/audit');
+      await registrarAuditoria(
+        req,
+        {
+          accion: 'CREAR_PEDIDO',
+          recurso_tipo: 'PEDIDO',
+          recurso_id: pedido_id,
+          descripcion: `Creó el pedido ${numero_pedido} (${empleadosList.length || totalEmpleadosInicial} empleado(s)).`,
+          detalle: {
+            numero_pedido,
+            empresa_id,
+            sede_id,
+            total_empleados: empleadosList.length || totalEmpleadosInicial,
+            rol_creador: rolUsuario,
+          },
+        },
+        connection
+      );
+    } catch (_) { /* best-effort */ }
     await connection.commit();
 
     // Notificar al vendedor / managers cuando es el cliente quien crea el pedido.
@@ -716,14 +740,6 @@ const agregarExamen = async (req, res) => {
     const { pedido_id } = req.params;
     const body = req.body || {};
 
-    const [pedido] = await pool.execute('SELECT id, estado, sede_id, empresa_id, total_empleados FROM pedidos WHERE id = ?', [pedido_id]);
-    if (pedido.length === 0) {
-      return res.status(404).json({ error: 'Pedido no encontrado' });
-    }
-    if (pedido[0].estado !== 'PENDIENTE' && pedido[0].estado !== 'ESPERA_COTIZACION') {
-      return res.status(400).json({ error: 'Solo se pueden agregar items a pedidos en espera de cotización' });
-    }
-
     let it;
     try {
       it = normalizePedidoItem(body);
@@ -731,36 +747,82 @@ const agregarExamen = async (req, res) => {
       return res.status(400).json({ error: e.message });
     }
 
-    let precio_base = Number(body.precio_base);
-    if (!Number.isFinite(precio_base) || precio_base <= 0) {
-      if (it.tipo_item === 'EXAMEN') {
-        const numPacientes = Number(pedido[0].total_empleados) || 0;
-        precio_base = await fetchPrecioExamen(pool, it.examen_id, pedido[0].sede_id, numPacientes);
-      } else {
-        const [precio] = await pool.execute(
-          `SELECT precio FROM emo_perfil_precio
-           WHERE perfil_id = ? AND tipo_emo = ?
-             AND (empresa_id = ? OR empresa_id IS NULL)
-             AND (sede_id = ? OR sede_id IS NULL)
-           ORDER BY (empresa_id IS NOT NULL) DESC, (sede_id IS NOT NULL) DESC
-           LIMIT 1`,
-          [it.perfil_id, it.tipo_emo, pedido[0].empresa_id, pedido[0].sede_id]
-        );
-        precio_base = precio.length > 0 ? Number(precio[0].precio) : 0;
+    const connection = await pool.getConnection();
+    await connection.beginTransaction();
+    try {
+      // Lock pesimista del pedido: otra request no podrá cancelarlo / cerrarlo
+      // entre que validamos el estado y agregamos el ítem.
+      const [pedido] = await connection.execute(
+        `SELECT id, estado, sede_id, empresa_id, total_empleados
+           FROM pedidos WHERE id = ? FOR UPDATE`,
+        [pedido_id]
+      );
+      if (pedido.length === 0) {
+        await connection.rollback();
+        connection.release();
+        return res.status(404).json({ error: 'Pedido no encontrado' });
       }
+      if (pedido[0].estado !== 'PENDIENTE' && pedido[0].estado !== 'ESPERA_COTIZACION') {
+        await connection.rollback();
+        connection.release();
+        return res.status(400).json({
+          error: 'Solo se pueden agregar items a pedidos en espera de cotización',
+          estado_actual: pedido[0].estado,
+        });
+      }
+
+      let precio_base = Number(body.precio_base);
+      if (!Number.isFinite(precio_base) || precio_base <= 0) {
+        if (it.tipo_item === 'EXAMEN') {
+          const numPacientes = Number(pedido[0].total_empleados) || 0;
+          precio_base = await fetchPrecioExamen(connection, it.examen_id, pedido[0].sede_id, numPacientes);
+        } else {
+          const [precio] = await connection.execute(
+            `SELECT precio FROM emo_perfil_precio
+             WHERE perfil_id = ? AND tipo_emo = ?
+               AND (empresa_id = ? OR empresa_id IS NULL)
+               AND (sede_id = ? OR sede_id IS NULL)
+             ORDER BY (empresa_id IS NOT NULL) DESC, (sede_id IS NOT NULL) DESC
+             LIMIT 1`,
+            [it.perfil_id, it.tipo_emo, pedido[0].empresa_id, pedido[0].sede_id]
+          );
+          precio_base = precio.length > 0 ? Number(precio[0].precio) : 0;
+        }
+      }
+
+      // ON DUPLICATE KEY UPDATE usa el UNIQUE (pedido_id, item_key) → si el mismo
+      // ítem ya existe, suma la cantidad y refresca precio_base.
+      await connection.execute(
+        `INSERT INTO pedido_items
+           (pedido_id, tipo_item, perfil_id, tipo_emo, examen_id, nombre, cantidad, precio_base)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE cantidad = cantidad + VALUES(cantidad), precio_base = VALUES(precio_base)`,
+        [pedido_id, it.tipo_item, it.perfil_id, it.tipo_emo, it.examen_id, it.nombre, it.cantidad, precio_base]
+      );
+
+      try {
+        const { registrarAuditoria } = require('../utils/audit');
+        await registrarAuditoria(
+          req,
+          {
+            accion: 'PEDIDO_ITEM_AGREGADO',
+            recurso_tipo: 'PEDIDO',
+            recurso_id: pedido_id,
+            descripcion: `Agregó ${it.cantidad}× ${it.nombre} al pedido ${pedido_id}.`,
+            detalle: { item: it, precio_base },
+          },
+          connection
+        );
+      } catch (_) { /* best-effort */ }
+
+      await connection.commit();
+      connection.release();
+      res.json({ message: 'Item agregado' });
+    } catch (err) {
+      try { await connection.rollback(); } catch (_) {}
+      connection.release();
+      throw err;
     }
-
-    // ON DUPLICATE KEY UPDATE usa el UNIQUE (pedido_id, item_key) → si el mismo
-    // ítem ya existe, suma la cantidad y refresca precio_base.
-    await pool.execute(
-      `INSERT INTO pedido_items
-         (pedido_id, tipo_item, perfil_id, tipo_emo, examen_id, nombre, cantidad, precio_base)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-       ON DUPLICATE KEY UPDATE cantidad = cantidad + VALUES(cantidad), precio_base = VALUES(precio_base)`,
-      [pedido_id, it.tipo_item, it.perfil_id, it.tipo_emo, it.examen_id, it.nombre, it.cantidad, precio_base]
-    );
-
-    res.json({ message: 'Item agregado' });
   } catch (error) {
     console.error('Error al agregar item al pedido:', error);
     res.status(500).json({ error: 'Error al agregar item' });
@@ -845,11 +907,18 @@ const obtenerEstadoPedido = async (req, res) => {
 
 const ESTADOS_PEDIDO = ['PENDIENTE', 'ESPERA_COTIZACION', 'LISTO_PARA_COTIZACION', 'FALTA_APROBAR_COTIZACION', 'COTIZACION_APROBADA', 'FALTA_PAGO_FACTURA', 'COTIZACION_RECHAZADA', 'FACTURADO', 'COMPLETADO', 'CANCELADO'];
 
+/**
+ * Estados terminales: una vez ahí, ningún PATCH genérico puede sacar al pedido
+ * (esto evita que dos vendedores compitan por mover un pedido ya facturado a
+ * `COMPLETADO` y otro a `CANCELADO`, dejando estado inconsistente).
+ */
+const ESTADOS_PEDIDO_TERMINALES = new Set(['FACTURADO', 'COMPLETADO', 'CANCELADO']);
+
 /** PATCH /api/pedidos/:pedido_id/estado — Actualiza solo el estado del pedido. */
 const actualizarEstadoPedido = async (req, res) => {
   try {
     const { pedido_id } = req.params;
-    const { estado } = req.body;
+    const { estado, estado_esperado } = req.body || {};
     if (!estado || typeof estado !== 'string') {
       return res.status(400).json({ error: 'estado es requerido' });
     }
@@ -857,14 +926,45 @@ const actualizarEstadoPedido = async (req, res) => {
     if (!ESTADOS_PEDIDO.includes(estadoUpper)) {
       return res.status(400).json({ error: `estado debe ser uno de: ${ESTADOS_PEDIDO.join(', ')}` });
     }
-    const [result] = await pool.execute(
-      'UPDATE pedidos SET estado = ? WHERE id = ?',
-      [estadoUpper, pedido_id]
-    );
+
+    // Compare-and-swap opcional: si el cliente envía `estado_esperado`, solo
+    // aplicamos el cambio si el estado actual coincide. Además, prohibimos
+    // sacar al pedido de un estado terminal (FACTURADO/COMPLETADO/CANCELADO).
+    const params = [estadoUpper, pedido_id, 'FACTURADO', 'COMPLETADO', 'CANCELADO'];
+    let sql = 'UPDATE pedidos SET estado = ? WHERE id = ? AND estado NOT IN (?, ?, ?)';
+    if (typeof estado_esperado === 'string' && estado_esperado) {
+      sql += ' AND estado = ?';
+      params.push(estado_esperado.toUpperCase());
+    }
+    const [result] = await pool.execute(sql, params);
+
     if (result.affectedRows === 0) {
-      return res.status(404).json({ error: 'Pedido no encontrado' });
+      const [rowsActual] = await pool.execute('SELECT id, estado FROM pedidos WHERE id = ?', [pedido_id]);
+      if (rowsActual.length === 0) {
+        return res.status(404).json({ error: 'Pedido no encontrado' });
+      }
+      if (ESTADOS_PEDIDO_TERMINALES.has(rowsActual[0].estado)) {
+        return res.status(409).json({
+          error: `El pedido está en estado terminal ${rowsActual[0].estado} y no puede modificarse.`,
+          estado_actual: rowsActual[0].estado,
+        });
+      }
+      return res.status(409).json({
+        error: 'El estado del pedido cambió en paralelo. Recarga e inténtalo de nuevo.',
+        estado_actual: rowsActual[0].estado,
+      });
     }
     const [rows] = await pool.execute('SELECT id, estado FROM pedidos WHERE id = ?', [pedido_id]);
+    try {
+      const { registrarAuditoria } = require('../utils/audit');
+      await registrarAuditoria(req, {
+        accion: 'PEDIDO_ESTADO_ACTUALIZADO',
+        recurso_tipo: 'PEDIDO',
+        recurso_id: pedido_id,
+        descripcion: `Pedido ${pedido_id} → ${estadoUpper}`,
+        detalle: { estado_nuevo: estadoUpper, estado_esperado: estado_esperado || null },
+      });
+    } catch (_) { /* best-effort */ }
     res.json({ message: 'Estado actualizado', pedido: rows[0] });
   } catch (error) {
     console.error('Error al actualizar estado del pedido:', error);
