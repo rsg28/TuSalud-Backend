@@ -109,6 +109,17 @@ DELETE ep FROM `examen_precio` ep
   LEFT JOIN `sedes` s ON s.id = ep.sede_id
  WHERE ep.sede_id IS NOT NULL AND s.id IS NULL;
 
+SET @idx_examen := (
+  SELECT COUNT(*) FROM information_schema.STATISTICS
+  WHERE TABLE_SCHEMA = DATABASE()
+    AND TABLE_NAME = 'examen_precio'
+    AND INDEX_NAME = 'idx_examen_precio_examen_id'
+);
+SET @sql := IF(@idx_examen = 0,
+  'ALTER TABLE `examen_precio` ADD INDEX `idx_examen_precio_examen_id` (`examen_id`)',
+  'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
 SET @old_uq := (
   SELECT COUNT(*) FROM information_schema.STATISTICS
   WHERE TABLE_SCHEMA = DATABASE()
@@ -159,6 +170,17 @@ DELETE pp FROM `emo_perfil_precio` pp
 DELETE pp FROM `emo_perfil_precio` pp
   LEFT JOIN `sedes` s ON s.id = pp.sede_id
  WHERE pp.sede_id IS NOT NULL AND s.id IS NULL;
+
+SET @idx_perfil := (
+  SELECT COUNT(*) FROM information_schema.STATISTICS
+  WHERE TABLE_SCHEMA = DATABASE()
+    AND TABLE_NAME = 'emo_perfil_precio'
+    AND INDEX_NAME = 'idx_emo_perfil_precio_perfil_id'
+);
+SET @sql := IF(@idx_perfil = 0,
+  'ALTER TABLE `emo_perfil_precio` ADD INDEX `idx_emo_perfil_precio_perfil_id` (`perfil_id`)',
+  'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 
 SET @old_uq := (
   SELECT COUNT(*) FROM information_schema.STATISTICS

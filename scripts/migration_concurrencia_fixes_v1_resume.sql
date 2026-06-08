@@ -71,7 +71,20 @@ JOIN (
  AND COALESCE(ep.sede_id, 0) = keep.sk
 WHERE ep.id <> keep.keep_id;
 
--- Quitar índice viejo que permite múltiples NULL en sede_id
+-- Quitar índice viejo que permite múltiples NULL en sede_id.
+-- MySQL no deja DROP si una FK lo usa como índice de soporte: primero
+-- creamos un índice alternativo en examen_id (la FK examen_precio_ibfk_1).
+SET @idx_examen := (
+  SELECT COUNT(*) FROM information_schema.STATISTICS
+  WHERE TABLE_SCHEMA = DATABASE()
+    AND TABLE_NAME = 'examen_precio'
+    AND INDEX_NAME = 'idx_examen_precio_examen_id'
+);
+SET @sql := IF(@idx_examen = 0,
+  'ALTER TABLE `examen_precio` ADD INDEX `idx_examen_precio_examen_id` (`examen_id`)',
+  'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
 SET @old_uq := (
   SELECT COUNT(*) FROM information_schema.STATISTICS
   WHERE TABLE_SCHEMA = DATABASE()
@@ -127,6 +140,19 @@ SET @old_uq := (
     AND TABLE_NAME = 'emo_perfil_precio'
     AND INDEX_NAME = 'uq_emo_perfil_precio'
 );
+-- FK fk_emo_perfil_precio_perfil usa el UNIQUE que empieza por perfil_id;
+-- añadimos índice de respaldo antes del DROP.
+SET @idx_perfil := (
+  SELECT COUNT(*) FROM information_schema.STATISTICS
+  WHERE TABLE_SCHEMA = DATABASE()
+    AND TABLE_NAME = 'emo_perfil_precio'
+    AND INDEX_NAME = 'idx_emo_perfil_precio_perfil_id'
+);
+SET @sql := IF(@idx_perfil = 0,
+  'ALTER TABLE `emo_perfil_precio` ADD INDEX `idx_emo_perfil_precio_perfil_id` (`perfil_id`)',
+  'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
 SET @sql := IF(@old_uq > 0,
   'ALTER TABLE `emo_perfil_precio` DROP INDEX `uq_emo_perfil_precio`',
   'SELECT 1');
