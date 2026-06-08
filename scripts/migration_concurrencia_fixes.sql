@@ -6,9 +6,9 @@
 --      cotización y factura. Elimina la carrera `SELECT MAX(id)+1`.
 --   2. UNIQUE en `factura_cotizacion(cotizacion_id)` para impedir que una
 --      cotización aprobada acabe en dos facturas distintas.
---   3. Columnas calculadas `sede_key` / `empresa_key` para que MySQL trate los
---      NULLs como un valor único y los UNIQUE existentes funcionen de verdad
---      en `examen_precio` y `emo_perfil_precio`.
+--   3. Índices UNIQUE funcionales en `examen_precio` y `emo_perfil_precio`
+--      con COALESCE(.., 0) para que MySQL trate los NULLs como un valor único
+--      (evita duplicar precios "generales" con sede_id IS NULL).
 --
 -- Idempotente: se puede correr más de una vez. Antes de añadir el UNIQUE en
 -- `factura_cotizacion`, deduplica las filas existentes (deja la de menor id
@@ -83,22 +83,12 @@ PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 -- ----------------------------------------------------------------------------
 -- 3. examen_precio: cerrar el agujero del UNIQUE con NULL
 --    MySQL trata múltiples NULLs como distintos en UNIQUE → permite duplicar
---    `precio general` (sede_id IS NULL). Reemplazamos por una columna calculada
---    `sede_key` = COALESCE(sede_id, 0) y un UNIQUE sobre (examen_id, sede_key).
+--    `precio general` (sede_id IS NULL). Usamos índice UNIQUE funcional
+--    (examen_id, COALESCE(sede_id, 0)) en lugar de columna generada STORED,
+--    que en algunos RDS falla con ERROR 1215 al reconstruir tablas con FKs.
 -- ----------------------------------------------------------------------------
-SET @col_exists := (
-  SELECT COUNT(*) FROM information_schema.COLUMNS
-  WHERE TABLE_SCHEMA = DATABASE()
-    AND TABLE_NAME = 'examen_precio'
-    AND COLUMN_NAME = 'sede_key'
-);
-SET @sql := IF(@col_exists = 0,
-  'ALTER TABLE `examen_precio`
-   ADD COLUMN `sede_key` INT AS (COALESCE(`sede_id`, 0)) STORED',
-  'SELECT 1');
-PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 
--- Antes de meter el UNIQUE: deduplicar manteniendo la fila de mayor id (la más
+-- Antes del UNIQUE: deduplicar manteniendo la fila de mayor id (la más
 -- reciente). Evita que el ALTER falle si hay duplicados previos por carrera.
 DELETE ep FROM `examen_precio` ep
 JOIN (
@@ -110,6 +100,26 @@ JOIN (
  AND COALESCE(ep.sede_id, 0) = keep.sk
 WHERE ep.id <> keep.keep_id;
 
+-- Limpiar huérfanos que bloquean ALTER con FKs activas
+DELETE ep FROM `examen_precio` ep
+  LEFT JOIN `examenes` e ON e.id = ep.examen_id
+ WHERE e.id IS NULL;
+
+DELETE ep FROM `examen_precio` ep
+  LEFT JOIN `sedes` s ON s.id = ep.sede_id
+ WHERE ep.sede_id IS NOT NULL AND s.id IS NULL;
+
+SET @old_uq := (
+  SELECT COUNT(*) FROM information_schema.STATISTICS
+  WHERE TABLE_SCHEMA = DATABASE()
+    AND TABLE_NAME = 'examen_precio'
+    AND INDEX_NAME = 'uq_examen_precio'
+);
+SET @sql := IF(@old_uq > 0,
+  'ALTER TABLE `examen_precio` DROP INDEX `uq_examen_precio`',
+  'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
 SET @uq_exists := (
   SELECT COUNT(*) FROM information_schema.STATISTICS
   WHERE TABLE_SCHEMA = DATABASE()
@@ -117,26 +127,14 @@ SET @uq_exists := (
     AND INDEX_NAME = 'uq_examen_precio_sede_key'
 );
 SET @sql := IF(@uq_exists = 0,
-  'ALTER TABLE `examen_precio` ADD UNIQUE KEY `uq_examen_precio_sede_key` (`examen_id`, `sede_key`)',
+  'ALTER TABLE `examen_precio`
+   ADD UNIQUE KEY `uq_examen_precio_sede_key` (`examen_id`, (COALESCE(`sede_id`, 0)))',
   'SELECT 1');
 PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 
 -- ----------------------------------------------------------------------------
 -- 4. emo_perfil_precio: mismo truco para (perfil, empresa, sede, tipo_emo)
 -- ----------------------------------------------------------------------------
-SET @col_exists := (
-  SELECT COUNT(*) FROM information_schema.COLUMNS
-  WHERE TABLE_SCHEMA = DATABASE()
-    AND TABLE_NAME = 'emo_perfil_precio'
-    AND COLUMN_NAME = 'empresa_key'
-);
-SET @sql := IF(@col_exists = 0,
-  'ALTER TABLE `emo_perfil_precio`
-   ADD COLUMN `empresa_key` INT AS (COALESCE(`empresa_id`, 0)) STORED,
-   ADD COLUMN `sede_key`    INT AS (COALESCE(`sede_id`, 0))    STORED',
-  'SELECT 1');
-PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
-
 DELETE pp FROM `emo_perfil_precio` pp
 JOIN (
   SELECT perfil_id, COALESCE(empresa_id, 0) AS ek, COALESCE(sede_id, 0) AS sk, tipo_emo,
@@ -150,6 +148,29 @@ JOIN (
  AND pp.tipo_emo = keep.tipo_emo
 WHERE pp.id <> keep.keep_id;
 
+DELETE pp FROM `emo_perfil_precio` pp
+  LEFT JOIN `emo_perfiles` p ON p.id = pp.perfil_id
+ WHERE p.id IS NULL;
+
+DELETE pp FROM `emo_perfil_precio` pp
+  LEFT JOIN `empresas` e ON e.id = pp.empresa_id
+ WHERE pp.empresa_id IS NOT NULL AND e.id IS NULL;
+
+DELETE pp FROM `emo_perfil_precio` pp
+  LEFT JOIN `sedes` s ON s.id = pp.sede_id
+ WHERE pp.sede_id IS NOT NULL AND s.id IS NULL;
+
+SET @old_uq := (
+  SELECT COUNT(*) FROM information_schema.STATISTICS
+  WHERE TABLE_SCHEMA = DATABASE()
+    AND TABLE_NAME = 'emo_perfil_precio'
+    AND INDEX_NAME = 'uq_emo_perfil_precio'
+);
+SET @sql := IF(@old_uq > 0,
+  'ALTER TABLE `emo_perfil_precio` DROP INDEX `uq_emo_perfil_precio`',
+  'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
 SET @uq_exists := (
   SELECT COUNT(*) FROM information_schema.STATISTICS
   WHERE TABLE_SCHEMA = DATABASE()
@@ -157,7 +178,13 @@ SET @uq_exists := (
     AND INDEX_NAME = 'uq_emo_perfil_precio_keys'
 );
 SET @sql := IF(@uq_exists = 0,
-  'ALTER TABLE `emo_perfil_precio` ADD UNIQUE KEY `uq_emo_perfil_precio_keys` (`perfil_id`, `empresa_key`, `sede_key`, `tipo_emo`)',
+  'ALTER TABLE `emo_perfil_precio`
+   ADD UNIQUE KEY `uq_emo_perfil_precio_keys` (
+     `perfil_id`,
+     (COALESCE(`empresa_id`, 0)),
+     (COALESCE(`sede_id`, 0)),
+     `tipo_emo`
+   )',
   'SELECT 1');
 PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 
