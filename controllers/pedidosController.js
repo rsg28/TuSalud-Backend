@@ -405,7 +405,8 @@ const obtenerPacientesExamenes = async (req, res) => {
     const numero_pedido = pedidos[0].numero_pedido;
 
     const [pacientes] = await pool.execute(
-      `SELECT pp.id, pp.dni, pp.nombre_completo, pp.cargo, pp.area
+      `SELECT pp.id, pp.dni, pp.nombre_completo, pp.cargo, pp.area,
+              pp.emo_tipo, pp.emo_perfil_id, pp.perfiles_aplicados_json
        FROM pedido_pacientes pp
        WHERE pp.pedido_id = ?
        ORDER BY pp.nombre_completo`,
@@ -464,12 +465,33 @@ const obtenerPacientesExamenes = async (req, res) => {
       total_examenes_pospuestos += pospuestosPaciente;
       total_examenes_pendientes += pendientesPaciente;
 
+      let perfiles_aplicados = [];
+      try {
+        const raw = p.perfiles_aplicados_json;
+        const parsed = raw && typeof raw === 'string' ? JSON.parse(raw) : raw;
+        if (Array.isArray(parsed)) {
+          perfiles_aplicados = parsed
+            .filter((x) => x && typeof x === 'object')
+            .map((x) => ({
+              emo_perfil_id: Number(x.emo_perfil_id),
+              perfil_nombre: String(x.perfil_nombre ?? ''),
+              emo_tipo: x.emo_tipo ?? null,
+            }))
+            .filter((x) => Number.isFinite(x.emo_perfil_id) && x.emo_perfil_id > 0);
+        }
+      } catch {
+        perfiles_aplicados = [];
+      }
+
       resultado.push(sanitizeForJson({
         id: p.id,
         dni: p.dni,
         nombre_completo: p.nombre_completo,
         cargo: p.cargo,
         area: p.area,
+        emo_tipo: p.emo_tipo ?? null,
+        emo_perfil_id: p.emo_perfil_id ?? null,
+        perfiles_aplicados,
         examenes: examenesList,
         examenes_completados: completadosPaciente,
         examenes_ausentes: ausentesPaciente,

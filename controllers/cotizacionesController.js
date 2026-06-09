@@ -466,33 +466,7 @@ const createCotizacion = async (req, res) => {
         [cotizacionId]
       );
 
-      // Notificar a los clientes de la empresa del pedido (best-effort, no rompe la respuesta).
-      try {
-        const empresaIdPedido = pedido[0].empresa_id;
-        const conn2 = await pool.getConnection();
-        try {
-          await emitirNotificacionAClientesDeEmpresa(conn2, {
-            empresaId: empresaIdPedido,
-            tipo: 'COTIZACION_CREADA',
-            titulo: `Nueva cotización ${numero_cotizacion}`,
-            mensaje:
-              `Se creó la cotización ${numero_cotizacion} para tu empresa con ` +
-              `${itemsNorm.length} ítem(s) por un total de S/ ${Number(total).toFixed(2)}.`,
-            contextoJson: {
-              cotizacion_id: cotizacionId,
-              numero_cotizacion,
-              pedido_id,
-              total: Number(total),
-              n_items: itemsNorm.length,
-            },
-            remitenteUsuarioId: req.user ? req.user.id : null,
-          });
-        } finally {
-          conn2.release();
-        }
-      } catch (notifErr) {
-        console.warn('No se pudo emitir notificación de cotización creada:', notifErr?.message);
-      }
+      // La notificación al cliente se emite al pasar a ENVIADA_AL_CLIENTE (evita duplicar avisos).
 
       res.status(201).json({
         message: 'Cotización creada exitosamente',
@@ -701,7 +675,9 @@ const updateCotizacion = async (req, res) => {
             ]
           );
         } else {
-          const incluirNotasManager = estado === 'ENVIADA_AL_MANAGER' && notas_manager !== undefined;
+          const incluirNotasManager =
+            (estado === 'ENVIADA_AL_MANAGER' || estado === 'ENVIADA_AL_CLIENTE') &&
+            notas_manager !== undefined;
           const sql = incluirNotasManager
             ? 'UPDATE cotizaciones SET estado = ?, fecha_envio = IF(?, NOW(), fecha_envio), fecha_aprobacion = IF(?, NOW(), fecha_aprobacion), solicitud_manager_pendiente = COALESCE(?, solicitud_manager_pendiente), mensaje_rechazo = COALESCE(?, mensaje_rechazo), notas_manager = COALESCE(?, notas_manager) WHERE id = ?'
             : 'UPDATE cotizaciones SET estado = ?, fecha_envio = IF(?, NOW(), fecha_envio), fecha_aprobacion = IF(?, NOW(), fecha_aprobacion), solicitud_manager_pendiente = COALESCE(?, solicitud_manager_pendiente), mensaje_rechazo = COALESCE(?, mensaje_rechazo) WHERE id = ?';
@@ -971,7 +947,12 @@ const updateEstadoCotizacion = async (req, res) => {
       }
 
       const esAprobada = estado === 'APROBADA' || estado === 'APROBADA_POR_MANAGER';
-      const incluirNotasManager = notas_manager !== undefined && (estado === 'APROBADA_POR_MANAGER' || estado === 'APROBADA' || estado === 'ENVIADA_AL_MANAGER');
+      const incluirNotasManager =
+        notas_manager !== undefined &&
+        (estado === 'APROBADA_POR_MANAGER' ||
+          estado === 'APROBADA' ||
+          estado === 'ENVIADA_AL_MANAGER' ||
+          estado === 'ENVIADA_AL_CLIENTE');
       if (incluirNotasManager) {
         await connection.execute(
           'UPDATE cotizaciones SET estado = ?, mensaje_rechazo = COALESCE(?, mensaje_rechazo), notas_manager = COALESCE(?, notas_manager), fecha_envio = IF(?, NOW(), fecha_envio), fecha_aprobacion = IF(?, NOW(), fecha_aprobacion) WHERE id = ? AND estado = ?',
@@ -1154,8 +1135,8 @@ const updateEstadoCotizacion = async (req, res) => {
               await emitirNotificacionAClientesDeEmpresa(conn2, {
                 empresaId: empresaIdPedido,
                 tipo: 'COTIZACION_CREADA',
-                titulo: `Cotización ${numeroCotizacion} lista para tu revisión`,
-                mensaje: 'El vendedor te envió una cotización para que la apruebes o rechaces.',
+                titulo: `Cotización ${numeroCotizacion} lista para tu aprobación`,
+                mensaje: 'El vendedor te envió una cotización para tu revisión y aprobación.',
                 contextoJson: {
                   evento: 'COTIZACION_ENVIADA_AL_CLIENTE',
                   cotizacion_id: cot.id,
