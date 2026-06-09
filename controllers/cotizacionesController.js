@@ -817,9 +817,10 @@ const updateCotizacion = async (req, res) => {
 
       const [updated] = await pool.execute('SELECT * FROM cotizaciones WHERE id = ?', [id]);
 
-      // Notificación por WhatsApp al vendedor (best-effort, no bloquea respuesta).
-      // Solo dispara cuando el cliente envía SU cotización (creador_tipo='CLIENTE'
-      // y estado='ENVIADA'); la función decide internamente si corresponde.
+      // Notificación por WhatsApp (best-effort, no bloquea respuesta):
+      //   - cotización del CLIENTE en ENVIADA → al vendedor
+      //   - cotización en ENVIADA_AL_MANAGER  → al manager (variación de precio)
+      // La función decide internamente si dispara.
       try {
         const { dispararEnvioSiCorresponde } = require('./whatsappController');
         dispararEnvioSiCorresponde(Number(id)).catch((e) =>
@@ -1265,9 +1266,9 @@ const updateEstadoCotizacion = async (req, res) => {
         console.warn('No se pudo emitir notificación de cambio de estado:', notifErr?.message);
       }
 
-      // Notificación por WhatsApp al vendedor: solo aplica cuando el cliente
-      // envía SU cotización al vendedor (estado='ENVIADA', creador_tipo='CLIENTE').
-      // Best-effort, no bloquea la respuesta HTTP.
+      // Notificación por WhatsApp (best-effort, no bloquea respuesta):
+      //   - cotización del CLIENTE en ENVIADA → al vendedor
+      //   - cotización en ENVIADA_AL_MANAGER  → al manager (variación de precio)
       try {
         const { dispararEnvioSiCorresponde } = require('./whatsappController');
         dispararEnvioSiCorresponde(Number(id)).catch((e) =>

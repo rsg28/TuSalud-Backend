@@ -1394,6 +1394,38 @@ const aplicarAjustesDirectos = async (req, res) => {
   }
 };
 
+/**
+ * GET /api/pedidos/:pedido_id/cobertura-cotizacion
+ *
+ * Compara las cantidades necesarias (pacientes × exámenes asignados activos)
+ * contra las cantidades efectivamente presentes en la cotización principal.
+ * Pensado para que el manager/vendedor detecte exámenes con cantidades de
+ * más o de menos que pasarían desapercibidos.
+ */
+const obtenerCoberturaCotizacion = async (req, res) => {
+  try {
+    const pedidoId = Number(req.params.pedido_id);
+    if (!Number.isInteger(pedidoId) || pedidoId <= 0) {
+      return res.status(400).json({ error: 'pedido_id inválido' });
+    }
+    const [pedidos] = await pool.execute(
+      'SELECT id, numero_pedido FROM pedidos WHERE id = ?',
+      [pedidoId]
+    );
+    if (pedidos.length === 0) {
+      return res.status(404).json({ error: 'Pedido no encontrado' });
+    }
+    const cobertura = await seguimientoSvc.calcularCoberturaCotizacion(pedidoId);
+    return res.json({
+      numero_pedido: pedidos[0].numero_pedido,
+      ...cobertura,
+    });
+  } catch (err) {
+    console.error('Error al calcular cobertura de cotización:', err);
+    res.status(500).json({ error: 'Error al calcular cobertura de cotización' });
+  }
+};
+
 module.exports = {
   listarPedidos,
   listarMisPedidos,
@@ -1417,4 +1449,5 @@ module.exports = {
   obtenerArticulosPendientes,
   obtenerAjustesSugeridos,
   aplicarAjustesDirectos,
+  obtenerCoberturaCotizacion,
 };

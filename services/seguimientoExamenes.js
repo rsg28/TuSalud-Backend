@@ -541,6 +541,157 @@ async function aplicarAjustesDirectos(pedidoId, opts = {}) {
   }
 }
 
+/**
+ * Calcula la cobertura entre las cantidades que el pedido necesita (a partir
+ * de pacientes × exámenes asignados) y las cantidades efectivamente cotizadas
+ * en la cotización principal del pedido (no se cuentan complementarias).
+ *
+ * Sirve para detectar errores honestos (alguien bajó la cantidad de un examen
+ * por accidente) o cargas excesivas (más cantidad de la que realmente hay
+ * pacientes para ese examen).
+ *
+ * Devuelve, por cada examen del pedido:
+ *   { examen_id, examen_nombre, necesarios, cotizados, diferencia, severidad }
+ *
+ * - necesarios: cantidad de (paciente × examen) asignados al pedido (no incluye
+ *   estados AUSENTE / NO_REALIZADO / POSPUESTO).
+ * - cotizados: cantidad sumada en cotización principal, incluyendo exámenes
+ *   sueltos y los exámenes dentro de PERFILES (cada perfil aporta cantidad×1
+ *   por examen del snapshot).
+ * - severidad: 'OK' | 'FALTANTE' | 'EXCESO'.
+ *
+ * Si no hay cotización principal devuelve `tiene_cotizacion: false`.
+ */
+async function calcularCoberturaCotizacion(pedidoId) {
+  const pid = Number(pedidoId);
+  if (!Number.isInteger(pid) || pid <= 0) {
+    throw Object.assign(new Error('pedidoId inválido'), { code: 'PARAM_INVALIDO' });
+  }
+
+  // 1) Cotización principal del pedido.
+  const [pedidoRows] = await pool.execute(
+    `SELECT cotizacion_principal_id FROM pedidos WHERE id = ? LIMIT 1`,
+    [pid]
+  );
+  const cotizacionPrincipalId = pedidoRows[0]?.cotizacion_principal_id || null;
+  if (!cotizacionPrincipalId) {
+    return {
+      pedido_id: pid,
+      tiene_cotizacion: false,
+      items: [],
+      resumen: { ok: 0, faltantes: 0, excesos: 0 },
+    };
+  }
+
+  // 2) Cantidades NECESARIAS por examen (según pacientes activos del pedido).
+  // Solo cuentan los exámenes que aún se esperan realizar; los AUSENTE /
+  // NO_REALIZADO se gestionan vía calcularAjustesSugeridos.
+  const [necesariosRows] = await pool.execute(
+    `SELECT pea.examen_id, COUNT(*) AS necesarios,
+            COALESCE(ex.nombre, '(examen)') AS examen_nombre
+       FROM paciente_examen_asignado pea
+       JOIN pedido_pacientes pp ON pp.id = pea.paciente_id
+       LEFT JOIN examenes ex ON ex.id = pea.examen_id
+      WHERE pp.pedido_id = ?
+        AND pea.estado IN ('PENDIENTE', 'COMPLETADO', 'POSPUESTO')
+      GROUP BY pea.examen_id, ex.nombre`,
+    [pid]
+  );
+
+  // 3) Cantidades COTIZADAS por examen (de la cotización principal).
+  const [itemsRows] = await pool.execute(
+    `SELECT tipo_item, examen_id, perfil_id, cantidad, examenes_snapshot_json
+       FROM cotizacion_items
+      WHERE cotizacion_id = ?`,
+    [cotizacionPrincipalId]
+  );
+
+  const cotizadosPorExamen = new Map();
+  for (const it of itemsRows) {
+    const cantidad = Number(it.cantidad) || 0;
+    if (cantidad <= 0) continue;
+    if (it.tipo_item === 'EXAMEN' && it.examen_id) {
+      const id = Number(it.examen_id);
+      cotizadosPorExamen.set(id, (cotizadosPorExamen.get(id) || 0) + cantidad);
+    } else if (it.tipo_item === 'PERFIL' && it.examenes_snapshot_json) {
+      let snapshot;
+      try {
+        snapshot = JSON.parse(it.examenes_snapshot_json);
+      } catch {
+        snapshot = null;
+      }
+      const lista = Array.isArray(snapshot?.examenes) ? snapshot.examenes
+                  : Array.isArray(snapshot) ? snapshot : [];
+      for (const ex of lista) {
+        const exId = Number(ex.examen_id || ex.id);
+        if (!exId) continue;
+        cotizadosPorExamen.set(exId, (cotizadosPorExamen.get(exId) || 0) + cantidad);
+      }
+    }
+  }
+
+  // 4) Combinar: unión de exámenes necesarios + cotizados.
+  const examenesIds = new Set();
+  const nombrePorExamen = new Map();
+  for (const r of necesariosRows) {
+    examenesIds.add(Number(r.examen_id));
+    nombrePorExamen.set(Number(r.examen_id), r.examen_nombre);
+  }
+  for (const id of cotizadosPorExamen.keys()) examenesIds.add(id);
+
+  // Para exámenes solo cotizados (no asignados a paciente alguno) buscamos nombre.
+  const sinNombre = Array.from(examenesIds).filter((id) => !nombrePorExamen.has(id));
+  if (sinNombre.length > 0) {
+    const placeholders = sinNombre.map(() => '?').join(',');
+    const [rows] = await pool.execute(
+      `SELECT id, nombre FROM examenes WHERE id IN (${placeholders})`,
+      sinNombre
+    );
+    for (const r of rows) nombrePorExamen.set(Number(r.id), r.nombre);
+  }
+
+  const necesariosPorExamen = new Map(
+    necesariosRows.map((r) => [Number(r.examen_id), Number(r.necesarios) || 0])
+  );
+
+  const items = [];
+  let okCount = 0;
+  let faltantes = 0;
+  let excesos = 0;
+  const idsOrdenados = Array.from(examenesIds).sort((a, b) => a - b);
+  for (const examenId of idsOrdenados) {
+    const necesarios = necesariosPorExamen.get(examenId) || 0;
+    const cotizados = cotizadosPorExamen.get(examenId) || 0;
+    const diferencia = cotizados - necesarios;
+    let severidad = 'OK';
+    if (diferencia < 0) {
+      severidad = 'FALTANTE';
+      faltantes += 1;
+    } else if (diferencia > 0) {
+      severidad = 'EXCESO';
+      excesos += 1;
+    } else {
+      okCount += 1;
+    }
+    items.push({
+      examen_id: examenId,
+      examen_nombre: nombrePorExamen.get(examenId) || '(examen)',
+      necesarios,
+      cotizados,
+      diferencia,
+      severidad,
+    });
+  }
+
+  return {
+    pedido_id: pid,
+    cotizacion_principal_id: Number(cotizacionPrincipalId),
+    tiene_cotizacion: true,
+    items,
+    resumen: { ok: okCount, faltantes, excesos },
+  };
+}
+
 module.exports = {
   ESTADOS_VALIDOS: Array.from(ESTADOS_VALIDOS),
   FUENTES_VALIDAS: Array.from(FUENTES_VALIDAS),
@@ -549,4 +700,5 @@ module.exports = {
   actualizarEstadoMasivoPaciente,
   calcularAjustesSugeridos,
   aplicarAjustesDirectos,
+  calcularCoberturaCotizacion,
 };

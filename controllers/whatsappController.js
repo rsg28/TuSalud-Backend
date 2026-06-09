@@ -165,9 +165,47 @@ function smsFallbackHabilitado() {
 }
 
 /**
+ * Resuelve a quién mandarle la solicitud de aprobación.
+ *
+ * Si `opts.preferirRol === 'manager'`, busca primero un manager activo con
+ * teléfono (caso típico: cotización del vendedor con variación de precio
+ * significativa que requiere revisión).
+ *
+ * Si no, intenta primero al vendedor del pedido (caso típico: cotización
+ * creada por un cliente que va al vendedor asignado), y cae a manager/vendedor
+ * activo o al fallback de .env.
+ *
+ * @param {number} cotizacionId
+ * @param {{preferirRol?: 'manager'|'vendedor'}} [opts]
  * @returns {Promise<{telefono: string|null, usuarioId: number|null, rol: string|null}>}
  */
-async function resolverDestinatario(cotizacionId) {
+async function resolverDestinatario(cotizacionId, opts = {}) {
+  const preferirRol = opts.preferirRol === 'manager' ? 'manager' : null;
+
+  // Si se exige manager, lo buscamos primero.
+  if (preferirRol === 'manager') {
+    const [managers] = await pool.execute(
+      `SELECT id, telefono FROM usuarios
+        WHERE rol = 'manager' AND activo = 1
+          AND telefono IS NOT NULL AND TRIM(telefono) <> ''
+        ORDER BY id ASC
+        LIMIT 1`
+    );
+    if (managers.length > 0) {
+      return {
+        telefono: normalizarTelefono(managers[0].telefono),
+        usuarioId: managers[0].id,
+        rol: 'manager',
+      };
+    }
+    // Sin manager con teléfono → fallback hacia env, sin caer al vendedor.
+    const fallback = normalizarTelefono(process.env.WHATSAPP_MANAGER_FALLBACK_PHONE || '');
+    if (fallback) {
+      return { telefono: fallback, usuarioId: null, rol: 'manager' };
+    }
+    return { telefono: null, usuarioId: null, rol: null };
+  }
+
   const [rows] = await pool.execute(
     `SELECT p.vendedor_id, u.telefono AS vendedor_telefono
        FROM cotizaciones c
@@ -284,14 +322,19 @@ function limpiarArchivosVencidos() {
  * Best-effort: errores se loggean y se devuelven en el objeto, nunca
  * propagan al endpoint que subió la cotización.
  */
-async function enviarCotizacionAprobacion(cotizacionId) {
+async function enviarCotizacionAprobacion(cotizacionId, opts = {}) {
   try {
-    const destino = await resolverDestinatario(cotizacionId);
+    const destino = await resolverDestinatario(cotizacionId, {
+      preferirRol: opts.preferirRol,
+    });
     if (!destino.telefono) {
       return {
         ok: false,
         skipped: true,
-        reason: 'No hay vendedor con teléfono ni WHATSAPP_MANAGER_FALLBACK_PHONE configurado.',
+        reason:
+          opts.preferirRol === 'manager'
+            ? 'No hay manager activo con teléfono ni WHATSAPP_MANAGER_FALLBACK_PHONE configurado.'
+            : 'No hay vendedor con teléfono ni WHATSAPP_MANAGER_FALLBACK_PHONE configurado.',
       };
     }
 
@@ -876,9 +919,17 @@ async function reenviarSolicitud(req, res) {
 }
 
 /**
- * Hook idempotente llamado desde cotizacionesController. Solo dispara el envío
- * cuando estado='ENVIADA' && creador_tipo='CLIENTE' && no hay pendientes
- * abiertas para esa cotización.
+ * Hook idempotente llamado desde cotizacionesController. Dispara WhatsApp
+ * según el estado actual de la cotización:
+ *
+ *   - estado='ENVIADA' && creador_tipo='CLIENTE'  → al VENDEDOR
+ *     (el cliente subió una cotización y necesita aprobación del vendedor).
+ *   - estado='ENVIADA_AL_MANAGER'                  → al MANAGER
+ *     (el vendedor armó una cotización con variación de precio significativa
+ *     y la mandó a revisar; el manager aprueba/rechaza igual que el vendedor).
+ *
+ * En cualquier otro caso, se omite. Es idempotente: si ya hay una
+ * conversación PENDIENTE para la misma cotización, no envía nada.
  */
 async function dispararEnvioSiCorresponde(cotizacionId) {
   try {
@@ -899,7 +950,12 @@ async function dispararEnvioSiCorresponde(cotizacionId) {
     }
     const { estado, creador_tipo: creadorTipo, pendientes_abiertas: pend } = rows[0];
 
-    if (estado !== 'ENVIADA' || creadorTipo !== 'CLIENTE') {
+    let preferirRol = null;
+    if (estado === 'ENVIADA' && creadorTipo === 'CLIENTE') {
+      preferirRol = null; // al vendedor (lógica por defecto)
+    } else if (estado === 'ENVIADA_AL_MANAGER') {
+      preferirRol = 'manager';
+    } else {
       const reason = `estado=${estado}, creador=${creadorTipo}`;
       console.info('[whatsapp] envío omitido:', reason, { cotizacionId });
       return { ok: false, skipped: true, reason };
@@ -910,7 +966,7 @@ async function dispararEnvioSiCorresponde(cotizacionId) {
       return { ok: false, skipped: true, reason };
     }
 
-    const out = await enviarCotizacionAprobacion(cotizacionId);
+    const out = await enviarCotizacionAprobacion(cotizacionId, { preferirRol });
     if (out.skipped || !out.ok) {
       console.warn('[whatsapp] envío no realizado:', out.reason || out.error, { cotizacionId });
     }

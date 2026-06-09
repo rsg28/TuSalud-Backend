@@ -55,6 +55,19 @@ router.post(
   pedidosController.aplicarAjustesDirectos
 );
 
+/**
+ * GET /api/pedidos/:pedido_id/cobertura-cotizacion
+ * Verifica si la cotización principal cubre exactamente los exámenes que
+ * los pacientes del pedido tienen asignados (detecta cantidades de más o
+ * de menos). Solo vendedor y manager.
+ */
+router.get(
+  '/:pedido_id/cobertura-cotizacion',
+  authenticateToken,
+  requireRole('vendedor', 'manager'),
+  pedidosController.obtenerCoberturaCotizacion
+);
+
 // GET /api/pedidos/:pedido_id/estado — Solo el estado del pedido
 router.get('/:pedido_id/estado', authenticateToken, pedidosController.obtenerEstadoPedido);
 
