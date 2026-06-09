@@ -1323,6 +1323,50 @@ const cancelarPedido = async (req, res) => {
 };
 
 /**
+ * Elimina permanentemente un pedido cancelado y todo lo asociado (cotizaciones,
+ * facturas, pacientes, ítems). Solo manager; el pedido debe estar en CANCELADO.
+ */
+const eliminarPedido = async (req, res) => {
+  const connection = await pool.getConnection();
+  try {
+    const pedidoId = Number(req.params.pedido_id);
+    if (!Number.isInteger(pedidoId) || pedidoId <= 0) {
+      return res.status(400).json({ error: 'pedido_id inválido' });
+    }
+
+    const [rows] = await connection.execute(
+      'SELECT id, estado, numero_pedido FROM pedidos WHERE id = ?',
+      [pedidoId]
+    );
+    if (rows.length === 0) {
+      return res.status(404).json({ error: 'Pedido no encontrado' });
+    }
+    const estado = String(rows[0].estado ?? '');
+    if (estado !== 'CANCELADO') {
+      return res.status(400).json({
+        error: 'Solo se pueden eliminar pedidos en estado CANCELADO',
+        estado,
+      });
+    }
+
+    await connection.beginTransaction();
+    await cancelarPedidoEnConnection(connection, pedidoId);
+    await connection.commit();
+    res.json({
+      message: 'Pedido eliminado permanentemente de la base de datos',
+      numero_pedido: rows[0].numero_pedido,
+      hard_delete: true,
+    });
+  } catch (error) {
+    await connection.rollback();
+    console.error('Error al eliminar pedido:', error);
+    res.status(500).json({ error: 'Error al eliminar pedido' });
+  } finally {
+    connection.release();
+  }
+};
+
+/**
  * GET /api/pedidos/:pedido_id/ajustes-sugeridos
  *
  * Devuelve los exámenes en estado AUSENTE / NO_REALIZADO con el monto
@@ -1444,6 +1488,7 @@ module.exports = {
   cargarEmpleados,
   marcarCompletado,
   cancelarPedido,
+  eliminarPedido,
   marcarPedidoCanceladoEnConnection,
   cancelarPedidoEnConnection,
   obtenerArticulosPendientes,

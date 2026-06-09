@@ -106,4 +106,7 @@ router.post(
 // cancelación en /api/solicitudes-cancelacion que el vendedor/manager aprueba.
 router.post('/:pedido_id/cancelar', authenticateToken, requireRole('vendedor', 'manager'), pedidosController.cancelarPedido);
 
+// DELETE /api/pedidos/:pedido_id — Borrado permanente (solo manager, solo CANCELADO).
+router.delete('/:pedido_id', authenticateToken, requireRole('manager'), pedidosController.eliminarPedido);
+
 module.exports = router;
