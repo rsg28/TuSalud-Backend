@@ -1,15 +1,13 @@
 const pool = require('../config/database');
-const { fetchPrecioExamen } = require('../utils/examenPrecio');
 const { crearCotizacionComplementariaConConnection } = require('./cotizacionesController');
-const { persistirSnapshotPaciente: persistirSnapshotPacienteBase } = require('../utils/perfilSnapshot');
-
-/**
- * Congela el snapshot histórico del paciente tras añadirle exámenes desde una
- * solicitud aprobada. Delega en el helper compartido para evitar duplicación.
- */
-function persistirSnapshotPaciente(connection, pacienteId) {
-  return persistirSnapshotPacienteBase(connection, pacienteId, { tag: 'solicitudes-agregar' });
-}
+const {
+  helpers: { emitirNotificacionAVendedorDePedido },
+} = require('./notificacionesController');
+const {
+  aplicarSolicitudAgregarAlPedido,
+  buildItemsComplementariaDesdeSolicitud,
+  vincularComplementariaASolicitud,
+} = require('../services/solicitudAgregarPedido');
 
 function sanitizeForJson(obj) {
   if (obj === null || obj === undefined) return obj;
@@ -48,16 +46,32 @@ const listarPorPedido = async (req, res) => {
     const access = await puedeAccederPedido(req, pedido_id);
     if (!access.ok) return res.status(access.status).json({ error: access.error });
 
-    const [solicitudes] = await pool.execute(
-      `SELECT sa.id, sa.pedido_id, sa.cliente_usuario_id, sa.estado, sa.mensaje_cliente, sa.mensaje_rechazo,
-              sa.fecha_solicitud, sa.fecha_revision, sa.revisado_por_usuario_id,
-              u.nombre_completo AS cliente_nombre
-       FROM solicitudes_agregar sa
-       LEFT JOIN usuarios u ON u.id = sa.cliente_usuario_id
-       WHERE sa.pedido_id = ?
-       ORDER BY sa.fecha_solicitud DESC`,
-      [pedido_id]
-    );
+    let solicitudes;
+    try {
+      [solicitudes] = await pool.execute(
+        `SELECT sa.id, sa.pedido_id, sa.cliente_usuario_id, sa.estado, sa.mensaje_cliente, sa.mensaje_rechazo,
+                sa.cotizacion_complementaria_id,
+                sa.fecha_solicitud, sa.fecha_revision, sa.revisado_por_usuario_id,
+                u.nombre_completo AS cliente_nombre
+         FROM solicitudes_agregar sa
+         LEFT JOIN usuarios u ON u.id = sa.cliente_usuario_id
+         WHERE sa.pedido_id = ?
+         ORDER BY sa.fecha_solicitud DESC`,
+        [pedido_id]
+      );
+    } catch (colErr) {
+      if (colErr?.code !== 'ER_BAD_FIELD_ERROR') throw colErr;
+      [solicitudes] = await pool.execute(
+        `SELECT sa.id, sa.pedido_id, sa.cliente_usuario_id, sa.estado, sa.mensaje_cliente, sa.mensaje_rechazo,
+                sa.fecha_solicitud, sa.fecha_revision, sa.revisado_por_usuario_id,
+                u.nombre_completo AS cliente_nombre
+         FROM solicitudes_agregar sa
+         LEFT JOIN usuarios u ON u.id = sa.cliente_usuario_id
+         WHERE sa.pedido_id = ?
+         ORDER BY sa.fecha_solicitud DESC`,
+        [pedido_id]
+      );
+    }
     res.json({ solicitudes: sanitizeForJson(solicitudes) });
   } catch (err) {
     console.error('Error listar solicitudes por pedido:', err);
@@ -171,11 +185,71 @@ const crear = async (req, res) => {
         [solicitud_id, solicitud_agregar_paciente_id, examen_id, cantidad]
       );
     }
+    const [pedidoCot] = await connection.execute(
+      'SELECT cotizacion_principal_id FROM pedidos WHERE id = ?',
+      [pedido_id]
+    );
+    const cotizacionPrincipalId = pedidoCot[0]?.cotizacion_principal_id ?? null;
+    let cotizacionComplementariaId = null;
+
+    if (cotizacionPrincipalId != null) {
+      const itemsComp = await buildItemsComplementariaDesdeSolicitud(
+        connection,
+        solicitud_id,
+        pedido_id
+      );
+      if (itemsComp.length > 0) {
+        const { cotizacionId, numero_cotizacion } = await crearCotizacionComplementariaConConnection(
+          connection,
+          {
+            pedido_id,
+            cotizacion_base_id: cotizacionPrincipalId,
+            items: itemsComp,
+            creador_id: req.user.id,
+            creador_tipo: 'CLIENTE',
+          }
+        );
+        cotizacionComplementariaId = cotizacionId;
+        await connection.execute(
+          `UPDATE cotizaciones
+           SET estado = 'ENVIADA', fecha_envio = NOW(),
+               notas_manager = COALESCE(?, notas_manager)
+           WHERE id = ?`,
+          [mensaje_cliente || null, cotizacionId]
+        );
+        await vincularComplementariaASolicitud(connection, solicitud_id, cotizacionId);
+
+        try {
+          await emitirNotificacionAVendedorDePedido(connection, {
+            pedidoId: pedido_id,
+            tipo: 'MENSAJE',
+            titulo: 'Solicitud de cotización complementaria recibida',
+            mensaje: mensaje_cliente
+              ? `El cliente solicitó agregar exámenes con cotización complementaria ${numero_cotizacion}. Mensaje: ${String(mensaje_cliente).slice(0, 120)}`
+              : `El cliente solicitó agregar exámenes. Revisa la cotización complementaria ${numero_cotizacion}.`,
+            contextoJson: {
+              evento: 'SOLICITUD_COTIZACION_COMPLEMENTARIA',
+              solicitud_id,
+              cotizacion_id: cotizacionId,
+              pedido_id,
+              numero_cotizacion,
+            },
+            remitenteUsuarioId: req.user.id,
+          });
+        } catch (notifErr) {
+          console.warn('[solicitudes] notificación al vendedor falló:', notifErr?.message || notifErr);
+        }
+      }
+    }
+
     await connection.commit();
     connection.release();
 
     const [newSol] = await pool.execute('SELECT * FROM solicitudes_agregar WHERE id = ?', [solicitud_id]);
-    res.status(201).json({ solicitud: sanitizeForJson(newSol[0]) });
+    res.status(201).json({
+      solicitud: sanitizeForJson(newSol[0]),
+      cotizacion_complementaria_id: cotizacionComplementariaId,
+    });
   } catch (err) {
     await connection.rollback();
     connection.release();
@@ -203,20 +277,31 @@ const actualizarEstado = async (req, res) => {
       return res.status(400).json({ error: 'mensaje_rechazo es requerido al rechazar' });
     }
 
-    const [sols] = await connection.execute(
-      'SELECT id, pedido_id, estado FROM solicitudes_agregar WHERE id = ?',
-      [id]
-    );
-    if (sols.length === 0) {
+    let solRow;
+    try {
+      const [sols] = await connection.execute(
+        'SELECT id, pedido_id, estado, cotizacion_complementaria_id FROM solicitudes_agregar WHERE id = ?',
+        [id]
+      );
+      solRow = sols[0];
+    } catch (colErr) {
+      if (colErr?.code !== 'ER_BAD_FIELD_ERROR') throw colErr;
+      const [sols] = await connection.execute(
+        'SELECT id, pedido_id, estado FROM solicitudes_agregar WHERE id = ?',
+        [id]
+      );
+      solRow = sols[0] ? { ...sols[0], cotizacion_complementaria_id: null } : null;
+    }
+    if (!solRow) {
       connection.release();
       return res.status(404).json({ error: 'Solicitud no encontrada' });
     }
-    const access = await puedeAccederPedido(req, sols[0].pedido_id);
+    const access = await puedeAccederPedido(req, solRow.pedido_id);
     if (!access.ok) {
       connection.release();
       return res.status(access.status).json({ error: access.error });
     }
-    if (sols[0].estado !== 'PENDIENTE') {
+    if (solRow.estado !== 'PENDIENTE') {
       connection.release();
       return res.status(400).json({ error: 'La solicitud ya fue procesada' });
     }
@@ -224,7 +309,7 @@ const actualizarEstado = async (req, res) => {
     if (estadoUpper === 'APROBADA') {
       const [pedidoEstado] = await connection.execute(
         'SELECT estado FROM pedidos WHERE id = ?',
-        [sols[0].pedido_id]
+        [solRow.pedido_id]
       );
       const estPed = pedidoEstado[0]?.estado;
       if (estPed && ['COMPLETADO', 'CANCELADO'].includes(estPed)) {
@@ -235,135 +320,32 @@ const actualizarEstado = async (req, res) => {
       }
     }
 
+    const cotizacionComplementariaId = solRow.cotizacion_complementaria_id ?? null;
+
+    if (estadoUpper === 'APROBADA' && cotizacionComplementariaId) {
+      connection.release();
+      return res.status(400).json({
+        error:
+          'Esta solicitud tiene una cotización complementaria pendiente. Use «Revisar» para aprobarla desde la cotización.',
+        cotizacion_complementaria_id: cotizacionComplementariaId,
+      });
+    }
+
     await connection.beginTransaction();
 
     if (estadoUpper === 'APROBADA') {
-      const pedido_id = sols[0].pedido_id;
-      const [pedidoRow] = await connection.execute('SELECT id, sede_id, total_empleados FROM pedidos WHERE id = ?', [pedido_id]);
-      const sede_id = pedidoRow[0].sede_id;
+      await aplicarSolicitudAgregarAlPedido(connection, {
+        solicitudId: id,
+        usuarioId: req.user.id,
+        usuarioNombre: req.user.nombre_completo || null,
+        crearComplementariaBorrador: true,
+      });
+    }
 
-      const [pacientesRows] = await connection.execute(
-        'SELECT id, pedido_paciente_id, dni, nombre_completo, cargo, area FROM solicitud_agregar_paciente WHERE solicitud_id = ? ORDER BY id',
-        [id]
-      );
-      const mapSapIdToPacienteId = {};
-      for (const sap of pacientesRows) {
-        if (sap.pedido_paciente_id != null) {
-          mapSapIdToPacienteId[sap.id] = sap.pedido_paciente_id;
-        } else if (sap.dni) {
-          const [insP] = await connection.execute(
-            `INSERT INTO pedido_pacientes (pedido_id, dni, nombre_completo, cargo, area) VALUES (?, ?, ?, ?, ?)`,
-            [pedido_id, sap.dni, sap.nombre_completo || 'Sin nombre', sap.cargo, sap.area]
-          );
-          mapSapIdToPacienteId[sap.id] = insP.insertId;
-        }
-      }
-
-      const [examenesRows] = await connection.execute(
-        'SELECT id, solicitud_agregar_paciente_id, examen_id, cantidad FROM solicitud_agregar_examenes WHERE solicitud_id = ?',
-        [id]
-      );
-      const [pacientesPedido] = await connection.execute(
-        'SELECT id FROM pedido_pacientes WHERE pedido_id = ?',
-        [pedido_id]
-      );
-      const todosPacienteIds = pacientesPedido.map((p) => p.id);
-      const numPacientes =
-        Number(pedidoRow[0].total_empleados) || todosPacienteIds.length || 0;
-      const itemsComplementaria = new Map();
-
-      for (const row of examenesRows) {
-        const examen_id = row.examen_id;
-        const cantidad = Math.max(1, row.cantidad || 1);
-        const precio_base = await fetchPrecioExamen(connection, examen_id, sede_id, numPacientes);
-
-        // Si la solicitud de examen es "para todos" (sin paciente específico),
-        // la cantidad total para el pedido y la cotización debe reflejar
-        // el número de pacientes afectados.
-        const multiplicador =
-          row.solicitud_agregar_paciente_id == null ? todosPacienteIds.length || 1 : 1;
-        const cantidadTotal = cantidad * multiplicador;
-
-        if (!itemsComplementaria.has(examen_id)) {
-          itemsComplementaria.set(examen_id, { cantidad: 0, precio_base });
-        }
-        itemsComplementaria.get(examen_id).cantidad += cantidadTotal;
-
-        // Item de tipo EXAMEN (las solicitudes-agregar sólo trabajan con exámenes
-        // sueltos por ahora). UNIQUE (pedido_id, item_key) consolida duplicados.
-        await connection.execute(
-          `INSERT INTO pedido_items
-             (pedido_id, tipo_item, perfil_id, tipo_emo, examen_id, cantidad, precio_base)
-           VALUES (?, 'EXAMEN', NULL, NULL, ?, ?, ?)
-           ON DUPLICATE KEY UPDATE cantidad = cantidad + VALUES(cantidad), precio_base = VALUES(precio_base)`,
-          [pedido_id, examen_id, cantidadTotal, precio_base]
-        );
-
-        let targetPacienteIds = [];
-        if (row.solicitud_agregar_paciente_id == null) {
-          targetPacienteIds = todosPacienteIds;
-        } else {
-          const pid = mapSapIdToPacienteId[row.solicitud_agregar_paciente_id];
-          if (pid) targetPacienteIds = [pid];
-        }
-        for (const pacienteId of targetPacienteIds) {
-          await connection.execute(
-            'INSERT IGNORE INTO paciente_examen_asignado (paciente_id, examen_id) VALUES (?, ?)',
-            [pacienteId, examen_id]
-          );
-        }
-      }
-
-      /**
-       * Re-congelamos el snapshot de cada paciente afectado. Lo hacemos una sola
-       * vez por paciente (no por cada examen añadido) para mantener O(N pacientes)
-       * y no O(N pacientes × M exámenes).
-       */
-      const pacientesAfectados = new Set();
-      for (const row of examenesRows) {
-        if (row.solicitud_agregar_paciente_id == null) {
-          for (const pid of todosPacienteIds) pacientesAfectados.add(pid);
-        } else {
-          const pid = mapSapIdToPacienteId[row.solicitud_agregar_paciente_id];
-          if (pid) pacientesAfectados.add(pid);
-        }
-      }
-      for (const pid of pacientesAfectados) {
-        await persistirSnapshotPaciente(connection, pid);
-      }
-
-      const [count] = await connection.execute('SELECT COUNT(*) AS c FROM pedido_pacientes WHERE pedido_id = ?', [pedido_id]);
-      await connection.execute('UPDATE pedidos SET total_empleados = ? WHERE id = ?', [count[0].c, pedido_id]);
-
-      const [pedidoConCot] = await connection.execute('SELECT cotizacion_principal_id FROM pedidos WHERE id = ?', [pedido_id]);
-      const cotizacionPrincipalId = pedidoConCot[0]?.cotizacion_principal_id;
-      if (cotizacionPrincipalId != null && itemsComplementaria.size > 0) {
-        const examenIds = Array.from(itemsComplementaria.keys());
-        const placeholders = examenIds.map(() => '?').join(',');
-        const [nombresRows] = await connection.execute(
-          `SELECT id, nombre FROM examenes WHERE id IN (${placeholders})`,
-          examenIds
-        );
-        const nombresMap = new Map(nombresRows.map((r) => [r.id, r.nombre || 'Examen']));
-        const items = Array.from(itemsComplementaria.entries()).map(([examen_id, { cantidad, precio_base }]) => ({
-          examen_id,
-          nombre: nombresMap.get(examen_id) || 'Examen',
-          cantidad,
-          precio_final: precio_base,
-        }));
-        await crearCotizacionComplementariaConConnection(connection, {
-          pedido_id,
-          cotizacion_base_id: cotizacionPrincipalId,
-          items,
-          creador_id: req.user.id,
-          creador_tipo: 'VENDEDOR',
-        });
-      }
-
+    if (estadoUpper === 'RECHAZADA' && cotizacionComplementariaId) {
       await connection.execute(
-        `INSERT INTO historial_pedido (pedido_id, tipo_evento, descripcion, usuario_id, usuario_nombre)
-         VALUES (?, 'CREACION', ?, ?, ?)`,
-        [pedido_id, 'Solicitud de agregar exámenes aprobada y aplicada al pedido', req.user.id, req.user.nombre_completo || null]
+        `UPDATE cotizaciones SET estado = 'RECHAZADA', mensaje_rechazo = ? WHERE id = ? AND estado IN ('ENVIADA', 'ENVIADA_AL_CLIENTE', 'BORRADOR')`,
+        [mensaje_rechazo || null, cotizacionComplementariaId]
       );
     }
 

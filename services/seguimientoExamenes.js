@@ -607,12 +607,16 @@ async function calcularCoberturaCotizacion(pedidoId) {
   );
 
   const cotizadosPorExamen = new Map();
+  const cotizadosPorPerfil = new Map();
   for (const it of itemsRows) {
     const cantidad = Number(it.cantidad) || 0;
     if (cantidad <= 0) continue;
     if (it.tipo_item === 'EXAMEN' && it.examen_id) {
       const id = Number(it.examen_id);
       cotizadosPorExamen.set(id, (cotizadosPorExamen.get(id) || 0) + cantidad);
+    } else if (it.tipo_item === 'PERFIL' && it.perfil_id && it.tipo_emo) {
+      const k = `${Number(it.perfil_id)}|${String(it.tipo_emo).toUpperCase()}`;
+      cotizadosPorPerfil.set(k, (cotizadosPorPerfil.get(k) || 0) + cantidad);
     } else if (it.tipo_item === 'PERFIL' && it.examenes_snapshot_json) {
       let snapshot;
       try {
@@ -654,6 +658,38 @@ async function calcularCoberturaCotizacion(pedidoId) {
     necesariosRows.map((r) => [Number(r.examen_id), Number(r.necesarios) || 0])
   );
 
+  // Perfiles necesarios según pacientes del pedido (perfiles_aplicados_json + legacy emo_perfil_id).
+  const [pacPerfilRows] = await pool.execute(
+    `SELECT perfiles_aplicados_json, emo_perfil_id, emo_tipo
+       FROM pedido_pacientes
+      WHERE pedido_id = ?`,
+    [pid]
+  );
+  const necesariosPorPerfil = new Map();
+  for (const row of pacPerfilRows) {
+    let entries = [];
+    try {
+      const parsed = row.perfiles_aplicados_json
+        ? JSON.parse(row.perfiles_aplicados_json)
+        : [];
+      entries = Array.isArray(parsed) ? parsed : [];
+    } catch {
+      entries = [];
+    }
+    if (entries.length > 0) {
+      for (const e of entries) {
+        const perfilId = Number(e.emo_perfil_id ?? e.perfil_id);
+        const tipoEmo = String(e.tipo_emo ?? e.emo_tipo ?? row.emo_tipo ?? '').toUpperCase();
+        if (!perfilId || !tipoEmo) continue;
+        const k = `${perfilId}|${tipoEmo}`;
+        necesariosPorPerfil.set(k, (necesariosPorPerfil.get(k) || 0) + 1);
+      }
+    } else if (row.emo_perfil_id && row.emo_tipo) {
+      const k = `${Number(row.emo_perfil_id)}|${String(row.emo_tipo).toUpperCase()}`;
+      necesariosPorPerfil.set(k, (necesariosPorPerfil.get(k) || 0) + 1);
+    }
+  }
+
   const items = [];
   let okCount = 0;
   let faltantes = 0;
@@ -674,8 +710,54 @@ async function calcularCoberturaCotizacion(pedidoId) {
       okCount += 1;
     }
     items.push({
+      tipo: 'EXAMEN',
       examen_id: examenId,
       examen_nombre: nombrePorExamen.get(examenId) || '(examen)',
+      necesarios,
+      cotizados,
+      diferencia,
+      severidad,
+    });
+  }
+
+  const perfilKeys = new Set([...necesariosPorPerfil.keys(), ...cotizadosPorPerfil.keys()]);
+  const perfilIds = Array.from(
+    new Set(Array.from(perfilKeys).map((k) => Number(String(k).split('|')[0])))
+  ).filter((id) => id > 0);
+  const nombrePorPerfil = new Map();
+  if (perfilIds.length > 0) {
+    const ph = perfilIds.map(() => '?').join(',');
+    const [perfilNombreRows] = await pool.execute(
+      `SELECT id, nombre FROM emo_perfiles WHERE id IN (${ph})`,
+      perfilIds
+    );
+    for (const r of perfilNombreRows) {
+      nombrePorPerfil.set(Number(r.id), r.nombre || 'Perfil');
+    }
+  }
+  const perfilKeysOrdenados = Array.from(perfilKeys).sort();
+  for (const key of perfilKeysOrdenados) {
+    const [perfilIdStr, tipoEmo] = String(key).split('|');
+    const perfilId = Number(perfilIdStr);
+    const necesarios = necesariosPorPerfil.get(key) || 0;
+    const cotizados = cotizadosPorPerfil.get(key) || 0;
+    const diferencia = cotizados - necesarios;
+    let severidad = 'OK';
+    if (diferencia < 0) {
+      severidad = 'FALTANTE';
+      faltantes += 1;
+    } else if (diferencia > 0) {
+      severidad = 'EXCESO';
+      excesos += 1;
+    } else if (necesarios > 0 || cotizados > 0) {
+      okCount += 1;
+    }
+    const nombreBase = nombrePorPerfil.get(perfilId) || 'Perfil';
+    items.push({
+      tipo: 'PERFIL',
+      perfil_id: perfilId,
+      tipo_emo: tipoEmo,
+      examen_nombre: `${nombreBase} (${tipoEmo})`,
       necesarios,
       cotizados,
       diferencia,

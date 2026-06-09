@@ -11,6 +11,10 @@ const {
   mergeNombresClienteEnPerfilSnapshot,
   enrichCotizacionItemsSnapshots,
 } = require('../utils/perfilSnapshot');
+const {
+  aplicarSolicitudAgregarAlPedido,
+  marcarSolicitudPorComplementaria,
+} = require('../services/solicitudAgregarPedido');
 
 // Estados válidos de cotización. El manager solo aprueba (APROBADA_POR_MANAGER), no rechaza.
 const ESTADOS_COTIZACION = ['BORRADOR', 'ENVIADA', 'ENVIADA_AL_CLIENTE', 'ENVIADA_AL_MANAGER', 'APROBADA_POR_MANAGER', 'APROBADA', 'RECHAZADA'];
@@ -1047,6 +1051,28 @@ const updateEstadoCotizacion = async (req, res) => {
            VALUES (?, ?, 'COTIZACION_APROBADA', ?, ?, ?, NULL, NULL, NULL, NULL)`,
           [pedido_id, id, descAprob, req.user?.id || null, req.user?.nombre_completo || null]
         );
+      } else if (estado === 'APROBADA' && es_complementaria) {
+        const aprobadaPorVendedor = rol === 'vendedor' || rol === 'manager';
+        const descCompAprob = aprobadaPorVendedor
+          ? `Cotización complementaria aprobada por el vendedor${req.user?.nombre_completo ? ` (${req.user.nombre_completo})` : ''}.`
+          : 'El cliente aprobó la cotización complementaria.';
+        await connection.execute(
+          `INSERT INTO historial_pedido (pedido_id, cotizacion_id, tipo_evento, descripcion, usuario_id, usuario_nombre, valor_anterior, valor_nuevo, atendidos, no_atendidos)
+           VALUES (?, ?, 'COTIZACION_APROBADA', ?, ?, ?, NULL, NULL, NULL, NULL)`,
+          [pedido_id, id, descCompAprob, req.user?.id || null, req.user?.nombre_completo || null]
+        );
+        const solicitudId = await marcarSolicitudPorComplementaria(connection, id, {
+          estado: 'APROBADA',
+          revisadoPorUsuarioId: req.user?.id || null,
+        });
+        if (solicitudId) {
+          await aplicarSolicitudAgregarAlPedido(connection, {
+            solicitudId,
+            usuarioId: req.user?.id || null,
+            usuarioNombre: req.user?.nombre_completo || null,
+            crearComplementariaBorrador: false,
+          });
+        }
       } else if (estado === 'RECHAZADA' && !es_complementaria) {
         if (!pedidoCerrado) {
           // No retroceder a RECHAZADA si otra cotización del mismo pedido ya
@@ -1071,6 +1097,23 @@ const updateEstadoCotizacion = async (req, res) => {
            VALUES (?, ?, 'COTIZACION_RECHAZADA', ?, ?, ?, NULL, NULL, NULL, NULL)`,
           [pedido_id, id, descRechazo, req.user?.id || null, req.user?.nombre_completo || null]
         );
+      } else if (estado === 'RECHAZADA' && es_complementaria) {
+        const motivo = mensaje_rechazo && String(mensaje_rechazo).trim()
+          ? ` Motivo: ${String(mensaje_rechazo).trim()}`
+          : '';
+        const descRechazoComp = cotEsDelCliente
+          ? `El vendedor rechazó la cotización complementaria del cliente.${motivo}`
+          : `El cliente rechazó la cotización complementaria.${motivo}`;
+        await connection.execute(
+          `INSERT INTO historial_pedido (pedido_id, cotizacion_id, tipo_evento, descripcion, usuario_id, usuario_nombre, valor_anterior, valor_nuevo, atendidos, no_atendidos)
+           VALUES (?, ?, 'COTIZACION_RECHAZADA', ?, ?, ?, NULL, NULL, NULL, NULL)`,
+          [pedido_id, id, descRechazoComp, req.user?.id || null, req.user?.nombre_completo || null]
+        );
+        await marcarSolicitudPorComplementaria(connection, id, {
+          estado: 'RECHAZADA',
+          mensajeRechazo: mensaje_rechazo || null,
+          revisadoPorUsuarioId: req.user?.id || null,
+        });
       }
       try {
         const { registrarAuditoria } = require('../utils/audit');
