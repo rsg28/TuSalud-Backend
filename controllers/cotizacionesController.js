@@ -172,12 +172,19 @@ const generarNumeroCotizacion = async (connection) => siguienteNumeroCotizacion(
 const generarNumeroCotizacionComplementaria = async (connection) =>
   siguienteNumeroCotizacionComplementaria(connection);
 
+const {
+  assertCotizacionBaseAprobada,
+  obtenerCotizacionPrincipalAprobadaId,
+  MSG_SIN_PRINCIPAL_APROBADA,
+} = require('../utils/cotizacionPrincipal');
+
 /** Crea una cotización complementaria usando la conexión dada (sin commit). Usado por solicitudes aprobadas o por POST /complementarias. */
 const crearCotizacionComplementariaConConnection = async (connection, opts) => {
   const { pedido_id, cotizacion_base_id, items, creador_id, creador_tipo } = opts;
   if (!pedido_id || !cotizacion_base_id || !items || !Array.isArray(items) || items.length === 0) {
     throw new Error('pedido_id, cotizacion_base_id e items (array no vacío) son requeridos');
   }
+  await assertCotizacionBaseAprobada(connection, pedido_id, cotizacion_base_id);
   const tipo = (creador_tipo === 'CLIENTE' ? 'CLIENTE' : 'VENDEDOR');
   const numero_cotizacion = await generarNumeroCotizacionComplementaria(connection);
   const itemsNorm = items.map(normalizeItem);
@@ -503,14 +510,30 @@ const createCotizacionComplementaria = async (req, res) => {
       return res.status(404).json({ error: 'Pedido no encontrado' });
     }
     const pedido = pedidoRows[0];
-    const baseId = cotizacion_base_id != null ? Number(cotizacion_base_id) : (pedido.cotizacion_principal_id != null ? Number(pedido.cotizacion_principal_id) : null);
-    if (baseId == null) {
-      return res.status(400).json({ error: 'El pedido no tiene cotización principal. Indique cotizacion_base_id o use un pedido con cotización aprobada.' });
+    const connectionCheck = await pool.getConnection();
+    let baseId;
+    try {
+      if (cotizacion_base_id != null) {
+        baseId = await assertCotizacionBaseAprobada(
+          connectionCheck,
+          pedido_id,
+          Number(cotizacion_base_id)
+        );
+      } else {
+        baseId = await obtenerCotizacionPrincipalAprobadaId(connectionCheck, pedido_id);
+        if (!baseId) {
+          connectionCheck.release();
+          return res.status(409).json({ error: MSG_SIN_PRINCIPAL_APROBADA });
+        }
+      }
+    } catch (err) {
+      connectionCheck.release();
+      if (err?.code === 'NO_PRINCIPAL_APROBADA') {
+        return res.status(409).json({ error: err.message });
+      }
+      throw err;
     }
-    const [baseCot] = await pool.execute('SELECT id, pedido_id FROM cotizaciones WHERE id = ? AND pedido_id = ?', [baseId, pedido_id]);
-    if (baseCot.length === 0) {
-      return res.status(400).json({ error: 'Cotización base no encontrada o no pertenece al pedido' });
-    }
+    connectionCheck.release();
     const rol = req.user?.rol;
     const userId = req.user?.id;
     if (rol !== 'vendedor' && rol !== 'manager' && rol !== 'cliente') {

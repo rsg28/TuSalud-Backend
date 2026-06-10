@@ -1,6 +1,10 @@
 const { fetchPrecioExamen } = require('../utils/examenPrecio');
 const { crearCotizacionComplementariaConConnection } = require('../controllers/cotizacionesController');
 const { persistirSnapshotPaciente } = require('../utils/perfilSnapshot');
+const {
+  obtenerCotizacionPrincipalAprobadaId,
+  MSG_SIN_PRINCIPAL_APROBADA,
+} = require('../utils/cotizacionPrincipal');
 
 const TIPOS_EMO_VALIDOS = new Set(['PREOC', 'ANUAL', 'RETIRO', 'VISITA']);
 
@@ -160,7 +164,7 @@ async function aplicarSolicitudAgregarAlPedido(connection, opts) {
   ]);
 
   if (crearComplementariaBorrador) {
-    const cotizacionPrincipalId = pedidoRow[0]?.cotizacion_principal_id;
+    const cotizacionPrincipalId = await obtenerCotizacionPrincipalAprobadaId(connection, pedido_id);
     if (cotizacionPrincipalId != null && itemsComplementaria.size > 0) {
       const examenIds = Array.from(itemsComplementaria.keys());
       const placeholders = examenIds.map(() => '?').join(',');
@@ -398,32 +402,9 @@ async function vincularComplementariaASolicitud(connection, solicitudId, cotizac
   return true;
 }
 
-/** Cotización principal del pedido (columna o última aprobada/enviada). */
+/** @deprecated Use obtenerCotizacionPrincipalAprobadaId — solo cotización principal APROBADA. */
 async function resolverCotizacionBaseId(connection, pedido_id) {
-  const [pedidoRows] = await connection.execute(
-    'SELECT cotizacion_principal_id FROM pedidos WHERE id = ?',
-    [pedido_id]
-  );
-  const principal = pedidoRows[0]?.cotizacion_principal_id;
-  if (principal != null) return Number(principal);
-
-  const [cots] = await connection.execute(
-    `SELECT id FROM cotizaciones
-     WHERE pedido_id = ? AND es_complementaria = 0
-       AND estado IN ('APROBADA', 'APROBADA_POR_MANAGER', 'ENVIADA', 'ENVIADA_AL_CLIENTE')
-     ORDER BY
-       CASE estado
-         WHEN 'APROBADA' THEN 0
-         WHEN 'APROBADA_POR_MANAGER' THEN 1
-         WHEN 'ENVIADA_AL_CLIENTE' THEN 2
-         WHEN 'ENVIADA' THEN 3
-         ELSE 4
-       END,
-       id DESC
-     LIMIT 1`,
-    [pedido_id]
-  );
-  return cots[0]?.id != null ? Number(cots[0].id) : null;
+  return obtenerCotizacionPrincipalAprobadaId(connection, pedido_id);
 }
 
 const ESTADOS_COMP_ABIERTOS = new Set(['ENVIADA', 'BORRADOR', 'ENVIADA_AL_CLIENTE']);
@@ -554,12 +535,9 @@ async function resolverOCrearComplementariaParaSolicitud(connection, solicitudId
     return { cotizacionId: null, creado: false, vinculado: false };
   }
 
-  const cotizacionBaseId = await resolverCotizacionBaseId(connection, pedido_id);
+  const cotizacionBaseId = await obtenerCotizacionPrincipalAprobadaId(connection, pedido_id);
   if (!cotizacionBaseId) {
-    throw Object.assign(
-      new Error('El pedido no tiene cotización principal para generar la complementaria.'),
-      { code: 'NO_BASE' }
-    );
+    throw Object.assign(new Error(MSG_SIN_PRINCIPAL_APROBADA), { code: 'NO_PRINCIPAL_APROBADA' });
   }
 
   const itemsComp = await buildItemsComplementariaDesdeSolicitud(connection, solicitudId, pedido_id);
@@ -617,5 +595,6 @@ module.exports = {
   marcarSolicitudPorComplementaria,
   vincularComplementariaASolicitud,
   resolverCotizacionBaseId,
+  obtenerCotizacionPrincipalAprobadaId,
   resolverOCrearComplementariaParaSolicitud,
 };

@@ -7,9 +7,10 @@ const {
   aplicarSolicitudAgregarAlPedido,
   buildItemsComplementariaDesdeSolicitud,
   vincularComplementariaASolicitud,
-  resolverCotizacionBaseId,
+  obtenerCotizacionPrincipalAprobadaId,
   resolverOCrearComplementariaParaSolicitud,
 } = require('../services/solicitudAgregarPedido');
+const { MSG_SIN_PRINCIPAL_APROBADA } = require('../utils/cotizacionPrincipal');
 
 function sanitizeForJson(obj) {
   if (obj === null || obj === undefined) return obj;
@@ -179,6 +180,12 @@ const crear = async (req, res) => {
       return res.status(400).json({ error: 'Debe incluir al menos un examen' });
     }
 
+    const cotizacionPrincipalId = await obtenerCotizacionPrincipalAprobadaId(connection, pedido_id);
+    if (!cotizacionPrincipalId) {
+      connection.release();
+      return res.status(409).json({ error: MSG_SIN_PRINCIPAL_APROBADA });
+    }
+
     await connection.beginTransaction();
     const [ins] = await connection.execute(
       `INSERT INTO solicitudes_agregar (pedido_id, cliente_usuario_id, estado, mensaje_cliente)
@@ -243,57 +250,59 @@ const crear = async (req, res) => {
         );
       }
     }
-    const cotizacionPrincipalId = await resolverCotizacionBaseId(connection, pedido_id);
     let cotizacionComplementariaId = null;
+    const itemsComp = await buildItemsComplementariaDesdeSolicitud(
+      connection,
+      solicitud_id,
+      pedido_id
+    );
+    if (itemsComp.length === 0) {
+      await connection.rollback();
+      connection.release();
+      return res.status(400).json({
+        error: 'No se pudieron armar ítems para la cotización complementaria.',
+      });
+    }
 
-    if (cotizacionPrincipalId != null) {
-      const itemsComp = await buildItemsComplementariaDesdeSolicitud(
-        connection,
-        solicitud_id,
-        pedido_id
-      );
-      if (itemsComp.length > 0) {
-        const { cotizacionId, numero_cotizacion } = await crearCotizacionComplementariaConConnection(
-          connection,
-          {
-            pedido_id,
-            cotizacion_base_id: cotizacionPrincipalId,
-            items: itemsComp,
-            creador_id: req.user.id,
-            creador_tipo: 'CLIENTE',
-          }
-        );
-        cotizacionComplementariaId = cotizacionId;
-        await connection.execute(
-          `UPDATE cotizaciones
-           SET estado = 'ENVIADA', fecha_envio = NOW(),
-               notas_manager = COALESCE(?, notas_manager)
-           WHERE id = ?`,
-          [mensaje_cliente || null, cotizacionId]
-        );
-        await vincularComplementariaASolicitud(connection, solicitud_id, cotizacionId);
-
-        try {
-          await emitirNotificacionAVendedorDePedido(connection, {
-            pedidoId: pedido_id,
-            tipo: 'MENSAJE',
-            titulo: 'Solicitud de cotización complementaria recibida',
-            mensaje: mensaje_cliente
-              ? `El cliente solicitó agregar exámenes con cotización complementaria ${numero_cotizacion}. Mensaje: ${String(mensaje_cliente).slice(0, 120)}`
-              : `El cliente solicitó agregar exámenes. Revisa la cotización complementaria ${numero_cotizacion}.`,
-            contextoJson: {
-              evento: 'SOLICITUD_COTIZACION_COMPLEMENTARIA',
-              solicitud_id,
-              cotizacion_id: cotizacionId,
-              pedido_id,
-              numero_cotizacion,
-            },
-            remitenteUsuarioId: req.user.id,
-          });
-        } catch (notifErr) {
-          console.warn('[solicitudes] notificación al vendedor falló:', notifErr?.message || notifErr);
-        }
+    const { cotizacionId, numero_cotizacion } = await crearCotizacionComplementariaConConnection(
+      connection,
+      {
+        pedido_id,
+        cotizacion_base_id: cotizacionPrincipalId,
+        items: itemsComp,
+        creador_id: req.user.id,
+        creador_tipo: 'CLIENTE',
       }
+    );
+    cotizacionComplementariaId = cotizacionId;
+    await connection.execute(
+      `UPDATE cotizaciones
+       SET estado = 'ENVIADA', fecha_envio = NOW(),
+           notas_manager = COALESCE(?, notas_manager)
+       WHERE id = ?`,
+      [mensaje_cliente || null, cotizacionId]
+    );
+    await vincularComplementariaASolicitud(connection, solicitud_id, cotizacionId);
+
+    try {
+      await emitirNotificacionAVendedorDePedido(connection, {
+        pedidoId: pedido_id,
+        tipo: 'MENSAJE',
+        titulo: 'Solicitud de cotización complementaria recibida',
+        mensaje: mensaje_cliente
+          ? `El cliente solicitó agregar exámenes con cotización complementaria ${numero_cotizacion}. Mensaje: ${String(mensaje_cliente).slice(0, 120)}`
+          : `El cliente solicitó agregar exámenes. Revisa la cotización complementaria ${numero_cotizacion}.`,
+        contextoJson: {
+          evento: 'SOLICITUD_COTIZACION_COMPLEMENTARIA',
+          solicitud_id,
+          cotizacion_id: cotizacionId,
+          pedido_id,
+          numero_cotizacion,
+        },
+        remitenteUsuarioId: req.user.id,
+      });
+    } catch (notifErr) {
+      console.warn('[solicitudes] notificación al vendedor falló:', notifErr?.message || notifErr);
     }
 
     await connection.commit();
@@ -469,7 +478,11 @@ const resolverCotizacionComplementaria = async (req, res) => {
     if (err?.code === 'NOT_FOUND') {
       return res.status(404).json({ error: err.message });
     }
-    if (err?.code === 'NO_BASE' || err?.code === 'NO_ITEMS') {
+    if (
+      err?.code === 'NO_PRINCIPAL_APROBADA' ||
+      err?.code === 'NO_BASE' ||
+      err?.code === 'NO_ITEMS'
+    ) {
       return res.status(409).json({ error: err.message });
     }
     console.error('Error resolver cotización complementaria:', err);
