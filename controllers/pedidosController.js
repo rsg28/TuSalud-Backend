@@ -342,7 +342,9 @@ const obtenerPedido = async (req, res) => {
     );
 
     const [cotizaciones] = await pool.execute(
-      'SELECT id, numero_cotizacion, estado, es_complementaria, total, fecha, mensaje_rechazo FROM cotizaciones WHERE pedido_id = ? ORDER BY es_complementaria ASC, id ASC',
+      `SELECT id, numero_cotizacion, estado, es_complementaria, creador_tipo,
+              total, fecha, created_at, mensaje_rechazo
+       FROM cotizaciones WHERE pedido_id = ? ORDER BY es_complementaria ASC, id ASC`,
       [pedido_id]
     );
 
