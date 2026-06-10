@@ -92,6 +92,14 @@ router.post(
   pedidosController.crearPedido
 );
 
+// POST /api/pedidos/:pedido_id/asignar-examen-pacientes — Asigna examen suelto a paciente(s) del pedido
+router.post(
+  '/:pedido_id/asignar-examen-pacientes',
+  authenticateToken,
+  requireRole('vendedor', 'manager'),
+  pedidosController.asignarExamenAPacientes
+);
+
 // POST /api/pedidos/:pedido_id/examenes — Agrega un examen al pedido (vendedor o manager)
 router.post(
   '/:pedido_id/examenes',

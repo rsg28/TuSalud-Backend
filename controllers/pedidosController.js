@@ -763,6 +763,128 @@ const crearPedido = async (req, res) => {
   }
 };
 
+/**
+ * POST /api/pedidos/:pedido_id/asignar-examen-pacientes
+ * Asigna un examen suelto a uno o todos los pacientes del pedido y actualiza pedido_items.
+ * Body: { examen_id, paciente_id?, para_todos? }
+ */
+const asignarExamenAPacientes = async (req, res) => {
+  try {
+    const { pedido_id } = req.params;
+    const body = req.body || {};
+    const examen_id = Number(body.examen_id);
+    const paciente_id = body.paciente_id != null ? Number(body.paciente_id) : null;
+    const para_todos = body.para_todos === true;
+
+    if (!Number.isFinite(examen_id) || examen_id <= 0) {
+      return res.status(400).json({ error: 'examen_id es requerido' });
+    }
+    if (!para_todos && (!Number.isFinite(paciente_id) || paciente_id <= 0)) {
+      return res.status(400).json({ error: 'Indique paciente_id o para_todos: true' });
+    }
+
+    const connection = await pool.getConnection();
+    await connection.beginTransaction();
+    try {
+      const [pedido] = await connection.execute(
+        `SELECT id, sede_id, total_empleados, estado
+           FROM pedidos WHERE id = ? FOR UPDATE`,
+        [pedido_id]
+      );
+      if (pedido.length === 0) {
+        await connection.rollback();
+        connection.release();
+        return res.status(404).json({ error: 'Pedido no encontrado' });
+      }
+
+      let targetIds = [];
+      if (para_todos) {
+        const [rows] = await connection.execute(
+          'SELECT id FROM pedido_pacientes WHERE pedido_id = ? ORDER BY id',
+          [pedido_id]
+        );
+        targetIds = rows.map((r) => Number(r.id));
+      } else {
+        const [rows] = await connection.execute(
+          'SELECT id FROM pedido_pacientes WHERE id = ? AND pedido_id = ?',
+          [paciente_id, pedido_id]
+        );
+        if (rows.length === 0) {
+          await connection.rollback();
+          connection.release();
+          return res.status(404).json({ error: 'Paciente no encontrado en este pedido' });
+        }
+        targetIds = [Number(rows[0].id)];
+      }
+
+      if (targetIds.length === 0) {
+        await connection.rollback();
+        connection.release();
+        return res.status(400).json({ error: 'El pedido no tiene pacientes cargados' });
+      }
+
+      for (const pid of targetIds) {
+        await connection.execute(
+          'INSERT IGNORE INTO paciente_examen_asignado (paciente_id, examen_id) VALUES (?, ?)',
+          [pid, examen_id]
+        );
+        await persistirSnapshotPaciente(connection, pid, { tag: 'asignar-examen-cotizacion' });
+      }
+
+      const numPacientes = Number(pedido[0].total_empleados) || targetIds.length;
+      const precio_base = await fetchPrecioExamen(
+        connection,
+        examen_id,
+        pedido[0].sede_id,
+        numPacientes
+      );
+      const [nombreRows] = await connection.execute('SELECT nombre FROM examenes WHERE id = ?', [
+        examen_id,
+      ]);
+      const nombre = nombreRows[0]?.nombre || 'Examen';
+      const cantidad = targetIds.length;
+
+      await connection.execute(
+        `INSERT INTO pedido_items
+           (pedido_id, tipo_item, perfil_id, tipo_emo, examen_id, nombre, cantidad, precio_base)
+         VALUES (?, 'EXAMEN', NULL, NULL, ?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE cantidad = cantidad + VALUES(cantidad), precio_base = VALUES(precio_base)`,
+        [pedido_id, examen_id, nombre, cantidad, precio_base]
+      );
+
+      try {
+        const { registrarAuditoria } = require('../utils/audit');
+        await registrarAuditoria(
+          req,
+          {
+            accion: 'PEDIDO_EXAMEN_ASIGNADO_PACIENTES',
+            recurso_tipo: 'PEDIDO',
+            recurso_id: pedido_id,
+            descripcion: `Asignó examen ${examen_id} a ${targetIds.length} paciente(s) del pedido ${pedido_id}.`,
+            detalle: { examen_id, paciente_ids: targetIds, para_todos },
+          },
+          connection
+        );
+      } catch (_) { /* best-effort */ }
+
+      await connection.commit();
+      connection.release();
+      res.json({
+        message: 'Examen asignado',
+        pacientes_afectados: targetIds.length,
+        paciente_ids: targetIds,
+      });
+    } catch (err) {
+      try { await connection.rollback(); } catch (_) {}
+      connection.release();
+      throw err;
+    }
+  } catch (error) {
+    console.error('Error al asignar examen a pacientes:', error);
+    res.status(500).json({ error: 'Error al asignar examen a pacientes' });
+  }
+};
+
 const agregarExamen = async (req, res) => {
   try {
     const { pedido_id } = req.params;
@@ -1525,6 +1647,7 @@ module.exports = {
   obtenerFacturasDelPedido,
   obtenerPacientesCompletados,
   crearPedido,
+  asignarExamenAPacientes,
   agregarExamen,
   marcarListoParaCotizacion,
   obtenerHistorial,
