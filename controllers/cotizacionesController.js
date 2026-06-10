@@ -876,7 +876,19 @@ const ESTADOS_PEDIDO_CERRADOS = new Set([
  * Decide si la transición solicitada está permitida según rol del usuario y
  * el creador_tipo de la cotización. Devuelve { ok: true } o { ok: false, error }.
  */
-function autorizarTransicionCotizacion({ rol, estadoActual, estadoNuevo, creadorTipo, esCreador }) {
+function esComplementariaNegativaAusencia(esComplementaria, totalCotizacion, creadorTipo) {
+  return !!esComplementaria && Number(totalCotizacion) < 0 && creadorTipo === 'VENDEDOR';
+}
+
+function autorizarTransicionCotizacion({
+  rol,
+  estadoActual,
+  estadoNuevo,
+  creadorTipo,
+  esCreador,
+  esComplementaria,
+  totalCotizacion,
+}) {
   if (rol === 'manager') return { ok: true };
 
   // Cliente
@@ -910,6 +922,16 @@ function autorizarTransicionCotizacion({ rol, estadoActual, estadoNuevo, creador
   // Vendedor
   if (rol === 'vendedor') {
     if (estadoNuevo === 'APROBADA' || estadoNuevo === 'RECHAZADA') {
+      // Ajuste por ausencia (complementaria negativa del vendedor): confirma sin cliente.
+      if (esComplementariaNegativaAusencia(esComplementaria, totalCotizacion, creadorTipo)) {
+        if (estadoActual !== 'BORRADOR') {
+          return {
+            ok: false,
+            error: 'El ajuste por ausencia solo puede confirmarse o descartarse desde borrador.',
+          };
+        }
+        return { ok: true };
+      }
       // El vendedor solo aprueba/rechaza cotizaciones del CLIENTE.
       if (creadorTipo !== 'CLIENTE') {
         return { ok: false, error: 'El vendedor no aprueba/rechaza sus propias cotizaciones (eso lo hace el cliente).' };
@@ -938,7 +960,7 @@ const updateEstadoCotizacion = async (req, res) => {
       return res.status(400).json({ error: `estado debe ser uno de: ${ESTADOS_COTIZACION.join(', ')}` });
     }
     const [existing] = await pool.execute(
-      'SELECT id, estado, pedido_id, es_complementaria, creador_tipo, creador_id, numero_cotizacion FROM cotizaciones WHERE id = ?',
+      'SELECT id, estado, pedido_id, es_complementaria, creador_tipo, creador_id, numero_cotizacion, total FROM cotizaciones WHERE id = ?',
       [id]
     );
     if (existing.length === 0) {
@@ -958,6 +980,8 @@ const updateEstadoCotizacion = async (req, res) => {
       estadoNuevo: estado,
       creadorTipo,
       esCreador,
+      esComplementaria: !!existing[0].es_complementaria,
+      totalCotizacion: existing[0].total,
     });
     if (!auth.ok) {
       return res.status(403).json({ error: auth.error });
@@ -1109,9 +1133,17 @@ const updateEstadoCotizacion = async (req, res) => {
         );
       } else if (estado === 'APROBADA' && es_complementaria) {
         const aprobadaPorVendedor = rol === 'vendedor' || rol === 'manager';
-        const descCompAprob = aprobadaPorVendedor
-          ? `Cotización complementaria aprobada por el vendedor${req.user?.nombre_completo ? ` (${req.user.nombre_completo})` : ''}.`
-          : 'El cliente aprobó la cotización complementaria.';
+        const totalCot = Number(existing[0].total ?? 0);
+        const esAjusteAusencia = esComplementariaNegativaAusencia(
+          true,
+          totalCot,
+          creadorTipo
+        );
+        const descCompAprob = esAjusteAusencia
+          ? `Ajuste por ausencia confirmado (descuento S/ ${Math.abs(totalCot).toFixed(2)}).`
+          : aprobadaPorVendedor
+            ? `Cotización complementaria aprobada por el vendedor${req.user?.nombre_completo ? ` (${req.user.nombre_completo})` : ''}.`
+            : 'El cliente aprobó la cotización complementaria.';
         await connection.execute(
           `INSERT INTO historial_pedido (pedido_id, cotizacion_id, tipo_evento, descripcion, usuario_id, usuario_nombre, valor_anterior, valor_nuevo, atendidos, no_atendidos)
            VALUES (?, ?, 'COTIZACION_APROBADA', ?, ?, ?, NULL, NULL, NULL, NULL)`,
