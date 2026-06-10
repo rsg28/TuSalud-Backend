@@ -885,6 +885,225 @@ const asignarExamenAPacientes = async (req, res) => {
   }
 };
 
+const TIPOS_EMO_ASIGNAR = new Set(['PREOC', 'ANUAL', 'RETIRO', 'VISITA']);
+
+async function fetchPrecioPerfilPedido(connection, perfilId, tipoEmo, empresaId, sedeId, numPacientes) {
+  const tipo = String(tipoEmo || '').toUpperCase();
+  if (!TIPOS_EMO_ASIGNAR.has(tipo)) return 0;
+  const [precioRows] = await connection.execute(
+    `SELECT precio FROM emo_perfil_precio
+     WHERE perfil_id = ? AND tipo_emo = ?
+       AND (empresa_id = ? OR empresa_id IS NULL)
+       AND (sede_id = ? OR sede_id IS NULL)
+     ORDER BY (empresa_id IS NOT NULL) DESC, (sede_id IS NOT NULL) DESC
+     LIMIT 1`,
+    [perfilId, tipo, empresaId ?? null, sedeId ?? null]
+  );
+  if (precioRows.length > 0) {
+    const p = Number(precioRows[0].precio);
+    if (Number.isFinite(p) && p > 0) return p;
+  }
+  const [examIdsRows] = await connection.execute(
+    'SELECT examen_id FROM emo_perfil_examenes WHERE perfil_id = ? AND tipo_emo = ?',
+    [perfilId, tipo]
+  );
+  let sum = 0;
+  for (const r of examIdsRows) {
+    sum += await fetchPrecioExamen(connection, r.examen_id, sedeId, numPacientes);
+  }
+  return sum;
+}
+
+function mergePerfilAplicadoJson(actual, entrada) {
+  let list = [];
+  if (Array.isArray(actual)) {
+    list = [...actual];
+  } else if (typeof actual === 'string' && actual.trim()) {
+    try {
+      const parsed = JSON.parse(actual);
+      if (Array.isArray(parsed)) list = [...parsed];
+    } catch (_) { /* ignore */ }
+  }
+  const k = `${entrada.emo_perfil_id}:${entrada.emo_tipo}`;
+  if (!list.some((x) => `${x.emo_perfil_id}:${x.emo_tipo}` === k)) {
+    list.push(entrada);
+  }
+  return list;
+}
+
+/**
+ * POST /api/pedidos/:pedido_id/asignar-perfil-pacientes
+ * Asigna un perfil EMO a uno o todos los pacientes del pedido y actualiza pedido_items.
+ * Body: { perfil_id, tipo_emo, nombre?, paciente_id?, para_todos?, precio_base? }
+ */
+const asignarPerfilAPacientes = async (req, res) => {
+  try {
+    const { pedido_id } = req.params;
+    const body = req.body || {};
+    const perfil_id = Number(body.perfil_id);
+    const tipo_emo = String(body.tipo_emo || '').toUpperCase();
+    const paciente_id = body.paciente_id != null ? Number(body.paciente_id) : null;
+    const para_todos = body.para_todos === true;
+    const nombreBody = typeof body.nombre === 'string' ? body.nombre.trim() : '';
+
+    if (!Number.isFinite(perfil_id) || perfil_id <= 0) {
+      return res.status(400).json({ error: 'perfil_id es requerido' });
+    }
+    if (!TIPOS_EMO_ASIGNAR.has(tipo_emo)) {
+      return res.status(400).json({ error: 'tipo_emo inválido' });
+    }
+    if (!para_todos && (!Number.isFinite(paciente_id) || paciente_id <= 0)) {
+      return res.status(400).json({ error: 'Indique paciente_id o para_todos: true' });
+    }
+
+    const connection = await pool.getConnection();
+    await connection.beginTransaction();
+    try {
+      const [pedido] = await connection.execute(
+        `SELECT id, sede_id, empresa_id, total_empleados, estado
+           FROM pedidos WHERE id = ? FOR UPDATE`,
+        [pedido_id]
+      );
+      if (pedido.length === 0) {
+        await connection.rollback();
+        connection.release();
+        return res.status(404).json({ error: 'Pedido no encontrado' });
+      }
+
+      const [perfilRows] = await connection.execute(
+        'SELECT id, nombre FROM emo_perfiles WHERE id = ?',
+        [perfil_id]
+      );
+      if (perfilRows.length === 0) {
+        await connection.rollback();
+        connection.release();
+        return res.status(404).json({ error: 'Perfil no encontrado' });
+      }
+      const nombrePerfil = nombreBody || perfilRows[0].nombre || 'Perfil EMO';
+
+      const [examRows] = await connection.execute(
+        'SELECT examen_id FROM emo_perfil_examenes WHERE perfil_id = ? AND tipo_emo = ?',
+        [perfil_id, tipo_emo]
+      );
+      const examenIds = examRows.map((r) => Number(r.examen_id)).filter((id) => id > 0);
+
+      let targetIds = [];
+      if (para_todos) {
+        const [rows] = await connection.execute(
+          'SELECT id FROM pedido_pacientes WHERE pedido_id = ? ORDER BY id',
+          [pedido_id]
+        );
+        targetIds = rows.map((r) => Number(r.id));
+      } else {
+        const [rows] = await connection.execute(
+          'SELECT id FROM pedido_pacientes WHERE id = ? AND pedido_id = ?',
+          [paciente_id, pedido_id]
+        );
+        if (rows.length === 0) {
+          await connection.rollback();
+          connection.release();
+          return res.status(404).json({ error: 'Paciente no encontrado en este pedido' });
+        }
+        targetIds = [Number(rows[0].id)];
+      }
+
+      if (targetIds.length === 0) {
+        await connection.rollback();
+        connection.release();
+        return res.status(400).json({ error: 'El pedido no tiene pacientes cargados' });
+      }
+
+      const entradaPerfil = {
+        emo_perfil_id: perfil_id,
+        perfil_nombre: nombrePerfil,
+        emo_tipo: tipo_emo,
+      };
+
+      for (const pid of targetIds) {
+        const [pacRows] = await connection.execute(
+          'SELECT emo_perfil_id, emo_tipo, perfiles_aplicados_json FROM pedido_pacientes WHERE id = ?',
+          [pid]
+        );
+        const pac = pacRows[0] || {};
+        const perfilesMerged = mergePerfilAplicadoJson(pac.perfiles_aplicados_json, entradaPerfil);
+        await connection.execute(
+          `UPDATE pedido_pacientes SET
+             emo_perfil_id = COALESCE(emo_perfil_id, ?),
+             emo_tipo = COALESCE(emo_tipo, ?),
+             perfiles_aplicados_json = ?
+           WHERE id = ?`,
+          [perfil_id, tipo_emo, JSON.stringify(perfilesMerged), pid]
+        );
+
+        for (const examen_id of examenIds) {
+          await connection.execute(
+            'INSERT IGNORE INTO paciente_examen_asignado (paciente_id, examen_id) VALUES (?, ?)',
+            [pid, examen_id]
+          );
+        }
+        await persistirSnapshotPaciente(connection, pid, {
+          perfilId: perfil_id,
+          tipoEmo: tipo_emo,
+          tag: 'asignar-perfil-cotizacion',
+        });
+      }
+
+      const numPacientes = Number(pedido[0].total_empleados) || targetIds.length;
+      let precio_base = Number(body.precio_base);
+      if (!Number.isFinite(precio_base) || precio_base <= 0) {
+        precio_base = await fetchPrecioPerfilPedido(
+          connection,
+          perfil_id,
+          tipo_emo,
+          pedido[0].empresa_id,
+          pedido[0].sede_id,
+          numPacientes
+        );
+      }
+      const cantidad = targetIds.length;
+
+      await connection.execute(
+        `INSERT INTO pedido_items
+           (pedido_id, tipo_item, perfil_id, tipo_emo, examen_id, nombre, cantidad, precio_base)
+         VALUES (?, 'PERFIL', ?, ?, NULL, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE cantidad = cantidad + VALUES(cantidad), precio_base = VALUES(precio_base)`,
+        [pedido_id, perfil_id, tipo_emo, nombrePerfil, cantidad, precio_base]
+      );
+
+      try {
+        const { registrarAuditoria } = require('../utils/audit');
+        await registrarAuditoria(
+          req,
+          {
+            accion: 'PEDIDO_PERFIL_ASIGNADO_PACIENTES',
+            recurso_tipo: 'PEDIDO',
+            recurso_id: pedido_id,
+            descripcion: `Asignó perfil ${perfil_id} (${tipo_emo}) a ${targetIds.length} paciente(s) del pedido ${pedido_id}.`,
+            detalle: { perfil_id, tipo_emo, paciente_ids: targetIds, para_todos, examenes: examenIds.length },
+          },
+          connection
+        );
+      } catch (_) { /* best-effort */ }
+
+      await connection.commit();
+      connection.release();
+      res.json({
+        message: 'Perfil asignado',
+        pacientes_afectados: targetIds.length,
+        paciente_ids: targetIds,
+        examenes_asignados: examenIds.length,
+      });
+    } catch (err) {
+      try { await connection.rollback(); } catch (_) {}
+      connection.release();
+      throw err;
+    }
+  } catch (error) {
+    console.error('Error al asignar perfil a pacientes:', error);
+    res.status(500).json({ error: 'Error al asignar perfil a pacientes' });
+  }
+};
+
 const agregarExamen = async (req, res) => {
   try {
     const { pedido_id } = req.params;
@@ -1648,6 +1867,7 @@ module.exports = {
   obtenerPacientesCompletados,
   crearPedido,
   asignarExamenAPacientes,
+  asignarPerfilAPacientes,
   agregarExamen,
   marcarListoParaCotizacion,
   obtenerHistorial,

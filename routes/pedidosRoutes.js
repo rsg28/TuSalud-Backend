@@ -100,6 +100,14 @@ router.post(
   pedidosController.asignarExamenAPacientes
 );
 
+// POST /api/pedidos/:pedido_id/asignar-perfil-pacientes — Asigna perfil EMO a paciente(s) del pedido
+router.post(
+  '/:pedido_id/asignar-perfil-pacientes',
+  authenticateToken,
+  requireRole('vendedor', 'manager'),
+  pedidosController.asignarPerfilAPacientes
+);
+
 // POST /api/pedidos/:pedido_id/examenes — Agrega un examen al pedido (vendedor o manager)
 router.post(
   '/:pedido_id/examenes',
