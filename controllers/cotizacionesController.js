@@ -1409,12 +1409,33 @@ const deleteCotizacion = async (req, res) => {
     const { id } = req.params;
     const idNum = parseInt(id, 10);
     const [existing] = await connection.execute(
-      'SELECT id, pedido_id, es_complementaria, numero_cotizacion FROM cotizaciones WHERE id = ?',
+      `SELECT id, pedido_id, es_complementaria, numero_cotizacion, estado, creador_tipo, creador_id
+         FROM cotizaciones WHERE id = ?`,
       [idNum]
     );
     if (existing.length === 0) {
       connection.release();
       return res.status(404).json({ error: 'Cotización no encontrada' });
+    }
+
+    if (existing[0].estado !== 'BORRADOR') {
+      connection.release();
+      return res.status(409).json({
+        error: 'Solo se pueden eliminar cotizaciones en estado BORRADOR.',
+        code: 'COTIZACION_NO_BORRADOR',
+      });
+    }
+
+    const rol = (req.user?.rol || '').toLowerCase();
+    if (rol === 'cliente') {
+      const esCreador =
+        existing[0].creador_tipo === 'CLIENTE' &&
+        req.user?.id != null &&
+        Number(existing[0].creador_id) === Number(req.user.id);
+      if (!esCreador) {
+        connection.release();
+        return res.status(403).json({ error: 'Solo puede eliminar sus propias cotizaciones en borrador.' });
+      }
     }
 
     const pedido_id = existing[0].pedido_id;

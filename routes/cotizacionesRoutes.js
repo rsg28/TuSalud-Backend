@@ -41,6 +41,6 @@ router.post(
 );
 router.put('/:id', authenticateToken, requireRole('manager', 'vendedor', 'cliente'), updateCotizacion);
 router.patch('/:id/estado', authenticateToken, requireRole('manager', 'vendedor', 'cliente'), updateEstadoCotizacion);
-router.delete('/:id', authenticateToken, requireRole('manager', 'vendedor'), deleteCotizacion);
+router.delete('/:id', authenticateToken, requireRole('manager', 'vendedor', 'cliente'), deleteCotizacion);
 
 module.exports = router;
