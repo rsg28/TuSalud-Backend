@@ -2,6 +2,48 @@ const { fetchPrecioExamen } = require('../utils/examenPrecio');
 const { crearCotizacionComplementariaConConnection } = require('../controllers/cotizacionesController');
 const { persistirSnapshotPaciente } = require('../utils/perfilSnapshot');
 
+const TIPOS_EMO_VALIDOS = new Set(['PREOC', 'ANUAL', 'RETIRO', 'VISITA']);
+
+function buildExamenDePerfilSnapshotJson(opts) {
+  const { perfil_id, perfil_nombre, tipo_emo, examen_id, nombre } = opts;
+  return JSON.stringify({
+    origen: 'examen_de_perfil',
+    snapshot_at: new Date().toISOString(),
+    perfil_id: Number(perfil_id),
+    perfil_nombre: perfil_nombre ?? null,
+    tipo_emo: tipo_emo ?? null,
+    examen_id: examen_id != null ? Number(examen_id) : null,
+    nombre_catalogo: nombre ?? null,
+  });
+}
+
+async function fetchPrecioPerfil(connection, perfilId, tipoEmo, empresaId, sedeId, numPacientes) {
+  const tipo = String(tipoEmo || '').toUpperCase();
+  if (!TIPOS_EMO_VALIDOS.has(tipo)) return 0;
+  const [precioRows] = await connection.execute(
+    `SELECT precio FROM emo_perfil_precio
+     WHERE perfil_id = ? AND tipo_emo = ?
+       AND (empresa_id = ? OR empresa_id IS NULL)
+       AND (sede_id = ? OR sede_id IS NULL)
+     ORDER BY (empresa_id IS NOT NULL) DESC, (sede_id IS NOT NULL) DESC
+     LIMIT 1`,
+    [perfilId, tipo, empresaId ?? null, sedeId ?? null]
+  );
+  if (precioRows.length > 0) {
+    const p = Number(precioRows[0].precio);
+    if (Number.isFinite(p) && p > 0) return p;
+  }
+  const [examIdsRows] = await connection.execute(
+    'SELECT examen_id FROM emo_perfil_examenes WHERE perfil_id = ? AND tipo_emo = ?',
+    [perfilId, tipo]
+  );
+  let sum = 0;
+  for (const r of examIdsRows) {
+    sum += await fetchPrecioExamen(connection, r.examen_id, sedeId, numPacientes);
+  }
+  return sum;
+}
+
 /**
  * Agrega exámenes de una solicitud al pedido (paciente_examen_asignado, pedido_items).
  * Opcionalmente crea cotización complementaria BORRADOR (flujo legacy sin cotización del cliente).
@@ -160,62 +202,153 @@ async function aplicarSolicitudAgregarAlPedido(connection, opts) {
 }
 
 /**
- * Construye líneas EXAMEN para cotización complementaria a partir de los exámenes de la solicitud.
+ * Construye líneas PERFIL + EXAMEN (con snapshot de perfil) para cotización complementaria.
  */
 async function buildItemsComplementariaDesdeSolicitud(connection, solicitudId, pedido_id) {
   const [pedidoRow] = await connection.execute(
-    'SELECT sede_id, total_empleados FROM pedidos WHERE id = ?',
+    'SELECT sede_id, total_empleados, empresa_id FROM pedidos WHERE id = ?',
     [pedido_id]
   );
   const sede_id = pedidoRow[0]?.sede_id;
+  const empresa_id = pedidoRow[0]?.empresa_id ?? null;
   const numPacientes = Number(pedidoRow[0]?.total_empleados) || 0;
 
-  const [examenesRows] = await connection.execute(
-    'SELECT solicitud_agregar_paciente_id, examen_id, cantidad FROM solicitud_agregar_examenes WHERE solicitud_id = ?',
-    [solicitudId]
-  );
+  let examenesRows;
+  try {
+    [examenesRows] = await connection.execute(
+      `SELECT solicitud_agregar_paciente_id, examen_id, cantidad,
+              perfil_origen_id, perfil_origen_nombre, perfil_origen_tipo_emo
+       FROM solicitud_agregar_examenes WHERE solicitud_id = ?`,
+      [solicitudId]
+    );
+  } catch (colErr) {
+    if (colErr?.code !== 'ER_BAD_FIELD_ERROR') throw colErr;
+    [examenesRows] = await connection.execute(
+      'SELECT solicitud_agregar_paciente_id, examen_id, cantidad FROM solicitud_agregar_examenes WHERE solicitud_id = ?',
+      [solicitudId]
+    );
+  }
   const [pacientesPedido] = await connection.execute(
     'SELECT id FROM pedido_pacientes WHERE pedido_id = ?',
     [pedido_id]
   );
   const todosPacienteIds = pacientesPedido.map((p) => p.id);
-  const itemsMap = new Map();
+  const numP = numPacientes || todosPacienteIds.length || 1;
+
+  /** @type {Map<string, { perfil_id: number, tipo_emo: string, nombre: string, scope: string, examRows: Array<{ examen_id: number, cantidad: number }> }>} */
+  const gruposPerfil = new Map();
+  /** @type {Map<number, { cantidad: number, precio_base: number }>} */
+  const sueltosMap = new Map();
 
   for (const row of examenesRows) {
-    const examen_id = row.examen_id;
-    const cantidad = Math.max(1, row.cantidad || 1);
-    const precio_base = await fetchPrecioExamen(
-      connection,
-      examen_id,
-      sede_id,
-      numPacientes || todosPacienteIds.length || 1
-    );
-    const multiplicador =
-      row.solicitud_agregar_paciente_id == null ? todosPacienteIds.length || 1 : 1;
+    const examen_id = Number(row.examen_id);
+    const cantidad = Math.max(1, Number(row.cantidad) || 1);
+    const multiplicador = row.solicitud_agregar_paciente_id == null ? numP : 1;
     const cantidadTotal = cantidad * multiplicador;
-    if (!itemsMap.has(examen_id)) {
-      itemsMap.set(examen_id, { cantidad: 0, precio_base });
+    const perfilId = row.perfil_origen_id != null ? Number(row.perfil_origen_id) : null;
+    const tipoEmo = row.perfil_origen_tipo_emo
+      ? String(row.perfil_origen_tipo_emo).toUpperCase()
+      : null;
+
+    if (perfilId && tipoEmo && TIPOS_EMO_VALIDOS.has(tipoEmo)) {
+      const scope =
+        row.solicitud_agregar_paciente_id == null
+          ? 'ALL'
+          : `P${row.solicitud_agregar_paciente_id}`;
+      const gKey = `${perfilId}|${tipoEmo}|${scope}`;
+      if (!gruposPerfil.has(gKey)) {
+        gruposPerfil.set(gKey, {
+          perfil_id: perfilId,
+          tipo_emo: tipoEmo,
+          nombre: row.perfil_origen_nombre || `Perfil ${perfilId}`,
+          scope,
+          examRows: [],
+        });
+      }
+      gruposPerfil.get(gKey).examRows.push({ examen_id, cantidad: cantidadTotal });
+    } else {
+      const precio_base = await fetchPrecioExamen(connection, examen_id, sede_id, numP);
+      if (!sueltosMap.has(examen_id)) {
+        sueltosMap.set(examen_id, { cantidad: 0, precio_base });
+      }
+      const cur = sueltosMap.get(examen_id);
+      cur.cantidad += cantidadTotal;
     }
-    const cur = itemsMap.get(examen_id);
-    cur.cantidad += cantidadTotal;
   }
 
-  if (itemsMap.size === 0) return [];
+  const items = [];
+  const examenIds = new Set([
+    ...sueltosMap.keys(),
+    ...Array.from(gruposPerfil.values()).flatMap((g) => g.examRows.map((r) => r.examen_id)),
+  ]);
+  if (examenIds.size === 0) return [];
 
-  const examenIds = Array.from(itemsMap.keys());
-  const placeholders = examenIds.map(() => '?').join(',');
+  const placeholders = Array.from(examenIds)
+    .map(() => '?')
+    .join(',');
   const [nombresRows] = await connection.execute(
     `SELECT id, nombre FROM examenes WHERE id IN (${placeholders})`,
-    examenIds
+    Array.from(examenIds)
   );
   const nombresMap = new Map(nombresRows.map((r) => [r.id, r.nombre || 'Examen']));
 
-  return Array.from(itemsMap.entries()).map(([examen_id, { cantidad, precio_base }]) => ({
-    examen_id,
-    nombre: nombresMap.get(examen_id) || 'Examen',
-    cantidad,
-    precio_final: precio_base,
-  }));
+  for (const grupo of gruposPerfil.values()) {
+    const perfilCantidad = grupo.scope === 'ALL' ? numP : 1;
+    const precioPerfil = await fetchPrecioPerfil(
+      connection,
+      grupo.perfil_id,
+      grupo.tipo_emo,
+      empresa_id,
+      sede_id,
+      numP
+    );
+    items.push({
+      tipo_item: 'PERFIL',
+      perfil_id: grupo.perfil_id,
+      tipo_emo: grupo.tipo_emo,
+      nombre: grupo.nombre,
+      cantidad: perfilCantidad,
+      precio_base: precioPerfil,
+      precio_final: precioPerfil,
+    });
+
+    const examAgg = new Map();
+    for (const er of grupo.examRows) {
+      examAgg.set(er.examen_id, (examAgg.get(er.examen_id) ?? 0) + er.cantidad);
+    }
+    for (const [examen_id, cantidad] of examAgg.entries()) {
+      const precio_base = await fetchPrecioExamen(connection, examen_id, sede_id, numP);
+      const nombre = nombresMap.get(examen_id) || 'Examen';
+      items.push({
+        tipo_item: 'EXAMEN',
+        examen_id,
+        nombre,
+        cantidad,
+        precio_base,
+        precio_final: precio_base,
+        examenes_snapshot_json: buildExamenDePerfilSnapshotJson({
+          perfil_id: grupo.perfil_id,
+          perfil_nombre: grupo.nombre,
+          tipo_emo: grupo.tipo_emo,
+          examen_id,
+          nombre,
+        }),
+      });
+    }
+  }
+
+  for (const [examen_id, { cantidad, precio_base }] of sueltosMap.entries()) {
+    items.push({
+      tipo_item: 'EXAMEN',
+      examen_id,
+      nombre: nombresMap.get(examen_id) || 'Examen',
+      cantidad,
+      precio_base,
+      precio_final: precio_base,
+    });
+  }
+
+  return items;
 }
 
 async function marcarSolicitudPorComplementaria(connection, cotizacionId, opts) {

@@ -99,15 +99,30 @@ const obtenerDetalle = async (req, res) => {
        ORDER BY sap.id`,
       [id]
     );
-    const [examenes] = await pool.execute(
-      `SELECT sae.id, sae.solicitud_id, sae.solicitud_agregar_paciente_id, sae.examen_id, sae.cantidad,
-              e.nombre AS examen_nombre
-       FROM solicitud_agregar_examenes sae
-       LEFT JOIN examenes e ON e.id = sae.examen_id
-       WHERE sae.solicitud_id = ?
-       ORDER BY sae.solicitud_agregar_paciente_id IS NULL DESC, sae.id`,
-      [id]
-    );
+    let examenes;
+    try {
+      [examenes] = await pool.execute(
+        `SELECT sae.id, sae.solicitud_id, sae.solicitud_agregar_paciente_id, sae.examen_id, sae.cantidad,
+                sae.perfil_origen_id, sae.perfil_origen_nombre, sae.perfil_origen_tipo_emo,
+                e.nombre AS examen_nombre
+         FROM solicitud_agregar_examenes sae
+         LEFT JOIN examenes e ON e.id = sae.examen_id
+         WHERE sae.solicitud_id = ?
+         ORDER BY sae.solicitud_agregar_paciente_id IS NULL DESC, sae.id`,
+        [id]
+      );
+    } catch (colErr) {
+      if (colErr?.code !== 'ER_BAD_FIELD_ERROR') throw colErr;
+      [examenes] = await pool.execute(
+        `SELECT sae.id, sae.solicitud_id, sae.solicitud_agregar_paciente_id, sae.examen_id, sae.cantidad,
+                e.nombre AS examen_nombre
+         FROM solicitud_agregar_examenes sae
+         LEFT JOIN examenes e ON e.id = sae.examen_id
+         WHERE sae.solicitud_id = ?
+         ORDER BY sae.solicitud_agregar_paciente_id IS NULL DESC, sae.id`,
+        [id]
+      );
+    }
     res.json(sanitizeForJson({
       solicitud: sols[0],
       pacientes: pacientes,
@@ -179,11 +194,38 @@ const crear = async (req, res) => {
       }
       const examen_id = parseInt(e.examen_id, 10);
       const cantidad = Math.max(1, parseInt(e.cantidad, 10) || 1);
-      await connection.execute(
-        `INSERT INTO solicitud_agregar_examenes (solicitud_id, solicitud_agregar_paciente_id, examen_id, cantidad)
-         VALUES (?, ?, ?, ?)`,
-        [solicitud_id, solicitud_agregar_paciente_id, examen_id, cantidad]
-      );
+      const perfil_origen_id =
+        e.perfil_origen_id != null ? parseInt(e.perfil_origen_id, 10) : null;
+      const perfil_origen_nombre =
+        e.perfil_origen_nombre != null ? String(e.perfil_origen_nombre).trim() : null;
+      const perfil_origen_tipo_emo =
+        e.perfil_origen_tipo_emo != null
+          ? String(e.perfil_origen_tipo_emo).trim().toUpperCase()
+          : null;
+      try {
+        await connection.execute(
+          `INSERT INTO solicitud_agregar_examenes (
+             solicitud_id, solicitud_agregar_paciente_id, examen_id, cantidad,
+             perfil_origen_id, perfil_origen_nombre, perfil_origen_tipo_emo
+           ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          [
+            solicitud_id,
+            solicitud_agregar_paciente_id,
+            examen_id,
+            cantidad,
+            perfil_origen_id,
+            perfil_origen_nombre || null,
+            perfil_origen_tipo_emo || null,
+          ]
+        );
+      } catch (insErr) {
+        if (insErr?.code !== 'ER_BAD_FIELD_ERROR') throw insErr;
+        await connection.execute(
+          `INSERT INTO solicitud_agregar_examenes (solicitud_id, solicitud_agregar_paciente_id, examen_id, cantidad)
+           VALUES (?, ?, ?, ?)`,
+          [solicitud_id, solicitud_agregar_paciente_id, examen_id, cantidad]
+        );
+      }
     }
     const [pedidoCot] = await connection.execute(
       'SELECT cotizacion_principal_id FROM pedidos WHERE id = ?',
