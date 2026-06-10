@@ -21,6 +21,70 @@ function buildExamenDePerfilSnapshotJson(opts) {
   });
 }
 
+function parsePerfilesAplicadosJson(raw) {
+  if (Array.isArray(raw)) return [...raw];
+  if (typeof raw === 'string' && raw.trim()) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return [...parsed];
+    } catch (_) {
+      /* ignore */
+    }
+  }
+  return [];
+}
+
+function pacienteYaTienePerfil(pac, perfilId, tipoEmo) {
+  const tipo = String(tipoEmo || '').toUpperCase();
+  const clave = `${Number(perfilId)}:${tipo}`;
+  const list = parsePerfilesAplicadosJson(pac?.perfiles_aplicados_json);
+  if (
+    list.some(
+      (x) =>
+        `${Number(x.emo_perfil_id)}:${String(x.emo_tipo || '').toUpperCase()}` === clave
+    )
+  ) {
+    return true;
+  }
+  return (
+    Number(pac?.emo_perfil_id) === Number(perfilId) &&
+    String(pac?.emo_tipo || '').toUpperCase() === tipo
+  );
+}
+
+function mergePerfilAplicadoJson(actual, entrada) {
+  const list = parsePerfilesAplicadosJson(actual);
+  const k = `${entrada.emo_perfil_id}:${entrada.emo_tipo}`;
+  if (!list.some((x) => `${x.emo_perfil_id}:${x.emo_tipo}` === k)) {
+    list.push(entrada);
+  }
+  return list;
+}
+
+async function loadExamenesSolicitudRows(connection, solicitudId) {
+  try {
+    const [rows] = await connection.execute(
+      `SELECT solicitud_agregar_paciente_id, examen_id, cantidad,
+              perfil_origen_id, perfil_origen_nombre, perfil_origen_tipo_emo
+       FROM solicitud_agregar_examenes WHERE solicitud_id = ?`,
+      [solicitudId]
+    );
+    return rows;
+  } catch (colErr) {
+    if (colErr?.code !== 'ER_BAD_FIELD_ERROR') throw colErr;
+    const [rows] = await connection.execute(
+      'SELECT solicitud_agregar_paciente_id, examen_id, cantidad FROM solicitud_agregar_examenes WHERE solicitud_id = ?',
+      [solicitudId]
+    );
+    return rows.map((r) => ({
+      ...r,
+      perfil_origen_id: null,
+      perfil_origen_nombre: null,
+      perfil_origen_tipo_emo: null,
+    }));
+  }
+}
+
 async function fetchPrecioPerfil(connection, perfilId, tipoEmo, empresaId, sedeId, numPacientes) {
   const tipo = String(tipoEmo || '').toUpperCase();
   if (!TIPOS_EMO_VALIDOS.has(tipo)) return 0;
@@ -70,10 +134,11 @@ async function aplicarSolicitudAgregarAlPedido(connection, opts) {
   const pedido_id = sols[0].pedido_id;
 
   const [pedidoRow] = await connection.execute(
-    'SELECT id, sede_id, total_empleados, cotizacion_principal_id FROM pedidos WHERE id = ?',
+    'SELECT id, sede_id, empresa_id, total_empleados, cotizacion_principal_id FROM pedidos WHERE id = ?',
     [pedido_id]
   );
   const sede_id = pedidoRow[0].sede_id;
+  const empresa_id = pedidoRow[0].empresa_id ?? null;
 
   const [pacientesRows] = await connection.execute(
     'SELECT id, pedido_paciente_id, dni, nombre_completo, cargo, area FROM solicitud_agregar_paciente WHERE solicitud_id = ? ORDER BY id',
@@ -92,47 +157,114 @@ async function aplicarSolicitudAgregarAlPedido(connection, opts) {
     }
   }
 
-  const [examenesRows] = await connection.execute(
-    'SELECT id, solicitud_agregar_paciente_id, examen_id, cantidad FROM solicitud_agregar_examenes WHERE solicitud_id = ?',
-    [solicitudId]
-  );
+  const examenesRows = await loadExamenesSolicitudRows(connection, solicitudId);
   const [pacientesPedido] = await connection.execute(
     'SELECT id FROM pedido_pacientes WHERE pedido_id = ?',
     [pedido_id]
   );
   const todosPacienteIds = pacientesPedido.map((p) => p.id);
   const numPacientes = Number(pedidoRow[0].total_empleados) || todosPacienteIds.length || 0;
-  const itemsComplementaria = new Map();
+
+  /** @type {Map<string, { perfilId: number, tipoEmo: string, nombre: string, pacienteIds: Set<number> }>} */
+  const perfilesAplicadosPedido = new Map();
+  /** @type {Map<number, { cantidad: number, precio_base: number }>} */
+  const sueltosPedidoItems = new Map();
+  const pacientesAfectados = new Set();
+
+  const targetPacientesDeFila = (row) => {
+    if (row.solicitud_agregar_paciente_id == null) return todosPacienteIds;
+    const pid = mapSapIdToPacienteId[row.solicitud_agregar_paciente_id];
+    return pid ? [pid] : [];
+  };
+
+  const registrarPerfilNuevoEnPaciente = async (
+    pacienteId,
+    perfilId,
+    tipoEmo,
+    nombrePerfil
+  ) => {
+    const [pacRows] = await connection.execute(
+      'SELECT emo_perfil_id, emo_tipo, perfiles_aplicados_json FROM pedido_pacientes WHERE id = ?',
+      [pacienteId]
+    );
+    const pac = pacRows[0] || {};
+    if (pacienteYaTienePerfil(pac, perfilId, tipoEmo)) return false;
+
+    const entradaPerfil = {
+      emo_perfil_id: perfilId,
+      perfil_nombre: nombrePerfil,
+      emo_tipo: tipoEmo,
+    };
+    const perfilesMerged = mergePerfilAplicadoJson(pac.perfiles_aplicados_json, entradaPerfil);
+    await connection.execute(
+      `UPDATE pedido_pacientes SET
+         emo_perfil_id = COALESCE(emo_perfil_id, ?),
+         emo_tipo = COALESCE(emo_tipo, ?),
+         perfiles_aplicados_json = ?
+       WHERE id = ?`,
+      [perfilId, tipoEmo, JSON.stringify(perfilesMerged), pacienteId]
+    );
+
+    const gKey = `${perfilId}|${tipoEmo}`;
+    if (!perfilesAplicadosPedido.has(gKey)) {
+      perfilesAplicadosPedido.set(gKey, {
+        perfilId,
+        tipoEmo,
+        nombre: nombrePerfil,
+        pacienteIds: new Set(),
+      });
+    }
+    perfilesAplicadosPedido.get(gKey).pacienteIds.add(pacienteId);
+    return true;
+  };
 
   for (const row of examenesRows) {
-    const examen_id = row.examen_id;
-    const cantidad = Math.max(1, row.cantidad || 1);
-    const precio_base = await fetchPrecioExamen(connection, examen_id, sede_id, numPacientes);
+    const examen_id = Number(row.examen_id);
+    const cantidad = Math.max(1, Number(row.cantidad) || 1);
+    const targetPacienteIds = targetPacientesDeFila(row);
+    for (const pid of targetPacienteIds) pacientesAfectados.add(pid);
 
+    const perfilId =
+      row.perfil_origen_id != null ? Number(row.perfil_origen_id) : null;
+    const tipoEmo = row.perfil_origen_tipo_emo
+      ? String(row.perfil_origen_tipo_emo).toUpperCase()
+      : null;
+    const nombrePerfil =
+      (row.perfil_origen_nombre && String(row.perfil_origen_nombre).trim()) ||
+      (perfilId ? `Perfil ${perfilId}` : null);
+    const esDePerfil =
+      perfilId != null &&
+      Number.isFinite(perfilId) &&
+      perfilId > 0 &&
+      tipoEmo &&
+      TIPOS_EMO_VALIDOS.has(tipoEmo);
+
+    if (esDePerfil) {
+      for (const pacienteId of targetPacienteIds) {
+        await registrarPerfilNuevoEnPaciente(
+          pacienteId,
+          perfilId,
+          tipoEmo,
+          nombrePerfil
+        );
+        await connection.execute(
+          'INSERT IGNORE INTO paciente_examen_asignado (paciente_id, examen_id) VALUES (?, ?)',
+          [pacienteId, examen_id]
+        );
+      }
+      continue;
+    }
+
+    const precio_base = await fetchPrecioExamen(connection, examen_id, sede_id, numPacientes);
     const multiplicador =
       row.solicitud_agregar_paciente_id == null ? todosPacienteIds.length || 1 : 1;
     const cantidadTotal = cantidad * multiplicador;
 
-    if (!itemsComplementaria.has(examen_id)) {
-      itemsComplementaria.set(examen_id, { cantidad: 0, precio_base });
+    if (!sueltosPedidoItems.has(examen_id)) {
+      sueltosPedidoItems.set(examen_id, { cantidad: 0, precio_base });
     }
-    itemsComplementaria.get(examen_id).cantidad += cantidadTotal;
+    sueltosPedidoItems.get(examen_id).cantidad += cantidadTotal;
 
-    await connection.execute(
-      `INSERT INTO pedido_items
-         (pedido_id, tipo_item, perfil_id, tipo_emo, examen_id, cantidad, precio_base)
-       VALUES (?, 'EXAMEN', NULL, NULL, ?, ?, ?)
-       ON DUPLICATE KEY UPDATE cantidad = cantidad + VALUES(cantidad), precio_base = VALUES(precio_base)`,
-      [pedido_id, examen_id, cantidadTotal, precio_base]
-    );
-
-    let targetPacienteIds = [];
-    if (row.solicitud_agregar_paciente_id == null) {
-      targetPacienteIds = todosPacienteIds;
-    } else {
-      const pid = mapSapIdToPacienteId[row.solicitud_agregar_paciente_id];
-      if (pid) targetPacienteIds = [pid];
-    }
     for (const pacienteId of targetPacienteIds) {
       await connection.execute(
         'INSERT IGNORE INTO paciente_examen_asignado (paciente_id, examen_id) VALUES (?, ?)',
@@ -141,15 +273,43 @@ async function aplicarSolicitudAgregarAlPedido(connection, opts) {
     }
   }
 
-  const pacientesAfectados = new Set();
-  for (const row of examenesRows) {
-    if (row.solicitud_agregar_paciente_id == null) {
-      for (const pid of todosPacienteIds) pacientesAfectados.add(pid);
-    } else {
-      const pid = mapSapIdToPacienteId[row.solicitud_agregar_paciente_id];
-      if (pid) pacientesAfectados.add(pid);
-    }
+  for (const grupo of perfilesAplicadosPedido.values()) {
+    const precioPerfil = await fetchPrecioPerfil(
+      connection,
+      grupo.perfilId,
+      grupo.tipoEmo,
+      empresa_id,
+      sede_id,
+      numPacientes
+    );
+    const cantidadPerfil = grupo.pacienteIds.size;
+    if (cantidadPerfil <= 0) continue;
+    await connection.execute(
+      `INSERT INTO pedido_items
+         (pedido_id, tipo_item, perfil_id, tipo_emo, examen_id, nombre, cantidad, precio_base)
+       VALUES (?, 'PERFIL', ?, ?, NULL, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE cantidad = cantidad + VALUES(cantidad), precio_base = VALUES(precio_base)`,
+      [
+        pedido_id,
+        grupo.perfilId,
+        grupo.tipoEmo,
+        grupo.nombre,
+        cantidadPerfil,
+        precioPerfil,
+      ]
+    );
   }
+
+  for (const [examen_id, { cantidad, precio_base }] of sueltosPedidoItems.entries()) {
+    await connection.execute(
+      `INSERT INTO pedido_items
+         (pedido_id, tipo_item, perfil_id, tipo_emo, examen_id, cantidad, precio_base)
+       VALUES (?, 'EXAMEN', NULL, NULL, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE cantidad = cantidad + VALUES(cantidad), precio_base = VALUES(precio_base)`,
+      [pedido_id, examen_id, cantidad, precio_base]
+    );
+  }
+
   for (const pid of pacientesAfectados) {
     await persistirSnapshotPaciente(connection, pid, { tag: 'solicitudes-agregar' });
   }
@@ -165,29 +325,21 @@ async function aplicarSolicitudAgregarAlPedido(connection, opts) {
 
   if (crearComplementariaBorrador) {
     const cotizacionPrincipalId = await obtenerCotizacionPrincipalAprobadaId(connection, pedido_id);
-    if (cotizacionPrincipalId != null && itemsComplementaria.size > 0) {
-      const examenIds = Array.from(itemsComplementaria.keys());
-      const placeholders = examenIds.map(() => '?').join(',');
-      const [nombresRows] = await connection.execute(
-        `SELECT id, nombre FROM examenes WHERE id IN (${placeholders})`,
-        examenIds
+    if (cotizacionPrincipalId != null) {
+      const items = await buildItemsComplementariaDesdeSolicitud(
+        connection,
+        solicitudId,
+        pedido_id
       );
-      const nombresMap = new Map(nombresRows.map((r) => [r.id, r.nombre || 'Examen']));
-      const items = Array.from(itemsComplementaria.entries()).map(
-        ([examen_id, { cantidad, precio_base }]) => ({
-          examen_id,
-          nombre: nombresMap.get(examen_id) || 'Examen',
-          cantidad,
-          precio_final: precio_base,
-        })
-      );
-      await crearCotizacionComplementariaConConnection(connection, {
-        pedido_id,
-        cotizacion_base_id: cotizacionPrincipalId,
-        items,
-        creador_id: usuarioId,
-        creador_tipo: 'VENDEDOR',
-      });
+      if (items.length > 0) {
+        await crearCotizacionComplementariaConConnection(connection, {
+          pedido_id,
+          cotizacion_base_id: cotizacionPrincipalId,
+          items,
+          creador_id: usuarioId,
+          creador_tipo: 'VENDEDOR',
+        });
+      }
     }
   }
 
