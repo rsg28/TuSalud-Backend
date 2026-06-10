@@ -914,16 +914,37 @@ async function fetchPrecioPerfilPedido(connection, perfilId, tipoEmo, empresaId,
   return sum;
 }
 
-function mergePerfilAplicadoJson(actual, entrada) {
-  let list = [];
-  if (Array.isArray(actual)) {
-    list = [...actual];
-  } else if (typeof actual === 'string' && actual.trim()) {
+function parsePerfilesAplicadosJson(raw) {
+  if (Array.isArray(raw)) return [...raw];
+  if (typeof raw === 'string' && raw.trim()) {
     try {
-      const parsed = JSON.parse(actual);
-      if (Array.isArray(parsed)) list = [...parsed];
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return [...parsed];
     } catch (_) { /* ignore */ }
   }
+  return [];
+}
+
+function pacienteYaTienePerfil(pac, perfilId, tipoEmo) {
+  const tipo = String(tipoEmo || '').toUpperCase();
+  const clave = `${Number(perfilId)}:${tipo}`;
+  const list = parsePerfilesAplicadosJson(pac?.perfiles_aplicados_json);
+  if (
+    list.some(
+      (x) =>
+        `${Number(x.emo_perfil_id)}:${String(x.emo_tipo || '').toUpperCase()}` === clave
+    )
+  ) {
+    return true;
+  }
+  return (
+    Number(pac?.emo_perfil_id) === Number(perfilId) &&
+    String(pac?.emo_tipo || '').toUpperCase() === tipo
+  );
+}
+
+function mergePerfilAplicadoJson(actual, entrada) {
+  const list = parsePerfilesAplicadosJson(actual);
   const k = `${entrada.emo_perfil_id}:${entrada.emo_tipo}`;
   if (!list.some((x) => `${x.emo_perfil_id}:${x.emo_tipo}` === k)) {
     list.push(entrada);
@@ -1019,12 +1040,17 @@ const asignarPerfilAPacientes = async (req, res) => {
         emo_tipo: tipo_emo,
       };
 
+      const aplicadosIds = [];
       for (const pid of targetIds) {
         const [pacRows] = await connection.execute(
           'SELECT emo_perfil_id, emo_tipo, perfiles_aplicados_json FROM pedido_pacientes WHERE id = ?',
           [pid]
         );
         const pac = pacRows[0] || {};
+        if (pacienteYaTienePerfil(pac, perfil_id, tipo_emo)) {
+          continue;
+        }
+
         const perfilesMerged = mergePerfilAplicadoJson(pac.perfiles_aplicados_json, entradaPerfil);
         await connection.execute(
           `UPDATE pedido_pacientes SET
@@ -1046,9 +1072,21 @@ const asignarPerfilAPacientes = async (req, res) => {
           tipoEmo: tipo_emo,
           tag: 'asignar-perfil-cotizacion',
         });
+        aplicadosIds.push(pid);
       }
 
-      const numPacientes = Number(pedido[0].total_empleados) || targetIds.length;
+      if (aplicadosIds.length === 0) {
+        await connection.rollback();
+        connection.release();
+        return res.status(409).json({
+          error: para_todos
+            ? 'Todos los pacientes del pedido ya tienen asignado este perfil.'
+            : 'Este paciente ya tiene asignado este perfil EMO.',
+          code: 'PERFIL_DUPLICADO',
+        });
+      }
+
+      const numPacientes = Number(pedido[0].total_empleados) || aplicadosIds.length;
       let precio_base = Number(body.precio_base);
       if (!Number.isFinite(precio_base) || precio_base <= 0) {
         precio_base = await fetchPrecioPerfilPedido(
@@ -1060,7 +1098,7 @@ const asignarPerfilAPacientes = async (req, res) => {
           numPacientes
         );
       }
-      const cantidad = targetIds.length;
+      const cantidad = aplicadosIds.length;
 
       await connection.execute(
         `INSERT INTO pedido_items
@@ -1078,8 +1116,14 @@ const asignarPerfilAPacientes = async (req, res) => {
             accion: 'PEDIDO_PERFIL_ASIGNADO_PACIENTES',
             recurso_tipo: 'PEDIDO',
             recurso_id: pedido_id,
-            descripcion: `Asignó perfil ${perfil_id} (${tipo_emo}) a ${targetIds.length} paciente(s) del pedido ${pedido_id}.`,
-            detalle: { perfil_id, tipo_emo, paciente_ids: targetIds, para_todos, examenes: examenIds.length },
+            descripcion: `Asignó perfil ${perfil_id} (${tipo_emo}) a ${aplicadosIds.length} paciente(s) del pedido ${pedido_id}.`,
+            detalle: {
+              perfil_id,
+              tipo_emo,
+              paciente_ids: aplicadosIds,
+              para_todos,
+              examenes: examenIds.length,
+            },
           },
           connection
         );
@@ -1089,8 +1133,8 @@ const asignarPerfilAPacientes = async (req, res) => {
       connection.release();
       res.json({
         message: 'Perfil asignado',
-        pacientes_afectados: targetIds.length,
-        paciente_ids: targetIds,
+        pacientes_afectados: aplicadosIds.length,
+        paciente_ids: aplicadosIds,
         examenes_asignados: examenIds.length,
       });
     } catch (err) {
