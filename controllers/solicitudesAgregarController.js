@@ -7,6 +7,8 @@ const {
   aplicarSolicitudAgregarAlPedido,
   buildItemsComplementariaDesdeSolicitud,
   vincularComplementariaASolicitud,
+  resolverCotizacionBaseId,
+  resolverOCrearComplementariaParaSolicitud,
 } = require('../services/solicitudAgregarPedido');
 
 function sanitizeForJson(obj) {
@@ -82,10 +84,24 @@ const listarPorPedido = async (req, res) => {
 const obtenerDetalle = async (req, res) => {
   try {
     const id = parseInt(req.params.id, 10);
-    const [sols] = await pool.execute(
-      'SELECT id, pedido_id, cliente_usuario_id, estado, mensaje_cliente, mensaje_rechazo, fecha_solicitud, fecha_revision, revisado_por_usuario_id FROM solicitudes_agregar WHERE id = ?',
-      [id]
-    );
+    let sols;
+    try {
+      [sols] = await pool.execute(
+        `SELECT id, pedido_id, cliente_usuario_id, estado, mensaje_cliente, mensaje_rechazo,
+                cotizacion_complementaria_id, fecha_solicitud, fecha_revision, revisado_por_usuario_id
+         FROM solicitudes_agregar WHERE id = ?`,
+        [id]
+      );
+    } catch (colErr) {
+      if (colErr?.code !== 'ER_BAD_FIELD_ERROR') throw colErr;
+      [sols] = await pool.execute(
+        `SELECT id, pedido_id, cliente_usuario_id, estado, mensaje_cliente, mensaje_rechazo,
+                fecha_solicitud, fecha_revision, revisado_por_usuario_id
+         FROM solicitudes_agregar WHERE id = ?`,
+        [id]
+      );
+      if (sols[0]) sols[0].cotizacion_complementaria_id = null;
+    }
     if (sols.length === 0) return res.status(404).json({ error: 'Solicitud no encontrada' });
     const access = await puedeAccederPedido(req, sols[0].pedido_id);
     if (!access.ok) return res.status(access.status).json({ error: access.error });
@@ -227,11 +243,7 @@ const crear = async (req, res) => {
         );
       }
     }
-    const [pedidoCot] = await connection.execute(
-      'SELECT cotizacion_principal_id FROM pedidos WHERE id = ?',
-      [pedido_id]
-    );
-    const cotizacionPrincipalId = pedidoCot[0]?.cotizacion_principal_id ?? null;
+    const cotizacionPrincipalId = await resolverCotizacionBaseId(connection, pedido_id);
     let cotizacionComplementariaId = null;
 
     if (cotizacionPrincipalId != null) {
@@ -408,9 +420,67 @@ const actualizarEstado = async (req, res) => {
   }
 };
 
+const resolverCotizacionComplementaria = async (req, res) => {
+  const connection = await pool.getConnection();
+  try {
+    const id = parseInt(req.params.id, 10);
+    if (!Number.isFinite(id)) {
+      connection.release();
+      return res.status(400).json({ error: 'id inválido' });
+    }
+
+    const [sols] = await pool.execute(
+      'SELECT pedido_id FROM solicitudes_agregar WHERE id = ?',
+      [id]
+    );
+    if (sols.length === 0) {
+      connection.release();
+      return res.status(404).json({ error: 'Solicitud no encontrada' });
+    }
+
+    const access = await puedeAccederPedido(req, sols[0].pedido_id);
+    if (!access.ok) {
+      connection.release();
+      return res.status(access.status).json({ error: access.error });
+    }
+
+    await connection.beginTransaction();
+    const result = await resolverOCrearComplementariaParaSolicitud(connection, id, {
+      crearSiFalta: true,
+      creador_id: req.user?.id ?? null,
+    });
+    await connection.commit();
+    connection.release();
+
+    if (!result.cotizacionId) {
+      return res.status(404).json({
+        error: 'No se encontró ni se pudo generar la cotización complementaria para esta solicitud.',
+      });
+    }
+
+    res.json({
+      cotizacion_complementaria_id: result.cotizacionId,
+      creado: result.creado,
+      vinculado: result.vinculado,
+    });
+  } catch (err) {
+    await connection.rollback();
+    connection.release();
+    if (err?.code === 'NOT_FOUND') {
+      return res.status(404).json({ error: err.message });
+    }
+    if (err?.code === 'NO_BASE' || err?.code === 'NO_ITEMS') {
+      return res.status(409).json({ error: err.message });
+    }
+    console.error('Error resolver cotización complementaria:', err);
+    res.status(500).json({ error: 'Error al resolver cotización complementaria' });
+  }
+};
+
 module.exports = {
   listarPorPedido,
   obtenerDetalle,
+  resolverCotizacionComplementaria,
   crear,
   actualizarEstado,
 };

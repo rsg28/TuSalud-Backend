@@ -398,9 +398,224 @@ async function vincularComplementariaASolicitud(connection, solicitudId, cotizac
   return true;
 }
 
+/** Cotización principal del pedido (columna o última aprobada/enviada). */
+async function resolverCotizacionBaseId(connection, pedido_id) {
+  const [pedidoRows] = await connection.execute(
+    'SELECT cotizacion_principal_id FROM pedidos WHERE id = ?',
+    [pedido_id]
+  );
+  const principal = pedidoRows[0]?.cotizacion_principal_id;
+  if (principal != null) return Number(principal);
+
+  const [cots] = await connection.execute(
+    `SELECT id FROM cotizaciones
+     WHERE pedido_id = ? AND es_complementaria = 0
+       AND estado IN ('APROBADA', 'APROBADA_POR_MANAGER', 'ENVIADA', 'ENVIADA_AL_CLIENTE')
+     ORDER BY
+       CASE estado
+         WHEN 'APROBADA' THEN 0
+         WHEN 'APROBADA_POR_MANAGER' THEN 1
+         WHEN 'ENVIADA_AL_CLIENTE' THEN 2
+         WHEN 'ENVIADA' THEN 3
+         ELSE 4
+       END,
+       id DESC
+     LIMIT 1`,
+    [pedido_id]
+  );
+  return cots[0]?.id != null ? Number(cots[0].id) : null;
+}
+
+const ESTADOS_COMP_ABIERTOS = new Set(['ENVIADA', 'BORRADOR', 'ENVIADA_AL_CLIENTE']);
+
+async function complementariaEstaLibre(connection, cotizacionId) {
+  try {
+    const [linked] = await connection.execute(
+      `SELECT id FROM solicitudes_agregar
+       WHERE cotizacion_complementaria_id = ? LIMIT 1`,
+      [cotizacionId]
+    );
+    return linked.length === 0;
+  } catch (err) {
+    if (err?.code === 'ER_BAD_FIELD_ERROR') return true;
+    throw err;
+  }
+}
+
+async function complementariaVinculadaASolicitud(connection, cotizacionId, solicitudId) {
+  try {
+    const [rows] = await connection.execute(
+      `SELECT id FROM solicitudes_agregar
+       WHERE cotizacion_complementaria_id = ? AND id = ? LIMIT 1`,
+      [cotizacionId, solicitudId]
+    );
+    return rows.length > 0;
+  } catch (err) {
+    if (err?.code === 'ER_BAD_FIELD_ERROR') return false;
+    throw err;
+  }
+}
+
+async function buscarComplementariaHeuristica(connection, pedido_id, fechaSolicitud, solicitudId) {
+  const [comps] = await connection.execute(
+    `SELECT id, estado, creador_tipo, fecha, created_at
+     FROM cotizaciones
+     WHERE pedido_id = ? AND es_complementaria = 1
+     ORDER BY id DESC`,
+    [pedido_id]
+  );
+  if (comps.length === 0) return null;
+
+  const abiertas = comps.filter((c) =>
+    ESTADOS_COMP_ABIERTOS.has(String(c.estado ?? '').toUpperCase())
+  );
+  let pool = abiertas.length > 0 ? abiertas : comps;
+
+  const libres = [];
+  for (const c of pool) {
+    const vinculadaAMi = await complementariaVinculadaASolicitud(connection, c.id, solicitudId);
+    const libre = await complementariaEstaLibre(connection, c.id);
+    if (vinculadaAMi || libre) {
+      libres.push(c);
+    }
+  }
+  if (libres.length > 0) pool = libres;
+
+  if (pool.length === 1) return Number(pool[0].id);
+
+  const solMs = new Date(fechaSolicitud).getTime();
+  if (!Number.isFinite(solMs)) return Number(pool[0].id);
+
+  let mejor = pool[0];
+  let mejorDiff = Number.POSITIVE_INFINITY;
+  for (const c of pool) {
+    const cMs = new Date(c.fecha || c.created_at || '').getTime();
+    const diff = Number.isFinite(cMs) ? Math.abs(cMs - solMs) : Number.POSITIVE_INFINITY;
+    if (diff < mejorDiff) {
+      mejorDiff = diff;
+      mejor = c;
+    }
+  }
+  return Number(mejor.id);
+}
+
+/**
+ * Devuelve (y opcionalmente crea/vincula) la cotización complementaria de una solicitud.
+ */
+async function resolverOCrearComplementariaParaSolicitud(connection, solicitudId, opts = {}) {
+  const { crearSiFalta = true, creador_id = null } = opts;
+
+  let solRow;
+  try {
+    const [rows] = await connection.execute(
+      `SELECT id, pedido_id, estado, mensaje_cliente, fecha_solicitud, cotizacion_complementaria_id
+       FROM solicitudes_agregar WHERE id = ?`,
+      [solicitudId]
+    );
+    solRow = rows[0];
+  } catch (colErr) {
+    if (colErr?.code !== 'ER_BAD_FIELD_ERROR') throw colErr;
+    const [rows] = await connection.execute(
+      `SELECT id, pedido_id, estado, mensaje_cliente, fecha_solicitud
+       FROM solicitudes_agregar WHERE id = ?`,
+      [solicitudId]
+    );
+    solRow = rows[0] ? { ...rows[0], cotizacion_complementaria_id: null } : null;
+  }
+
+  if (!solRow) {
+    throw Object.assign(new Error('Solicitud no encontrada'), { code: 'NOT_FOUND' });
+  }
+
+  const pedido_id = solRow.pedido_id;
+  let creado = false;
+  let vinculado = false;
+
+  if (solRow.cotizacion_complementaria_id != null) {
+    const cid = Number(solRow.cotizacion_complementaria_id);
+    const [exists] = await connection.execute('SELECT id FROM cotizaciones WHERE id = ?', [cid]);
+    if (exists.length > 0) {
+      return { cotizacionId: cid, creado: false, vinculado: false };
+    }
+  }
+
+  const heuristicaId = await buscarComplementariaHeuristica(
+    connection,
+    pedido_id,
+    solRow.fecha_solicitud,
+    solicitudId
+  );
+  if (heuristicaId) {
+    vinculado = await vincularComplementariaASolicitud(connection, solicitudId, heuristicaId);
+    return { cotizacionId: heuristicaId, creado: false, vinculado };
+  }
+
+  if (!crearSiFalta || String(solRow.estado).toUpperCase() !== 'PENDIENTE') {
+    return { cotizacionId: null, creado: false, vinculado: false };
+  }
+
+  const cotizacionBaseId = await resolverCotizacionBaseId(connection, pedido_id);
+  if (!cotizacionBaseId) {
+    throw Object.assign(
+      new Error('El pedido no tiene cotización principal para generar la complementaria.'),
+      { code: 'NO_BASE' }
+    );
+  }
+
+  const itemsComp = await buildItemsComplementariaDesdeSolicitud(connection, solicitudId, pedido_id);
+  if (itemsComp.length === 0) {
+    throw Object.assign(
+      new Error('La solicitud no tiene ítems para armar la cotización complementaria.'),
+      { code: 'NO_ITEMS' }
+    );
+  }
+
+  const { cotizacionId, numero_cotizacion } = await crearCotizacionComplementariaConConnection(
+    connection,
+    {
+      pedido_id,
+      cotizacion_base_id: cotizacionBaseId,
+      items: itemsComp,
+      creador_id,
+      creador_tipo: 'CLIENTE',
+    }
+  );
+  creado = true;
+
+  await connection.execute(
+    `UPDATE cotizaciones
+     SET estado = 'ENVIADA', fecha_envio = NOW(),
+         notas_manager = COALESCE(?, notas_manager)
+     WHERE id = ?`,
+    [solRow.mensaje_cliente || null, cotizacionId]
+  );
+
+  vinculado = await vincularComplementariaASolicitud(connection, solicitudId, cotizacionId);
+
+  try {
+    await connection.execute(
+      `INSERT INTO historial_pedido (
+         pedido_id, cotizacion_id, tipo_evento, descripcion, usuario_id, usuario_nombre
+       ) VALUES (?, ?, 'COTIZACION_COMPLEMENTARIA', ?, ?, NULL)`,
+      [
+        pedido_id,
+        cotizacionId,
+        `Cotización complementaria ${numero_cotizacion} generada desde solicitud del cliente #${solicitudId}.`,
+        creador_id,
+      ]
+    );
+  } catch (histErr) {
+    console.warn('[solicitudes] historial complementaria omitido:', histErr?.message || histErr);
+  }
+
+  return { cotizacionId, creado, vinculado };
+}
+
 module.exports = {
   aplicarSolicitudAgregarAlPedido,
   buildItemsComplementariaDesdeSolicitud,
   marcarSolicitudPorComplementaria,
   vincularComplementariaASolicitud,
+  resolverCotizacionBaseId,
+  resolverOCrearComplementariaParaSolicitud,
 };
