@@ -323,6 +323,33 @@ function parseSnapshotJson(raw) {
 }
 
 /**
+ * Lista plana de exámenes desde un snapshot (PERFIL con categorías, legacy plano, etc.).
+ * @returns {Array<{ examen_id: number, precio: number }>}
+ */
+function flattenExamenesDesdeSnapshot(snapshot) {
+  const snap = typeof snapshot === 'string' ? parseSnapshotJson(snapshot) : snapshot;
+  if (!snap) return [];
+  if (Array.isArray(snap.categorias) && snap.categorias.length > 0) {
+    const out = [];
+    for (const cat of snap.categorias) {
+      for (const ex of cat.examenes || []) {
+        const examen_id = Number(ex.examen_id || ex.id);
+        if (!Number.isFinite(examen_id) || examen_id <= 0) continue;
+        out.push({ examen_id, precio: Number(ex.precio) || 0 });
+      }
+    }
+    return out;
+  }
+  const lista = Array.isArray(snap.examenes) ? snap.examenes : Array.isArray(snap) ? snap : [];
+  return lista
+    .map((ex) => ({
+      examen_id: Number(ex.examen_id || ex.id),
+      precio: Number(ex.precio) || 0,
+    }))
+    .filter((ex) => Number.isFinite(ex.examen_id) && ex.examen_id > 0);
+}
+
+/**
  * Añade `precio` a cada examen del snapshot (catálogo vigente al leer la cotización).
  * Si ya trae precio guardado, no lo sobrescribe.
  */
@@ -429,4 +456,6 @@ module.exports = {
   enrichPerfilSnapshotWithPrecios,
   enrichCotizacionItemsSnapshots,
   persistirSnapshotPaciente,
+  parseSnapshotJson,
+  flattenExamenesDesdeSnapshot,
 };

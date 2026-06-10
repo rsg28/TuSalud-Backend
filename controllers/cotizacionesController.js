@@ -502,8 +502,14 @@ const createCotizacionComplementaria = async (req, res) => {
     if (!pedido_id || !items || !Array.isArray(items) || items.length === 0) {
       return res.status(400).json({ error: 'pedido_id e items (array no vacío) son requeridos' });
     }
+    const montoEstimado = (items || []).reduce((s, it) => {
+      const cant = Math.max(1, Number(it.cantidad) || 1);
+      const px = Number(it.precio_final ?? it.precio_base) || 0;
+      return s + px * cant;
+    }, 0);
+
     const [pedidoRows] = await pool.execute(
-      'SELECT id, cotizacion_principal_id, empresa_id, cliente_usuario_id, vendedor_id FROM pedidos WHERE id = ?',
+      'SELECT id, cotizacion_principal_id, empresa_id, cliente_usuario_id, vendedor_id, factura_id FROM pedidos WHERE id = ?',
       [pedido_id]
     );
     if (pedidoRows.length === 0) {
@@ -541,6 +547,13 @@ const createCotizacionComplementaria = async (req, res) => {
     }
     if (rol === 'cliente' && Number(pedido.cliente_usuario_id) !== Number(userId)) {
       return res.status(403).json({ error: 'Solo puede crear cotizaciones complementarias para sus propios pedidos' });
+    }
+    if (montoEstimado < 0 && pedido.factura_id != null) {
+      return res.status(409).json({
+        error:
+          'No puede generar una cotización complementaria negativa mientras el pedido tiene una factura asignada. Elimine la factura primero.',
+        code: 'FACTURA_PENDIENTE_BLOQUEA_COMPLEMENTARIA_NEGATIVA',
+      });
     }
     const creadorTipo = rol === 'cliente' ? 'CLIENTE' : 'VENDEDOR';
     const connection = await pool.getConnection();
@@ -973,6 +986,28 @@ const updateEstadoCotizacion = async (req, res) => {
         });
       }
 
+      const pedido_id = existing[0].pedido_id;
+      const es_complementaria = !!existing[0].es_complementaria;
+      if (
+        es_complementaria &&
+        (estado === 'APROBADA' || estado === 'RECHAZADA') &&
+        (rol === 'vendedor' || rol === 'manager')
+      ) {
+        const [pedidoFactRows] = await connection.execute(
+          'SELECT factura_id FROM pedidos WHERE id = ? FOR UPDATE',
+          [pedido_id]
+        );
+        if (pedidoFactRows[0]?.factura_id != null) {
+          await connection.rollback();
+          connection.release();
+          return res.status(409).json({
+            error:
+              'No puede aprobar ni rechazar cotizaciones complementarias mientras el pedido tiene una factura pendiente. Elimine la factura primero.',
+            code: 'FACTURA_PENDIENTE_BLOQUEA_COMPLEMENTARIA',
+          });
+        }
+      }
+
       const esAprobada = estado === 'APROBADA' || estado === 'APROBADA_POR_MANAGER';
       const incluirNotasManager =
         notas_manager !== undefined &&
@@ -991,8 +1026,6 @@ const updateEstadoCotizacion = async (req, res) => {
           [estado, mensaje_rechazo !== undefined ? mensaje_rechazo : null, estado === 'ENVIADA_AL_MANAGER' || estado === 'ENVIADA_AL_CLIENTE', esAprobada, id, estadoEsperado]
         );
       }
-      const pedido_id = existing[0].pedido_id;
-      const es_complementaria = !!existing[0].es_complementaria;
       const cotEsDelCliente = creadorTipo === 'CLIENTE';
 
       // Obtener el estado actual del pedido para no retroceder.

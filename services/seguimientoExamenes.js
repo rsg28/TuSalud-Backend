@@ -25,6 +25,8 @@
  */
 
 const pool = require('../config/database');
+const { flattenExamenesDesdeSnapshot, getPreciosMapPorExamenIds } = require('../utils/perfilSnapshot');
+const { fetchPrecioExamen } = require('../utils/examenPrecio');
 
 const ESTADOS_VALIDOS = new Set([
   'PENDIENTE',
@@ -41,6 +43,59 @@ const FUENTES_VALIDAS = new Set(['MANUAL', 'API_EXTERNA', 'SISTEMA']);
  * un ajuste comercial". Los usa `calcularAjustesSugeridos`.
  */
 const ESTADOS_NO_REALIZADOS = new Set(['AUSENTE', 'NO_REALIZADO']);
+
+const ESTADOS_COTIZACION_REFERENCIA = [
+  'APROBADA',
+  'APROBADA_POR_MANAGER',
+  'ENVIADA_AL_CLIENTE',
+  'ENVIADA_AL_MANAGER',
+  'ENVIADA',
+  'BORRADOR',
+];
+
+/**
+ * Indexa precio unitario por examen_id desde líneas de cotización.
+ * @param {Array<object>} filasItems
+ * @param {Map<number, number>} precioExamen
+ */
+function indexarPreciosDesdeItemsCotizacion(filasItems, precioExamen) {
+  for (const it of filasItems) {
+    if (it.tipo_item === 'EXAMEN' && it.examen_id != null) {
+      const exId = Number(it.examen_id);
+      const px = Number(it.precio_final);
+      if (exId && Number.isFinite(px) && px > 0 && !precioExamen.has(exId)) {
+        precioExamen.set(exId, px);
+      }
+    } else if (it.tipo_item === 'PERFIL' && it.examenes_snapshot_json) {
+      let snapshot;
+      try {
+        snapshot = JSON.parse(it.examenes_snapshot_json);
+      } catch {
+        snapshot = null;
+      }
+      const lista = flattenExamenesDesdeSnapshot(snapshot);
+      if (lista.length === 0) continue;
+      const sumPrecios = lista.reduce((s, ex) => s + (Number(ex.precio) || 0), 0);
+      if (sumPrecios > 0) {
+        for (const ex of lista) {
+          const exId = Number(ex.examen_id);
+          const px = Number(ex.precio) || 0;
+          if (exId && px > 0 && !precioExamen.has(exId)) {
+            precioExamen.set(exId, px);
+          }
+        }
+      } else {
+        const proratado = Number(it.precio_final) / lista.length;
+        for (const ex of lista) {
+          const exId = Number(ex.examen_id);
+          if (exId && !precioExamen.has(exId)) {
+            precioExamen.set(exId, proratado);
+          }
+        }
+      }
+    }
+  }
+}
 
 function validarEstado(estado) {
   const v = String(estado || '').toUpperCase().trim();
@@ -251,6 +306,14 @@ async function calcularAjustesSugeridos(pedidoId) {
     throw Object.assign(new Error('pedidoId inválido'), { code: 'PARAM_INVALIDO' });
   }
 
+  const [pedidoMeta] = await pool.execute(
+    'SELECT sede_id, total_empleados, factura_id FROM pedidos WHERE id = ? LIMIT 1',
+    [pid]
+  );
+  const sedeId = pedidoMeta[0]?.sede_id ?? null;
+  const numPacientes = Number(pedidoMeta[0]?.total_empleados) || 0;
+  const facturaId = pedidoMeta[0]?.factura_id ?? null;
+
   // 1) Exámenes no realizados del pedido.
   const [noRealizados] = await pool.execute(
     `SELECT pea.paciente_id, pea.examen_id, pea.estado, pea.motivo,
@@ -267,6 +330,8 @@ async function calcularAjustesSugeridos(pedidoId) {
   if (noRealizados.length === 0) {
     return {
       pedido_id: pid,
+      factura_id: facturaId,
+      bloqueado_por_factura: facturaId != null,
       tiene_ajustes: false,
       total_examenes_no_realizados: 0,
       monto_sugerido: 0,
@@ -279,6 +344,7 @@ async function calcularAjustesSugeridos(pedidoId) {
   // caemos a estados intermedios (ENVIADA_AL_CLIENTE → manager ya aprobó;
   // ENVIADA_AL_MANAGER y ENVIADA → propuestas que sirven como referencia para
   // testear o estimar el ajuste antes de la aprobación final).
+  const estadosPlaceholders = ESTADOS_COTIZACION_REFERENCIA.map(() => '?').join(',');
   const [items] = await pool.execute(
     `SELECT ci.tipo_item, ci.examen_id, ci.perfil_id, ci.tipo_emo,
             ci.precio_final, ci.examenes_snapshot_json,
@@ -297,12 +363,9 @@ async function calcularAjustesSugeridos(pedidoId) {
        JOIN cotizaciones c ON c.id = ci.cotizacion_id
       WHERE c.pedido_id = ?
         AND c.es_complementaria = 0
-        AND c.estado IN (
-          'APROBADA','APROBADA_POR_MANAGER','ENVIADA_AL_CLIENTE',
-          'ENVIADA_AL_MANAGER','ENVIADA','BORRADOR'
-        )
+        AND c.estado IN (${estadosPlaceholders})
       ORDER BY prioridad_estado ASC, c.id DESC, ci.id ASC`,
-    [pid]
+    [pid, ...ESTADOS_COTIZACION_REFERENCIA]
   );
 
   // Detectamos la cotización principal activa (si no hay aprobada, la de mayor
@@ -319,37 +382,42 @@ async function calcularAjustesSugeridos(pedidoId) {
     };
   }
 
-  // Indexamos: precio por examen suelto y precio por examen dentro de perfil.
-  const precioExamen = new Map(); // examen_id → precio_unitario
-  for (const it of items) {
-    if (it.tipo_item === 'EXAMEN' && it.examen_id != null) {
-      precioExamen.set(Number(it.examen_id), Number(it.precio_final));
-    } else if (it.tipo_item === 'PERFIL' && it.examenes_snapshot_json) {
-      let snapshot;
-      try { snapshot = JSON.parse(it.examenes_snapshot_json); }
-      catch { snapshot = null; }
-      const lista = Array.isArray(snapshot?.examenes) ? snapshot.examenes
-                  : Array.isArray(snapshot) ? snapshot : [];
-      if (lista.length === 0) continue;
-      const sumPrecios = lista.reduce((s, ex) => s + (Number(ex.precio) || 0), 0);
-      if (sumPrecios > 0) {
-        for (const ex of lista) {
-          const exId = Number(ex.examen_id || ex.id);
-          const px = Number(ex.precio) || 0;
-          if (exId && px > 0 && !precioExamen.has(exId)) {
-            precioExamen.set(exId, px);
-          }
-        }
-      } else {
-        // Sin precios desglosados: prorrateo uniforme del precio del perfil.
-        const proratado = Number(it.precio_final) / lista.length;
-        for (const ex of lista) {
-          const exId = Number(ex.examen_id || ex.id);
-          if (exId && !precioExamen.has(exId)) {
-            precioExamen.set(exId, proratado);
-          }
-        }
-      }
+  // Indexamos: precio por examen suelto y precio por examen dentro de perfil (principal).
+  const precioExamen = new Map();
+  indexarPreciosDesdeItemsCotizacion(items, precioExamen);
+
+  // Complementarias aprobadas (p. ej. ADA agregado solo en complementaria positiva).
+  const [itemsComp] = await pool.execute(
+    `SELECT ci.tipo_item, ci.examen_id, ci.perfil_id, ci.tipo_emo,
+            ci.precio_final, ci.examenes_snapshot_json
+       FROM cotizacion_items ci
+       JOIN cotizaciones c ON c.id = ci.cotizacion_id
+      WHERE c.pedido_id = ?
+        AND c.es_complementaria = 1
+        AND c.estado IN ('APROBADA', 'APROBADA_POR_MANAGER')
+      ORDER BY c.id DESC, ci.id ASC`,
+    [pid]
+  );
+  indexarPreciosDesdeItemsCotizacion(itemsComp, precioExamen);
+
+  // Fallback: tarifario vigente en BD para exámenes aún sin referencia.
+  const examenesSinPrecio = [
+    ...new Set(
+      noRealizados
+        .map((r) => Number(r.examen_id))
+        .filter((id) => Number.isFinite(id) && id > 0 && !precioExamen.has(id))
+    ),
+  ];
+  if (examenesSinPrecio.length > 0) {
+    const preciosBd = await getPreciosMapPorExamenIds(pool, examenesSinPrecio, sedeId, numPacientes);
+    for (const exId of examenesSinPrecio) {
+      const px = Number(preciosBd.get(exId)) || 0;
+      if (px > 0) precioExamen.set(exId, px);
+    }
+    for (const exId of examenesSinPrecio) {
+      if (precioExamen.has(exId)) continue;
+      const px = await fetchPrecioExamen(pool, exId, sedeId, numPacientes);
+      if (px > 0) precioExamen.set(exId, px);
     }
   }
 
@@ -377,6 +445,8 @@ async function calcularAjustesSugeridos(pedidoId) {
 
   return {
     pedido_id: pid,
+    factura_id: facturaId,
+    bloqueado_por_factura: facturaId != null,
     tiene_ajustes: true,
     total_examenes_no_realizados: noRealizados.length,
     monto_sugerido: Math.round(montoTotal * 100) / 100,
@@ -624,10 +694,8 @@ async function calcularCoberturaCotizacion(pedidoId) {
       } catch {
         snapshot = null;
       }
-      const lista = Array.isArray(snapshot?.examenes) ? snapshot.examenes
-                  : Array.isArray(snapshot) ? snapshot : [];
-      for (const ex of lista) {
-        const exId = Number(ex.examen_id || ex.id);
+      for (const ex of flattenExamenesDesdeSnapshot(snapshot)) {
+        const exId = Number(ex.examen_id);
         if (!exId) continue;
         cotizadosPorExamen.set(exId, (cotizadosPorExamen.get(exId) || 0) + cantidad);
       }
