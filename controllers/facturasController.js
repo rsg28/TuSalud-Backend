@@ -311,6 +311,144 @@ const createFactura = async (req, res) => {
   }
 };
 
+/**
+ * POST /api/facturas/:id/sincronizar-cotizaciones
+ * Incorpora cotizaciones complementarias APROBADAS que aún no están en la factura
+ * (p. ej. aprobadas después de emitir la factura principal) y recalcula totales.
+ */
+const sincronizarCotizacionesFactura = async (req, res) => {
+  const connection = await pool.getConnection();
+  await connection.beginTransaction();
+  try {
+    const { id } = req.params;
+    const [facturas] = await connection.execute(
+      'SELECT id, pedido_id, estado, numero_factura FROM facturas WHERE id = ? FOR UPDATE',
+      [id]
+    );
+    if (facturas.length === 0) {
+      await connection.rollback();
+      connection.release();
+      return res.status(404).json({ error: 'Factura no encontrada' });
+    }
+    const factura = facturas[0];
+    if (factura.estado === 'PAGADA') {
+      await connection.rollback();
+      connection.release();
+      return res.status(400).json({
+        error: 'No se pueden agregar cotizaciones a una factura ya pagada',
+      });
+    }
+
+    const pedido_id = factura.pedido_id;
+    const [pendientes] = await connection.execute(
+      `SELECT c.id, c.total, c.es_complementaria, c.numero_cotizacion
+       FROM cotizaciones c
+       WHERE c.pedido_id = ?
+         AND c.estado = 'APROBADA'
+         AND c.es_complementaria = 1
+         AND NOT EXISTS (
+           SELECT 1 FROM factura_cotizacion fc WHERE fc.cotizacion_id = c.id
+         )
+       ORDER BY c.id ASC`,
+      [pedido_id]
+    );
+
+    if (pendientes.length === 0) {
+      await connection.commit();
+      connection.release();
+      const [actual] = await pool.execute('SELECT * FROM facturas WHERE id = ?', [id]);
+      return res.json({
+        message: 'La factura ya incluye todas las cotizaciones complementarias aprobadas',
+        agregadas: 0,
+        factura: actual[0],
+      });
+    }
+
+    for (const c of pendientes) {
+      await connection.execute(
+        'INSERT INTO factura_cotizacion (factura_id, cotizacion_id, monto, es_principal) VALUES (?, ?, ?, 0)',
+        [id, c.id, c.total]
+      );
+    }
+
+    const cotIds = pendientes.map((c) => c.id);
+    const [items] = await connection.execute(
+      `SELECT ci.cotizacion_id,
+              ci.tipo_item, ci.perfil_id, ci.tipo_emo, ci.examen_id,
+              ci.nombre AS descripcion, ci.cantidad,
+              ci.precio_final AS precio_unitario,
+              (ci.cantidad * ci.precio_final) AS subtotal
+       FROM cotizacion_items ci
+       WHERE ci.cotizacion_id IN (${cotIds.map(() => '?').join(',')})`,
+      cotIds
+    );
+    for (const it of items) {
+      await connection.execute(
+        `INSERT INTO factura_detalle
+           (factura_id, cotizacion_id, tipo_item, perfil_id, tipo_emo, examen_id,
+            descripcion, cantidad, precio_unitario, subtotal)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          id,
+          it.cotizacion_id,
+          it.tipo_item,
+          it.perfil_id,
+          it.tipo_emo,
+          it.examen_id,
+          it.descripcion,
+          it.cantidad,
+          it.precio_unitario,
+          it.subtotal,
+        ]
+      );
+    }
+
+    const [sumRows] = await connection.execute(
+      'SELECT COALESCE(SUM(monto), 0) AS subtotal FROM factura_cotizacion WHERE factura_id = ?',
+      [id]
+    );
+    const subtotal = Number(sumRows[0]?.subtotal ?? 0);
+    const igv = Math.round(subtotal * 0.18 * 100) / 100;
+    const total = Math.round((subtotal + igv) * 100) / 100;
+    await connection.execute(
+      'UPDATE facturas SET subtotal = ?, igv = ?, total = ? WHERE id = ?',
+      [subtotal, igv, total, id]
+    );
+
+    const nums = pendientes.map((c) => c.numero_cotizacion || c.id).join(', ');
+    await connection.execute(
+      `INSERT INTO historial_pedido (pedido_id, cotizacion_id, tipo_evento, descripcion, usuario_id, usuario_nombre, valor_anterior, valor_nuevo, atendidos, no_atendidos)
+       VALUES (?, NULL, 'FACTURA_EMITIDA', ?, ?, ?, NULL, NULL, NULL, NULL)`,
+      [
+        pedido_id,
+        `Factura ${factura.numero_factura}: se incorporaron cotización(es) complementaria(s) ${nums} (S/ ${subtotal.toFixed(2)} subtotal actualizado).`,
+        req.user?.id || null,
+        req.user?.nombre_completo || null,
+      ]
+    );
+
+    await connection.commit();
+    connection.release();
+
+    const [updated] = await pool.execute('SELECT * FROM facturas WHERE id = ?', [id]);
+    res.json({
+      message: `Se agregaron ${pendientes.length} cotización(es) complementaria(s) a la factura`,
+      agregadas: pendientes.length,
+      cotizacion_ids: pendientes.map((c) => c.id),
+      factura: updated[0],
+    });
+  } catch (error) {
+    try {
+      await connection.rollback();
+    } catch (_) {
+      /* ignore */
+    }
+    connection.release();
+    console.error('Error al sincronizar cotizaciones en factura:', error);
+    res.status(500).json({ error: 'Error al sincronizar cotizaciones en la factura' });
+  }
+};
+
 const updateFactura = async (req, res) => {
   try {
     const { id } = req.params;
@@ -536,6 +674,7 @@ module.exports = {
   getAllFacturas,
   getFacturaById,
   createFactura,
+  sincronizarCotizacionesFactura,
   updateFactura,
   reportarPagoPorCliente,
   enviarFacturaAlCliente,

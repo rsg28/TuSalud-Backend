@@ -5,6 +5,7 @@ const {
   getAllFacturas,
   getFacturaById,
   createFactura,
+  sincronizarCotizacionesFactura,
   updateFactura,
   reportarPagoPorCliente,
   enviarFacturaAlCliente,
@@ -26,6 +27,12 @@ router.post(
   idempotency('POST:/api/facturas'),
   createFacturaValidation,
   createFactura
+);
+router.post(
+  '/:id/sincronizar-cotizaciones',
+  authenticateToken,
+  requireRole('manager', 'vendedor'),
+  sincronizarCotizacionesFactura
 );
 router.put('/:id', authenticateToken, requireRole('manager', 'vendedor'), updateFactura);
 router.post('/:id/reportar-pago-cliente', authenticateToken, requireRole('cliente'), reportarPagoPorCliente);
