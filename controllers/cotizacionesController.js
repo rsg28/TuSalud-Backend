@@ -290,6 +290,7 @@ const getCotizacionesEnviadasAlManager = async (req, res) => {
        JOIN pedidos p ON c.pedido_id = p.id
        JOIN empresas e ON p.empresa_id = e.id
        WHERE c.estado IN ('ENVIADA_AL_MANAGER', 'APROBADA_POR_MANAGER')
+         AND p.estado <> 'CANCELADO'
        ORDER BY c.fecha DESC, c.created_at DESC`,
       []
     );
