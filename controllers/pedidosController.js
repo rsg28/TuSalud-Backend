@@ -1,7 +1,7 @@
 const pool = require('../config/database');
 const { normalizarRol } = require('../middleware/auth');
 const {
-  helpers: { emitirNotificacionAVendedorDePedido },
+  helpers: { emitirNotificacionAVendedorDePedido, emitirNotificacionAClienteDePedido },
 } = require('./notificacionesController');
 const { persistirSnapshotPaciente: persistirSnapshotPacienteBase } = require('../utils/perfilSnapshot');
 const { fetchPrecioExamen } = require('../utils/examenPrecio');
@@ -1252,6 +1252,23 @@ async function marcarPedidoCanceladoEnConnection(connection, pedidoId, usuarioId
     );
   } catch (histErr) {
     console.warn('[TuSalud] historial cancelación suave (no bloquea):', histErr?.message || histErr);
+  }
+  try {
+    const numero = rows[0].numero_pedido || `Pedido #${pedidoId}`;
+    await emitirNotificacionAClienteDePedido(connection, {
+      pedidoId,
+      tipo: 'MENSAJE',
+      titulo: `Pedido cancelado · ${numero}`,
+      mensaje: 'Tu pedido fue cancelado. Puedes revisar el detalle en la app.',
+      contextoJson: {
+        evento: 'PEDIDO_CANCELADO',
+        pedido_id: Number(pedidoId),
+        numero_pedido: rows[0].numero_pedido ?? null,
+      },
+      remitenteUsuarioId: usuarioId,
+    });
+  } catch (notifErr) {
+    console.warn('[TuSalud] notificación cancelación al cliente (no bloquea):', notifErr?.message || notifErr);
   }
   return { already: false, numero: rows[0].numero_pedido };
 }

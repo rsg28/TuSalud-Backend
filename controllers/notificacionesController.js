@@ -98,6 +98,27 @@ async function emitirNotificacionAClientesDeEmpresa(conn, params) {
  * pedido no tiene vendedor asignado aún, intenta avisar a todos los managers
  * activos como fallback. Devuelve la cantidad de filas insertadas.
  */
+/**
+ * Notifica al cliente vinculado al pedido (`cliente_usuario_id`). Devuelve 0 si
+ * no hay cliente o el pedido no existe.
+ */
+async function emitirNotificacionAClienteDePedido(conn, params) {
+  const { pedidoId } = params;
+  const [filas] = await conn.execute(
+    'SELECT cliente_usuario_id, empresa_id, numero_pedido FROM pedidos WHERE id = ?',
+    [pedidoId]
+  );
+  if (filas.length === 0) return 0;
+  const clienteId = filas[0].cliente_usuario_id;
+  if (!clienteId) return 0;
+  await emitirNotificacion(conn, {
+    ...params,
+    destinatarioUsuarioId: clienteId,
+    destinatarioEmpresaId: filas[0].empresa_id,
+  });
+  return 1;
+}
+
 async function emitirNotificacionAVendedorDePedido(conn, params) {
   const { pedidoId } = params;
   const [filas] = await conn.execute(
@@ -463,5 +484,6 @@ exports.responder = async (req, res) => {
 module.exports.helpers = {
   emitirNotificacion,
   emitirNotificacionAClientesDeEmpresa,
+  emitirNotificacionAClienteDePedido,
   emitirNotificacionAVendedorDePedido,
 };
