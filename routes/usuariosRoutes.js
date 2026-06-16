@@ -452,6 +452,45 @@ const listarClientesPendientes = async (req, res) => {
   }
 };
 
+/** Elimina un usuario (solo manager). No permite borrar la propia cuenta ni el último manager activo. */
+const eliminarUsuario = async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    if (!Number.isInteger(id) || id <= 0) {
+      return res.status(400).json({ error: 'ID de usuario no válido' });
+    }
+    if (sameUsuarioId(req.user.id, id)) {
+      return res.status(400).json({ error: 'No puedes eliminar tu propia cuenta desde aquí' });
+    }
+
+    const [users] = await pool.execute('SELECT id, rol, activo FROM usuarios WHERE id = ?', [id]);
+    if (users.length === 0) {
+      return res.status(404).json({ error: 'Usuario no encontrado' });
+    }
+    const target = users[0];
+
+    if (target.rol === 'manager' && target.activo) {
+      const [rows] = await pool.execute(
+        "SELECT COUNT(*) AS total FROM usuarios WHERE rol = 'manager' AND activo = 1"
+      );
+      if (Number(rows[0]?.total || 0) <= 1) {
+        return res.status(400).json({ error: 'No se puede eliminar el último manager activo' });
+      }
+    }
+
+    await pool.execute('DELETE FROM usuarios WHERE id = ?', [id]);
+    res.json({ message: 'Usuario eliminado correctamente' });
+  } catch (error) {
+    console.error('Error al eliminar usuario:', error);
+    if (error?.code === 'ER_ROW_IS_REFERENCED_2') {
+      return res.status(409).json({
+        error: 'No se puede eliminar este usuario porque tiene registros vinculados en el sistema',
+      });
+    }
+    res.status(500).json({ error: 'Error al eliminar usuario' });
+  }
+};
+
 /** Rechaza (elimina) una solicitud de registro de cliente aún no aprobada. */
 const rechazarSolicitudCliente = async (req, res) => {
   try {
@@ -758,5 +797,6 @@ router.delete(
   requireRole('manager', 'vendedor'),
   rechazarSolicitudCliente
 );
+router.delete('/:id', authenticateToken, requireRole('manager'), eliminarUsuario);
 
 module.exports = router;
