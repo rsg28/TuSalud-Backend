@@ -24,17 +24,17 @@ router.get('/buscar', verificarToken, preciosController.buscarExamenes);
 // Listar precios por sede
 router.get('/sede/:sede_id', verificarToken, preciosController.listarPreciosSede);
 
-// Actualizar precios (solo manager)
+// Actualizar precios (manager y vendedor)
 router.put(
   '/examen/:examen_id',
   verificarToken,
-  verificarRol(['manager']),
+  verificarRol(['manager', 'vendedor']),
   preciosController.setPrecioExamen
 );
 router.put(
   '/perfil/:perfil_id',
   verificarToken,
-  verificarRol(['manager']),
+  verificarRol(['manager', 'vendedor']),
   preciosController.setPrecioPerfil
 );
 
