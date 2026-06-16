@@ -3,6 +3,7 @@ const router = express.Router();
 const pool = require('../config/database');
 const { authenticateToken, requireRole } = require('../middleware/auth');
 const { body, validationResult } = require('express-validator');
+const { resolveEmpresaId, rucSoloDigitos } = require('../utils/resolveEmpresaId');
 const {
   helpers: { emitirNotificacion },
 } = require('../controllers/notificacionesController');
@@ -159,6 +160,12 @@ const setEmpresaByUsuarioId = async (req, res) => {
     }
     if (!sameUsuarioId(req.user.id, userId) && req.user.rol !== 'manager') {
       return res.status(403).json({ error: 'No puedes modificar la empresa de otro usuario' });
+    }
+    if (req.user.rol === 'cliente' && sameUsuarioId(req.user.id, userId)) {
+      return res.status(403).json({
+        error:
+          'No puedes cambiar tu empresa directamente. Solicita representar otra empresa y un vendedor la aprobará.',
+      });
     }
 
     const [users] = await pool.execute('SELECT id FROM usuarios WHERE id = ?', [userId]);
@@ -359,6 +366,73 @@ const toggleUsuarioActivo = async (req, res) => {
   }
 };
 
+/** Clientes con cuenta pendiente + solicitudes de cambio de empresa. */
+const listarSolicitudesPendientes = async (req, res) => {
+  try {
+    const [cuentas] = await pool.execute(
+      `SELECT u.id, u.nombre_usuario, u.email, u.nombre_completo, u.telefono,
+              u.ruc, u.tipo_ruc, u.rol, u.activo, u.empresa_id, u.created_at,
+              e.razon_social AS empresa_razon_social
+         FROM usuarios u
+         LEFT JOIN empresas e ON e.id = u.empresa_id
+        WHERE u.rol = 'cliente' AND u.activo = 0
+        ORDER BY u.created_at DESC`
+    );
+
+    let empresas = [];
+    try {
+      const [rows] = await pool.execute(
+        `SELECT s.id, s.usuario_id, s.empresa_id_actual, s.empresa_id_destino,
+                s.razon_social_propuesta, s.ruc_propuesto, s.created_at,
+                u.nombre_completo, u.email, u.telefono,
+                ea.razon_social AS empresa_actual_nombre,
+                ed.razon_social AS empresa_destino_nombre
+           FROM solicitudes_cambio_empresa s
+           INNER JOIN usuarios u ON u.id = s.usuario_id
+           LEFT JOIN empresas ea ON ea.id = s.empresa_id_actual
+           LEFT JOIN empresas ed ON ed.id = s.empresa_id_destino
+          WHERE s.estado = 'PENDIENTE'
+          ORDER BY s.created_at DESC`
+      );
+      empresas = rows;
+    } catch (tblErr) {
+      if (tblErr?.code !== 'ER_NO_SUCH_TABLE') throw tblErr;
+    }
+
+    const solicitudes = [
+      ...cuentas.map((u) => ({
+        tipo: 'cuenta',
+        id: u.id,
+        nombre_completo: u.nombre_completo,
+        email: u.email,
+        telefono: u.telefono,
+        ruc: u.ruc,
+        empresa_id: u.empresa_id,
+        empresa_razon_social: u.empresa_razon_social,
+        created_at: u.created_at,
+      })),
+      ...empresas.map((s) => ({
+        tipo: 'empresa',
+        id: s.id,
+        usuario_id: s.usuario_id,
+        nombre_completo: s.nombre_completo,
+        email: s.email,
+        telefono: s.telefono,
+        empresa_actual_nombre: s.empresa_actual_nombre,
+        empresa_destino_nombre:
+          s.empresa_destino_nombre || s.razon_social_propuesta,
+        ruc_propuesto: s.ruc_propuesto,
+        created_at: s.created_at,
+      })),
+    ].sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+
+    res.json({ solicitudes });
+  } catch (error) {
+    console.error('Error al listar solicitudes pendientes:', error);
+    res.status(500).json({ error: 'Error al listar solicitudes pendientes' });
+  }
+};
+
 /** Clientes con cuenta pendiente de aprobación (activo = 0). */
 const listarClientesPendientes = async (req, res) => {
   try {
@@ -398,7 +472,248 @@ const rechazarSolicitudCliente = async (req, res) => {
   }
 };
 
+const crearSolicitudCambioEmpresa = async (req, res) => {
+  const connection = await pool.getConnection();
+  try {
+    if (req.user.rol !== 'cliente') {
+      return res.status(403).json({ error: 'Solo los clientes pueden solicitar cambio de empresa' });
+    }
+    const userId = Number(req.user.id);
+    const { empresa_id, razon_social, ruc, direccion, contacto } = req.body || {};
+
+    const [pend] = await connection.execute(
+      "SELECT id FROM solicitudes_cambio_empresa WHERE usuario_id = ? AND estado = 'PENDIENTE' LIMIT 1",
+      [userId]
+    );
+    if (pend.length > 0) {
+      return res.status(400).json({ error: 'Ya tienes una solicitud de cambio de empresa pendiente' });
+    }
+
+    const [userRows] = await connection.execute(
+      'SELECT id, empresa_id, ruc FROM usuarios WHERE id = ?',
+      [userId]
+    );
+    if (userRows.length === 0) {
+      return res.status(404).json({ error: 'Usuario no encontrado' });
+    }
+    const empresaIdActual = userRows[0].empresa_id;
+
+    let empresaIdDestino = null;
+    let razonPropuesta = null;
+    let rucPropuesto = null;
+    let direccionPropuesta = null;
+    let contactoPropuesto = null;
+
+    if (empresa_id != null && Number.isInteger(Number(empresa_id))) {
+      const [emp] = await connection.execute('SELECT id, razon_social, ruc FROM empresas WHERE id = ?', [
+        Number(empresa_id),
+      ]);
+      if (emp.length === 0) {
+        return res.status(404).json({ error: 'Empresa no encontrada' });
+      }
+      if (empresaIdActual != null && Number(emp[0].id) === Number(empresaIdActual)) {
+        return res.status(400).json({ error: 'Ya representas a esa empresa' });
+      }
+      empresaIdDestino = emp[0].id;
+      razonPropuesta = emp[0].razon_social;
+      rucPropuesto = emp[0].ruc;
+    } else {
+      const razon = razon_social ? String(razon_social).trim() : '';
+      const rucVal = ruc ? rucSoloDigitos(ruc) : null;
+      if (!razon) {
+        return res.status(400).json({ error: 'Indica la razón social de la empresa' });
+      }
+      await connection.beginTransaction();
+      empresaIdDestino = await resolveEmpresaId(connection, {
+        razon_social: razon,
+        ruc: rucVal,
+        direccion,
+        contacto,
+      });
+      razonPropuesta = razon;
+      rucPropuesto = rucVal;
+      direccionPropuesta = direccion && String(direccion).trim() ? String(direccion).trim() : null;
+      contactoPropuesto = contacto && String(contacto).trim() ? String(contacto).trim() : null;
+      if (empresaIdActual != null && Number(empresaIdDestino) === Number(empresaIdActual)) {
+        await connection.rollback();
+        return res.status(400).json({ error: 'Ya representas a esa empresa' });
+      }
+      await connection.commit();
+    }
+
+    const [result] = await connection.execute(
+      `INSERT INTO solicitudes_cambio_empresa
+        (usuario_id, empresa_id_actual, empresa_id_destino, razon_social_propuesta,
+         ruc_propuesto, direccion_propuesta, contacto_propuesto, estado)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDIENTE')`,
+      [
+        userId,
+        empresaIdActual,
+        empresaIdDestino,
+        razonPropuesta,
+        rucPropuesto,
+        direccionPropuesta,
+        contactoPropuesto,
+      ]
+    );
+
+    try {
+      const [staff] = await connection.execute(
+        "SELECT id FROM usuarios WHERE rol IN ('manager', 'vendedor') AND activo = 1"
+      );
+      for (const s of staff) {
+        await emitirNotificacion(connection, {
+          tipo: 'MENSAJE',
+          titulo: 'Solicitud de cambio de empresa',
+          mensaje: `${req.user.nombre_completo || 'Un cliente'} solicita representar a ${razonPropuesta || 'otra empresa'}.`,
+          contextoJson: {
+            evento: 'CLIENTE_CAMBIO_EMPRESA_PENDIENTE',
+            solicitud_id: result.insertId,
+            usuario_id: userId,
+          },
+          remitenteUsuarioId: userId,
+          destinatarioUsuarioId: s.id,
+        });
+      }
+    } catch (notifErr) {
+      console.warn('[TuSalud] notificación cambio empresa (no bloquea):', notifErr?.message || notifErr);
+    }
+
+    res.status(201).json({
+      message: 'Solicitud enviada. Un vendedor la revisará pronto.',
+      solicitud_id: result.insertId,
+    });
+  } catch (error) {
+    try {
+      await connection.rollback();
+    } catch {
+      /* ignore */
+    }
+    if (error?.code === 'ER_NO_SUCH_TABLE') {
+      return res.status(503).json({
+        error: 'La función de solicitud de cambio de empresa aún no está disponible en el servidor',
+      });
+    }
+    console.error('Error al crear solicitud cambio empresa:', error);
+    res.status(error?.status || 500).json({ error: error?.message || 'Error al crear solicitud' });
+  } finally {
+    connection.release();
+  }
+};
+
+const getMiSolicitudCambioEmpresa = async (req, res) => {
+  try {
+    if (req.user.rol !== 'cliente') {
+      return res.status(403).json({ error: 'Solo aplica a clientes' });
+    }
+    const [rows] = await pool.execute(
+      `SELECT s.*, ed.razon_social AS empresa_destino_nombre
+         FROM solicitudes_cambio_empresa s
+         LEFT JOIN empresas ed ON ed.id = s.empresa_id_destino
+        WHERE s.usuario_id = ? AND s.estado = 'PENDIENTE'
+        ORDER BY s.created_at DESC
+        LIMIT 1`,
+      [req.user.id]
+    );
+    res.json({ solicitud: rows[0] ?? null });
+  } catch (error) {
+    if (error?.code === 'ER_NO_SUCH_TABLE') {
+      return res.json({ solicitud: null });
+    }
+    console.error('Error al obtener solicitud cambio empresa:', error);
+    res.status(500).json({ error: 'Error al obtener solicitud' });
+  }
+};
+
+const aprobarSolicitudCambioEmpresa = async (req, res) => {
+  const connection = await pool.getConnection();
+  try {
+    const solicitudId = Number(req.params.id);
+    const [rows] = await connection.execute(
+      "SELECT * FROM solicitudes_cambio_empresa WHERE id = ? AND estado = 'PENDIENTE'",
+      [solicitudId]
+    );
+    if (rows.length === 0) {
+      return res.status(404).json({ error: 'Solicitud no encontrada o ya revisada' });
+    }
+    const sol = rows[0];
+    let empresaDestinoId = sol.empresa_id_destino;
+    if (!empresaDestinoId) {
+      empresaDestinoId = await resolveEmpresaId(connection, {
+        razon_social: sol.razon_social_propuesta,
+        ruc: sol.ruc_propuesto,
+        direccion: sol.direccion_propuesta,
+        contacto: sol.contacto_propuesto,
+      });
+    }
+
+    await connection.beginTransaction();
+    await connection.execute('UPDATE usuarios SET empresa_id = ?, ruc = COALESCE(?, ruc) WHERE id = ?', [
+      empresaDestinoId,
+      sol.ruc_propuesto,
+      sol.usuario_id,
+    ]);
+    await connection.execute(
+      `UPDATE solicitudes_cambio_empresa
+          SET estado = 'APROBADA', empresa_id_destino = ?, revisado_por_usuario_id = ?, updated_at = NOW()
+        WHERE id = ?`,
+      [empresaDestinoId, req.user?.id ?? null, solicitudId]
+    );
+    await connection.commit();
+
+    try {
+      await emitirNotificacion(connection, {
+        tipo: 'MENSAJE',
+        titulo: 'Cambio de empresa aprobado',
+        mensaje: 'Tu solicitud para representar otra empresa fue aprobada.',
+        contextoJson: { evento: 'CLIENTE_CAMBIO_EMPRESA_APROBADO', empresa_id: empresaDestinoId },
+        remitenteUsuarioId: req.user?.id ?? null,
+        destinatarioUsuarioId: sol.usuario_id,
+      });
+    } catch (notifErr) {
+      console.warn('[TuSalud] notificación aprobación cambio empresa:', notifErr?.message || notifErr);
+    }
+
+    res.json({ message: 'Solicitud de cambio de empresa aprobada' });
+  } catch (error) {
+    await connection.rollback();
+    console.error('Error al aprobar cambio empresa:', error);
+    res.status(500).json({ error: 'Error al aprobar solicitud' });
+  } finally {
+    connection.release();
+  }
+};
+
+const rechazarSolicitudCambioEmpresa = async (req, res) => {
+  try {
+    const solicitudId = Number(req.params.id);
+    const [rows] = await pool.execute(
+      "SELECT id, usuario_id FROM solicitudes_cambio_empresa WHERE id = ? AND estado = 'PENDIENTE'",
+      [solicitudId]
+    );
+    if (rows.length === 0) {
+      return res.status(404).json({ error: 'Solicitud no encontrada o ya revisada' });
+    }
+    await pool.execute(
+      `UPDATE solicitudes_cambio_empresa
+          SET estado = 'RECHAZADA', revisado_por_usuario_id = ?, mensaje_rechazo = ?, updated_at = NOW()
+        WHERE id = ?`,
+      [req.user?.id ?? null, req.body?.mensaje_rechazo ?? null, solicitudId]
+    );
+    res.json({ message: 'Solicitud de cambio de empresa rechazada' });
+  } catch (error) {
+    console.error('Error al rechazar cambio empresa:', error);
+    res.status(500).json({ error: 'Error al rechazar solicitud' });
+  }
+};
+
 router.get('/', authenticateToken, requireRole('manager'), getAllUsuarios);
+router.get(
+  '/solicitudes-pendientes',
+  authenticateToken,
+  requireRole('manager', 'vendedor'),
+  listarSolicitudesPendientes
+);
 router.get(
   '/pendientes-aprobacion',
   authenticateToken,
@@ -415,6 +730,20 @@ router.get('/me/empresa', authenticateToken, empresaMe(getEmpresaByUsuarioId));
 router.delete('/me/empresa', authenticateToken, empresaMe(deleteEmpresaByUsuarioId));
 router.post('/me/empresa', authenticateToken, empresaMe(setEmpresaByUsuarioId));
 router.patch('/me/empresa', authenticateToken, empresaMe(patchEmpresaByUsuarioId));
+router.get('/me/solicitud-cambio-empresa', authenticateToken, getMiSolicitudCambioEmpresa);
+router.post('/me/solicitud-cambio-empresa', authenticateToken, crearSolicitudCambioEmpresa);
+router.put(
+  '/solicitudes-cambio-empresa/:id/aprobar',
+  authenticateToken,
+  requireRole('manager', 'vendedor'),
+  aprobarSolicitudCambioEmpresa
+);
+router.delete(
+  '/solicitudes-cambio-empresa/:id',
+  authenticateToken,
+  requireRole('manager', 'vendedor'),
+  rechazarSolicitudCambioEmpresa
+);
 
 router.get('/:id/empresa', authenticateToken, getEmpresaByUsuarioId);
 router.delete('/:id/empresa', authenticateToken, deleteEmpresaByUsuarioId);

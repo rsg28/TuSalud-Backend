@@ -4,6 +4,7 @@ const { Resend } = require('resend');
 const crypto = require('crypto');
 const pool = require('../config/database');
 const { validationResult } = require('express-validator');
+const { resolveEmpresaId, rucSoloDigitos } = require('../utils/resolveEmpresaId');
 const {
   helpers: { emitirNotificacion },
 } = require('./notificacionesController');
@@ -29,9 +30,8 @@ function generarCodigoReset() {
  * Datos demográficos opcionales: dni, fecha_nacimiento, sexo, direccion.
  * Para rol = 'paciente', dni es obligatorio (link con pedido_pacientes).
  *
- * Si rol = 'cliente' y se envía RUC, se intenta enlazar a una empresa
- * existente con ese RUC (no se crea automáticamente; el cliente puede
- * pedir crearla luego).
+ * Si rol = 'cliente', debe indicar razón social y RUC de la empresa que representará.
+ * Se enlaza o crea la empresa automáticamente al registrarse.
  */
 const register = async (req, res) => {
   try {
@@ -49,6 +49,9 @@ const register = async (req, res) => {
       dni,
       ruc,
       tipo_ruc,
+      razon_social,
+      empresa_direccion,
+      empresa_contacto,
       fecha_nacimiento,
       sexo,
       direccion,
@@ -77,16 +80,26 @@ const register = async (req, res) => {
       }
     }
 
-    // Si rol = cliente y se envió RUC, intentar enlazar empresa existente.
+    // Cliente: enlazar o crear la empresa que representará.
     let empresaId = null;
-    const rucNorm = ruc ? String(ruc).trim() : null;
-    if (rolSolicitado === 'cliente' && rucNorm) {
-      const [empresas] = await pool.execute(
-        'SELECT id FROM empresas WHERE ruc = ? LIMIT 1',
-        [rucNorm]
-      );
-      if (empresas.length > 0) {
-        empresaId = empresas[0].id;
+    const rucNorm = ruc ? rucSoloDigitos(ruc) : null;
+    if (rolSolicitado === 'cliente') {
+      const razonNorm = razon_social ? String(razon_social).trim() : '';
+      if (!razonNorm) {
+        return res.status(400).json({ error: 'La razón social de la empresa es obligatoria para clientes' });
+      }
+      if (!rucNorm) {
+        return res.status(400).json({ error: 'El RUC de la empresa es obligatorio para clientes' });
+      }
+      try {
+        empresaId = await resolveEmpresaId(pool, {
+          razon_social: razonNorm,
+          ruc: rucNorm,
+          direccion: empresa_direccion,
+          contacto: empresa_contacto || nombre_completo || telefono,
+        });
+      } catch (empErr) {
+        return res.status(empErr.status || 400).json({ error: empErr.message || 'Datos de empresa inválidos' });
       }
     }
 
@@ -153,7 +166,7 @@ const register = async (req, res) => {
           const [staff] = await conn.execute(
             "SELECT id FROM usuarios WHERE rol IN ('manager', 'vendedor') AND activo = 1"
           );
-          const empresaTxt = rucNorm ? ` (RUC ${rucNorm})` : '';
+          const empresaTxt = rucNorm ? ` · ${razon_social?.trim() || 'Empresa'} (RUC ${rucNorm})` : '';
           for (const s of staff) {
             await emitirNotificacion(conn, {
               tipo: 'MENSAJE',

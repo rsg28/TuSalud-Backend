@@ -15,6 +15,9 @@ const registerValidation = [
   body('rol').optional().isIn(['cliente', 'paciente']).withMessage('Rol no permitido en registro público'),
   body('dni').optional({ nullable: true, checkFalsy: true }).isLength({ min: 6, max: 20 }).withMessage('DNI inválido'),
   body('ruc').optional({ nullable: true, checkFalsy: true }).isLength({ min: 8, max: 20 }).withMessage('RUC inválido'),
+  body('razon_social').optional({ nullable: true, checkFalsy: true }).isLength({ min: 2, max: 255 }).withMessage('razón social inválida'),
+  body('empresa_direccion').optional({ nullable: true, checkFalsy: true }).isLength({ max: 255 }),
+  body('empresa_contacto').optional({ nullable: true, checkFalsy: true }).isLength({ max: 255 }),
   body('tipo_ruc').optional({ nullable: true, checkFalsy: true }).isIn(['NINGUNO', 'RUC10', 'RUC20']).withMessage('tipo_ruc inválido'),
   body('sexo').optional({ nullable: true, checkFalsy: true }).isIn(['HOMBRE', 'MUJER']).withMessage('sexo inválido'),
   body('fecha_nacimiento').optional({ nullable: true, checkFalsy: true }).isISO8601().withMessage('fecha_nacimiento inválida (YYYY-MM-DD)'),
@@ -25,6 +28,16 @@ const registerValidation = [
       const dni = String(value?.dni || '').trim();
       if (!dni) {
         throw new Error('El DNI es obligatorio para el rol paciente');
+      }
+    }
+    if (rol === 'cliente') {
+      const razon = String(value?.razon_social || '').trim();
+      const ruc = String(value?.ruc || '').replace(/\D/g, '');
+      if (!razon) {
+        throw new Error('La razón social de la empresa es obligatoria para clientes');
+      }
+      if (!ruc) {
+        throw new Error('El RUC de la empresa es obligatorio para clientes');
       }
     }
     return true;
