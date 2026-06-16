@@ -1610,6 +1610,48 @@ const obtenerArticulosPendientes = async (req, res) => {
 };
 
 /**
+ * Elimina cotizaciones del pedido que no están vinculadas a una factura.
+ * Las facturas y sus enlaces en factura_cotizacion se conservan.
+ */
+async function eliminarCotizacionesNoFacturadasEnConnection(connection, pedidoId) {
+  const [linkedRows] = await connection.execute(
+    `SELECT DISTINCT fc.cotizacion_id AS id
+     FROM factura_cotizacion fc
+     INNER JOIN facturas f ON f.id = fc.factura_id
+     WHERE f.pedido_id = ?`,
+    [pedidoId]
+  );
+  const protegidas = new Set(linkedRows.map((r) => Number(r.id)));
+
+  const [cotRows] = await connection.execute('SELECT id FROM cotizaciones WHERE pedido_id = ?', [pedidoId]);
+  const idsBorrar = cotRows.map((r) => Number(r.id)).filter((id) => !protegidas.has(id));
+  if (idsBorrar.length === 0) {
+    const [ped] = await connection.execute('SELECT cotizacion_principal_id FROM pedidos WHERE id = ?', [pedidoId]);
+    const principalId =
+      ped[0]?.cotizacion_principal_id != null ? Number(ped[0].cotizacion_principal_id) : null;
+    if (principalId != null && !protegidas.has(principalId)) {
+      await connection.execute('UPDATE pedidos SET cotizacion_principal_id = NULL WHERE id = ?', [pedidoId]);
+    }
+    return;
+  }
+
+  const ph = idsBorrar.map(() => '?').join(',');
+  await connection.execute(
+    `DELETE FROM cotizaciones WHERE id IN (${ph}) AND es_complementaria = 1`,
+    idsBorrar
+  );
+  await connection.execute(`UPDATE cotizaciones SET cotizacion_base_id = NULL WHERE id IN (${ph})`, idsBorrar);
+  await connection.execute(`DELETE FROM cotizaciones WHERE id IN (${ph})`, idsBorrar);
+
+  const [pedAfter] = await connection.execute('SELECT cotizacion_principal_id FROM pedidos WHERE id = ?', [pedidoId]);
+  const principalId =
+    pedAfter[0]?.cotizacion_principal_id != null ? Number(pedAfter[0].cotizacion_principal_id) : null;
+  if (principalId != null && idsBorrar.includes(principalId)) {
+    await connection.execute('UPDATE pedidos SET cotizacion_principal_id = NULL WHERE id = ?', [pedidoId]);
+  }
+}
+
+/**
  * Marca el pedido como CANCELADO sin borrar datos (cancelación suave).
  * Usado cuando el vendedor «elimina» un pedido desde el listado.
  */
@@ -1625,6 +1667,11 @@ async function marcarPedidoCanceladoEnConnection(connection, pedidoId, usuarioId
     return { already: true, numero: rows[0].numero_pedido };
   }
   await connection.execute("UPDATE pedidos SET estado = 'CANCELADO' WHERE id = ?", [pedidoId]);
+  try {
+    await eliminarCotizacionesNoFacturadasEnConnection(connection, pedidoId);
+  } catch (cotErr) {
+    console.warn('[TuSalud] limpieza cotizaciones al cancelar (no bloquea):', cotErr?.message || cotErr);
+  }
   try {
     await registrarHistorial(
       connection,

@@ -37,6 +37,6 @@ router.post(
 router.put('/:id', authenticateToken, requireRole('manager', 'vendedor'), updateFactura);
 router.post('/:id/reportar-pago-cliente', authenticateToken, requireRole('cliente'), reportarPagoPorCliente);
 router.post('/:id/enviar-cliente', authenticateToken, requireRole('manager', 'vendedor'), enviarFacturaAlCliente);
-router.delete('/:id', authenticateToken, requireRole('vendedor'), deleteFactura);
+router.delete('/:id', authenticateToken, requireRole('manager'), deleteFactura);
 
 module.exports = router;

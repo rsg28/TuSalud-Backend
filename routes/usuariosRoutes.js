@@ -3,6 +3,9 @@ const router = express.Router();
 const pool = require('../config/database');
 const { authenticateToken, requireRole } = require('../middleware/auth');
 const { body, validationResult } = require('express-validator');
+const {
+  helpers: { emitirNotificacion },
+} = require('../controllers/notificacionesController');
 
 /** Evita 403 por desajuste string/number/BigInt entre JWT/BD y el id de la URL. */
 function sameUsuarioId(reqUserId, targetUserId) {
@@ -312,16 +315,40 @@ const toggleUsuarioActivo = async (req, res) => {
       return res.status(400).json({ error: 'El campo activo debe ser un booleano' });
     }
 
-    // Verificar que el usuario existe
-    const [users] = await pool.execute('SELECT id FROM usuarios WHERE id = ?', [id]);
+    const [users] = await pool.execute('SELECT id, rol, nombre_completo, email FROM usuarios WHERE id = ?', [id]);
     if (users.length === 0) {
       return res.status(404).json({ error: 'Usuario no encontrado' });
+    }
+    const target = users[0];
+
+    if (req.user.rol === 'vendedor' && target.rol !== 'cliente') {
+      return res.status(403).json({ error: 'Solo puedes aprobar cuentas de clientes' });
     }
 
     await pool.execute('UPDATE usuarios SET activo = ? WHERE id = ?', [activo, id]);
 
+    if (activo && target.rol === 'cliente') {
+      try {
+        const conn = await pool.getConnection();
+        try {
+          await emitirNotificacion(conn, {
+            tipo: 'MENSAJE',
+            titulo: 'Cuenta aprobada',
+            mensaje: 'Tu cuenta fue aprobada. Ya puedes iniciar sesión en TuSalud.',
+            contextoJson: { evento: 'CLIENTE_CUENTA_APROBADA' },
+            remitenteUsuarioId: req.user?.id ?? null,
+            destinatarioUsuarioId: target.id,
+          });
+        } finally {
+          conn.release();
+        }
+      } catch (notifErr) {
+        console.warn('[TuSalud] notificación aprobación cliente (no bloquea):', notifErr?.message || notifErr);
+      }
+    }
+
     const [updatedUser] = await pool.execute(
-      'SELECT id, nombre_usuario, email, nombre_completo, telefono, ruc, tipo_ruc, rol, activo FROM usuarios WHERE id = ?',
+      'SELECT id, nombre_usuario, email, nombre_completo, telefono, ruc, tipo_ruc, rol, activo, empresa_id, created_at FROM usuarios WHERE id = ?',
       [id]
     );
 
@@ -332,7 +359,52 @@ const toggleUsuarioActivo = async (req, res) => {
   }
 };
 
+/** Clientes con cuenta pendiente de aprobación (activo = 0). */
+const listarClientesPendientes = async (req, res) => {
+  try {
+    const [usuarios] = await pool.execute(
+      `SELECT u.id, u.nombre_usuario, u.email, u.nombre_completo, u.telefono,
+              u.ruc, u.tipo_ruc, u.rol, u.activo, u.empresa_id, u.created_at,
+              e.razon_social AS empresa_razon_social
+         FROM usuarios u
+         LEFT JOIN empresas e ON e.id = u.empresa_id
+        WHERE u.rol = 'cliente' AND u.activo = 0
+        ORDER BY u.created_at DESC`
+    );
+    res.json({ usuarios });
+  } catch (error) {
+    console.error('Error al listar clientes pendientes:', error);
+    res.status(500).json({ error: 'Error al listar clientes pendientes' });
+  }
+};
+
+/** Rechaza (elimina) una solicitud de registro de cliente aún no aprobada. */
+const rechazarSolicitudCliente = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const [users] = await pool.execute('SELECT id, rol, activo FROM usuarios WHERE id = ?', [id]);
+    if (users.length === 0) {
+      return res.status(404).json({ error: 'Usuario no encontrado' });
+    }
+    const target = users[0];
+    if (target.rol !== 'cliente' || target.activo) {
+      return res.status(400).json({ error: 'Solo se pueden rechazar cuentas de cliente pendientes de aprobación' });
+    }
+    await pool.execute('DELETE FROM usuarios WHERE id = ?', [id]);
+    res.json({ message: 'Solicitud de cuenta rechazada' });
+  } catch (error) {
+    console.error('Error al rechazar solicitud de cliente:', error);
+    res.status(500).json({ error: 'Error al rechazar solicitud de cliente' });
+  }
+};
+
 router.get('/', authenticateToken, requireRole('manager'), getAllUsuarios);
+router.get(
+  '/pendientes-aprobacion',
+  authenticateToken,
+  requireRole('manager', 'vendedor'),
+  listarClientesPendientes
+);
 
 // Empresa del usuario autenticado (evita desajuste entre token y id guardado en el cliente)
 const empresaMe = (handler) => (req, res, next) => {
@@ -350,6 +422,12 @@ router.post('/:id/empresa', authenticateToken, setEmpresaByUsuarioId);
 router.put('/:id/rol', authenticateToken, requireRole('manager'), [
   body('rol').isIn(['manager', 'vendedor', 'cliente']).withMessage('Rol inválido')
 ], updateUsuarioRol);
-router.put('/:id/activo', authenticateToken, requireRole('manager'), toggleUsuarioActivo);
+router.put('/:id/activo', authenticateToken, requireRole('manager', 'vendedor'), toggleUsuarioActivo);
+router.delete(
+  '/:id/solicitud',
+  authenticateToken,
+  requireRole('manager', 'vendedor'),
+  rechazarSolicitudCliente
+);
 
 module.exports = router;

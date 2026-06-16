@@ -4,6 +4,9 @@ const { Resend } = require('resend');
 const crypto = require('crypto');
 const pool = require('../config/database');
 const { validationResult } = require('express-validator');
+const {
+  helpers: { emitirNotificacion },
+} = require('./notificacionesController');
 
 const RESEND_API_KEY = process.env.RESEND_API_KEY;
 const resend = RESEND_API_KEY ? new Resend(RESEND_API_KEY) : null;
@@ -99,13 +102,15 @@ const register = async (req, res) => {
       ? (tipo_ruc && ['NINGUNO', 'RUC10', 'RUC20'].includes(String(tipo_ruc)) ? String(tipo_ruc) : 'NINGUNO')
       : 'NINGUNO';
 
+    const cuentaActiva = rolSolicitado !== 'cliente';
+
     // Insertar nuevo usuario
     const [result] = await pool.execute(
       `INSERT INTO usuarios
          (nombre_usuario, email, password_hash, nombre_completo, telefono,
           dni, ruc, tipo_ruc, fecha_nacimiento, sexo, direccion,
           rol, activo, empresa_id)
-       VALUES (?, ?, ?, ?, ?,  ?, ?, ?, ?, ?, ?,  ?, TRUE, ?)`,
+       VALUES (?, ?, ?, ?, ?,  ?, ?, ?, ?, ?, ?,  ?, ?, ?)`,
       [
         nombre_usuario,
         email,
@@ -119,15 +124,67 @@ const register = async (req, res) => {
         sexoNorm,
         direccionNorm,
         rolSolicitado,
+        cuentaActiva,
         rolSolicitado === 'cliente' ? empresaId : null,
       ]
     );
 
-    // JWT con expiración configurable (`JWT_EXPIRES_IN`, por defecto 30 días).
-    // Antes no caducaba: un token robado o un empleado desactivado seguía
-    // operativo indefinidamente (el middleware revalida `activo` en cada
-    // request, pero no había límite absoluto). 30 días sigue siendo cómodo
-    // para apps móviles sin refresh token.
+    const userPayload = {
+      id: result.insertId,
+      nombre_usuario,
+      email,
+      nombre_completo,
+      telefono: telefono || null,
+      dni: dniNorm,
+      ruc: rolSolicitado === 'cliente' ? rucNorm : null,
+      tipo_ruc: tipoRucNorm,
+      fecha_nacimiento: fechaNacNorm,
+      sexo: sexoNorm,
+      direccion: direccionNorm,
+      rol: rolSolicitado,
+      empresa_id: rolSolicitado === 'cliente' ? empresaId : null,
+      activo: cuentaActiva,
+    };
+
+    if (rolSolicitado === 'cliente') {
+      try {
+        const conn = await pool.getConnection();
+        try {
+          const [staff] = await conn.execute(
+            "SELECT id FROM usuarios WHERE rol IN ('manager', 'vendedor') AND activo = 1"
+          );
+          const empresaTxt = rucNorm ? ` (RUC ${rucNorm})` : '';
+          for (const s of staff) {
+            await emitirNotificacion(conn, {
+              tipo: 'MENSAJE',
+              titulo: 'Nueva cuenta de cliente pendiente',
+              mensaje: `${nombre_completo}${empresaTxt} solicitó crear una cuenta. Revísala y aprueba o rechaza.`,
+              contextoJson: {
+                evento: 'CLIENTE_PENDIENTE_APROBACION',
+                usuario_id: result.insertId,
+                ruc: rucNorm,
+                empresa_id: empresaId,
+              },
+              remitenteUsuarioId: result.insertId,
+              destinatarioUsuarioId: s.id,
+              destinatarioEmpresaId: empresaId,
+            });
+          }
+        } finally {
+          conn.release();
+        }
+      } catch (notifErr) {
+        console.warn('[TuSalud] notificación registro cliente (no bloquea):', notifErr?.message || notifErr);
+      }
+
+      return res.status(201).json({
+        message:
+          'Tu solicitud fue registrada. Un vendedor debe aprobar tu cuenta antes de que puedas iniciar sesión.',
+        pending_approval: true,
+        user: userPayload,
+      });
+    }
+
     const token = jwt.sign(
       { userId: result.insertId, email, rol: rolSolicitado },
       process.env.JWT_SECRET,
@@ -137,21 +194,7 @@ const register = async (req, res) => {
     res.status(201).json({
       message: 'Usuario registrado exitosamente',
       token,
-      user: {
-        id: result.insertId,
-        nombre_usuario,
-        email,
-        nombre_completo,
-        telefono: telefono || null,
-        dni: dniNorm,
-        ruc: rolSolicitado === 'cliente' ? rucNorm : null,
-        tipo_ruc: tipoRucNorm,
-        fecha_nacimiento: fechaNacNorm,
-        sexo: sexoNorm,
-        direccion: direccionNorm,
-        rol: rolSolicitado,
-        empresa_id: rolSolicitado === 'cliente' ? empresaId : null,
-      }
+      user: userPayload,
     });
   } catch (error) {
     console.error('Error en registro:', error);
@@ -186,6 +229,12 @@ const login = async (req, res) => {
 
     // Verificar si el usuario está activo
     if (!user.activo) {
+      if (user.rol === 'cliente') {
+        return res.status(401).json({
+          error: 'Tu cuenta está pendiente de aprobación por un vendedor. Te avisaremos cuando puedas ingresar.',
+          pending_approval: true,
+        });
+      }
       return res.status(401).json({ error: 'Usuario inactivo' });
     }
 
