@@ -454,6 +454,7 @@ const listarClientesPendientes = async (req, res) => {
 
 /** Elimina un usuario (solo manager). No permite borrar la propia cuenta ni el último manager activo. */
 const eliminarUsuario = async (req, res) => {
+  const connection = await pool.getConnection();
   try {
     const id = parseInt(req.params.id, 10);
     if (!Number.isInteger(id) || id <= 0) {
@@ -463,14 +464,14 @@ const eliminarUsuario = async (req, res) => {
       return res.status(400).json({ error: 'No puedes eliminar tu propia cuenta desde aquí' });
     }
 
-    const [users] = await pool.execute('SELECT id, rol, activo FROM usuarios WHERE id = ?', [id]);
+    const [users] = await connection.execute('SELECT id, rol, activo FROM usuarios WHERE id = ?', [id]);
     if (users.length === 0) {
       return res.status(404).json({ error: 'Usuario no encontrado' });
     }
     const target = users[0];
 
     if (target.rol === 'manager' && target.activo) {
-      const [rows] = await pool.execute(
+      const [rows] = await connection.execute(
         "SELECT COUNT(*) AS total FROM usuarios WHERE rol = 'manager' AND activo = 1"
       );
       if (Number(rows[0]?.total || 0) <= 1) {
@@ -478,9 +479,41 @@ const eliminarUsuario = async (req, res) => {
       }
     }
 
-    await pool.execute('DELETE FROM usuarios WHERE id = ?', [id]);
+    await connection.beginTransaction();
+
+    const cleanupStatements = [
+      'DELETE FROM editor_actividad WHERE usuario_id = ?',
+      'DELETE FROM idempotency_keys WHERE usuario_id = ?',
+      'DELETE FROM solicitudes_cambio_empresa WHERE usuario_id = ?',
+      'UPDATE notificaciones SET remitente_usuario_id = NULL WHERE remitente_usuario_id = ?',
+      'UPDATE notificaciones SET destinatario_usuario_id = NULL WHERE destinatario_usuario_id = ?',
+      'UPDATE pedidos SET vendedor_id = NULL WHERE vendedor_id = ?',
+      'UPDATE pedidos SET cliente_usuario_id = NULL WHERE cliente_usuario_id = ?',
+      'UPDATE cotizaciones SET creador_id = NULL WHERE creador_id = ?',
+    ];
+
+    for (const sql of cleanupStatements) {
+      try {
+        await connection.execute(sql, [id]);
+      } catch (cleanupErr) {
+        if (cleanupErr?.code !== 'ER_NO_SUCH_TABLE') throw cleanupErr;
+      }
+    }
+
+    const [result] = await connection.execute('DELETE FROM usuarios WHERE id = ?', [id]);
+    if (result.affectedRows === 0) {
+      await connection.rollback();
+      return res.status(404).json({ error: 'Usuario no encontrado' });
+    }
+
+    await connection.commit();
     res.json({ message: 'Usuario eliminado correctamente' });
   } catch (error) {
+    try {
+      await connection.rollback();
+    } catch {
+      /* ignore */
+    }
     console.error('Error al eliminar usuario:', error);
     if (error?.code === 'ER_ROW_IS_REFERENCED_2') {
       return res.status(409).json({
@@ -488,6 +521,8 @@ const eliminarUsuario = async (req, res) => {
       });
     }
     res.status(500).json({ error: 'Error al eliminar usuario' });
+  } finally {
+    connection.release();
   }
 };
 
