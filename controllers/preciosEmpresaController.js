@@ -595,6 +595,169 @@ exports.setPrecioPerfil = async (req, res) => {
   }
 };
 
+/** Resuelve `categoria_id` a partir del nombre mostrado en la UI (incluye «Otros»). */
+async function resolverCategoriaIdPorNombre(nombreCategoria) {
+  const nom = String(nombreCategoria || '').trim();
+  if (!nom || nom.toLowerCase() === 'otros') return null;
+  const [rows] = await pool.execute(
+    `SELECT ec.id FROM emo_categorias ec
+     WHERE COALESCE(NULLIF(TRIM(ec.nombre), ''), 'Otros') = ?
+     LIMIT 1`,
+    [nom]
+  );
+  return rows.length ? rows[0].id : null;
+}
+
+/**
+ * Actualiza nombre (y opcionalmente código) de un examen del catálogo.
+ * Body: { nombre: string, codigo?: string | null }
+ */
+exports.actualizarExamenCatalogo = async (req, res) => {
+  try {
+    const examenId = parseInt(String(req.params.examen_id), 10);
+    if (!Number.isInteger(examenId) || examenId <= 0) {
+      return res.status(400).json({ error: 'examen_id inválido' });
+    }
+    const { nombre, codigo } = req.body || {};
+    const nombreTrim = String(nombre ?? '').trim();
+    if (!nombreTrim) {
+      return res.status(400).json({ error: 'nombre es requerido' });
+    }
+    if (nombreTrim.length > 255) {
+      return res.status(400).json({ error: 'nombre demasiado largo (máx. 255)' });
+    }
+
+    const [exRows] = await pool.execute(
+      'SELECT id FROM examenes WHERE id = ? AND activo = 1',
+      [examenId]
+    );
+    if (exRows.length === 0) {
+      return res.status(404).json({ error: 'Examen no encontrado' });
+    }
+
+    const codigoVal =
+      codigo === undefined
+        ? undefined
+        : codigo == null || String(codigo).trim() === ''
+          ? null
+          : String(codigo).trim().slice(0, 50);
+
+    if (codigoVal === undefined) {
+      await pool.execute('UPDATE examenes SET nombre = ? WHERE id = ?', [
+        nombreTrim,
+        examenId,
+      ]);
+    } else {
+      await pool.execute('UPDATE examenes SET nombre = ?, codigo = ? WHERE id = ?', [
+        nombreTrim,
+        codigoVal,
+        examenId,
+      ]);
+    }
+
+    res.json({
+      message: 'Examen actualizado',
+      examen_id: examenId,
+      nombre: nombreTrim,
+      ...(codigoVal !== undefined ? { codigo: codigoVal } : {}),
+    });
+  } catch (error) {
+    console.error('Error al actualizar examen del catálogo:', error);
+    res.status(500).json({ error: 'Error al actualizar el examen' });
+  }
+};
+
+/**
+ * Crea un examen en una categoría del catálogo (manager / vendedor).
+ * Body: {
+ *   nombre: string,
+ *   categoria: string,
+ *   codigo?: string,
+ *   sede_id?: number,
+ *   precio_hasta_15?: number,
+ *   precio_desde_16?: number
+ * }
+ */
+exports.crearExamenCatalogo = async (req, res) => {
+  try {
+    const {
+      nombre,
+      categoria,
+      codigo,
+      sede_id,
+      precio_hasta_15,
+      precio_desde_16,
+    } = req.body || {};
+    const nombreTrim = String(nombre ?? '').trim();
+    if (!nombreTrim) {
+      return res.status(400).json({ error: 'nombre es requerido' });
+    }
+    if (nombreTrim.length > 255) {
+      return res.status(400).json({ error: 'nombre demasiado largo (máx. 255)' });
+    }
+    const categoriaNom = String(categoria ?? '').trim();
+    if (!categoriaNom) {
+      return res.status(400).json({ error: 'categoria es requerida' });
+    }
+
+    const categoriaId = await resolverCategoriaIdPorNombre(categoriaNom);
+    if (categoriaId == null && categoriaNom.toLowerCase() !== 'otros') {
+      return res.status(400).json({ error: 'Categoría no encontrada' });
+    }
+
+    const codigoVal =
+      codigo == null || String(codigo).trim() === '' ? null : String(codigo).trim().slice(0, 50);
+
+    const [ins] = await pool.execute(
+      'INSERT INTO examenes (nombre, categoria_id, codigo, activo) VALUES (?, ?, ?, 1)',
+      [nombreTrim, categoriaId, codigoVal]
+    );
+    const examenId = ins.insertId;
+
+    const sedeIdNum =
+      sede_id == null || sede_id === '' ? null : parseInt(String(sede_id), 10);
+    if (sedeIdNum != null && (!Number.isInteger(sedeIdNum) || sedeIdNum <= 0)) {
+      return res.status(400).json({ error: 'sede_id inválido' });
+    }
+
+    const tienePrecio =
+      (precio_hasta_15 != null && !isNaN(Number(precio_hasta_15))) ||
+      (precio_desde_16 != null && !isNaN(Number(precio_desde_16)));
+
+    if (tienePrecio && sedeIdNum != null) {
+      const hasta15Num =
+        precio_hasta_15 != null && !isNaN(Number(precio_hasta_15))
+          ? Number(precio_hasta_15)
+          : Number(precio_desde_16) || 0;
+      const desde16Num =
+        precio_desde_16 != null && !isNaN(Number(precio_desde_16))
+          ? Number(precio_desde_16)
+          : hasta15Num;
+      await pool.execute(
+        `INSERT INTO examen_precio
+           (examen_id, sede_id, precio, precio_hasta_15, precio_desde_16, vigente_desde)
+         VALUES (?, ?, ?, ?, ?, CURDATE())
+         ON DUPLICATE KEY UPDATE
+           precio          = VALUES(precio),
+           precio_hasta_15 = VALUES(precio_hasta_15),
+           precio_desde_16 = VALUES(precio_desde_16)`,
+        [examenId, sedeIdNum, desde16Num, hasta15Num, desde16Num]
+      );
+    }
+
+    res.status(201).json({
+      message: 'Examen creado',
+      examen_id: examenId,
+      nombre: nombreTrim,
+      categoria: categoriaNom,
+      codigo: codigoVal,
+    });
+  } catch (error) {
+    console.error('Error al crear examen del catálogo:', error);
+    res.status(500).json({ error: 'Error al crear el examen' });
+  }
+};
+
 // Listar precios por sede (examen_precio)
 exports.listarPreciosSede = async (req, res) => {
   try {

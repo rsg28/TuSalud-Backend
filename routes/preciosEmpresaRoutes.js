@@ -21,10 +21,24 @@ router.get('/perfiles/:perfilId/examenes', verificarToken, preciosController.obt
 // Buscar exámenes por texto (query: q, sede_id)
 router.get('/buscar', verificarToken, preciosController.buscarExamenes);
 
+// Catálogo de exámenes (manager y vendedor)
+router.post(
+  '/examenes',
+  verificarToken,
+  verificarRol(['manager', 'vendedor']),
+  preciosController.crearExamenCatalogo
+);
+
 // Listar precios por sede
 router.get('/sede/:sede_id', verificarToken, preciosController.listarPreciosSede);
 
 // Actualizar precios (manager y vendedor)
+router.patch(
+  '/examen/:examen_id',
+  verificarToken,
+  verificarRol(['manager', 'vendedor']),
+  preciosController.actualizarExamenCatalogo
+);
 router.put(
   '/examen/:examen_id',
   verificarToken,
