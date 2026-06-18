@@ -5,6 +5,7 @@ const crypto = require('crypto');
 const pool = require('../config/database');
 const { validationResult } = require('express-validator');
 const { resolveEmpresaId, rucSoloDigitos } = require('../utils/resolveEmpresaId');
+const { issueUserToken, rotateUserSession } = require('../utils/authSession');
 const {
   helpers: { emitirNotificacion },
 } = require('./notificacionesController');
@@ -198,11 +199,11 @@ const register = async (req, res) => {
       });
     }
 
-    const token = jwt.sign(
-      { userId: result.insertId, email, rol: rolSolicitado },
-      process.env.JWT_SECRET,
-      { expiresIn: process.env.JWT_EXPIRES_IN || '30d' }
-    );
+    const { token } = await issueUserToken({
+      id: result.insertId,
+      email,
+      rol: rolSolicitado,
+    });
 
     res.status(201).json({
       message: 'Usuario registrado exitosamente',
@@ -257,11 +258,11 @@ const login = async (req, res) => {
       return res.status(401).json({ error: 'Credenciales inválidas' });
     }
 
-    const token = jwt.sign(
-      { userId: user.id, email: user.email, rol: user.rol },
-      process.env.JWT_SECRET,
-      { expiresIn: process.env.JWT_EXPIRES_IN || '30d' }
-    );
+    const { token } = await issueUserToken({
+      id: user.id,
+      email: user.email,
+      rol: user.rol,
+    });
 
     res.json({
       message: 'Login exitoso',
@@ -428,6 +429,7 @@ const resetPassword = async (req, res) => {
       password_hash,
       userId,
     ]);
+    await rotateUserSession(userId);
 
     res.json({ message: 'Contraseña actualizada. Ya puedes iniciar sesión.' });
   } catch (error) {
@@ -461,9 +463,22 @@ const getCurrentUser = async (req, res) => {
   }
 };
 
+const logout = async (req, res) => {
+  try {
+    if (req.user?.id) {
+      await rotateUserSession(req.user.id);
+    }
+    res.json({ message: 'Sesión cerrada' });
+  } catch (error) {
+    console.error('Error en logout:', error);
+    res.status(500).json({ error: 'Error al cerrar sesión' });
+  }
+};
+
 module.exports = {
   register,
   login,
+  logout,
   getCurrentUser,
   forgotPassword,
   resetPassword,

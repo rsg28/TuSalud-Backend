@@ -1,5 +1,6 @@
 const jwt = require('jsonwebtoken');
 const pool = require('../config/database');
+const { verifyUserSession, SESSION_REPLACED_MESSAGE } = require('../utils/authSession');
 
 /**
  * Sesión en TuSalud (resumen):
@@ -138,6 +139,17 @@ const authenticateToken = async (req, res, next) => {
     );
 
     if (users.length === 0) {
+      return res.status(401).json({ error: 'Usuario no válido o inactivo' });
+    }
+
+    const sessionCheck = await verifyUserSession(decoded);
+    if (!sessionCheck.ok) {
+      if (sessionCheck.reason === 'SESSION_REPLACED') {
+        return res.status(401).json({
+          error: SESSION_REPLACED_MESSAGE,
+          code: 'SESSION_REPLACED',
+        });
+      }
       return res.status(401).json({ error: 'Usuario no válido o inactivo' });
     }
 
