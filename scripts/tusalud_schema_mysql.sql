@@ -477,6 +477,7 @@ CREATE TABLE `pedido_items` (
   `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
   UNIQUE KEY `uq_pedido_items` (`pedido_id`,`item_key`),
+  KEY `idx_pedido_items_pedido_id` (`pedido_id`),
   KEY `idx_pedido_items_perfil` (`perfil_id`),
   KEY `idx_pedido_items_examen` (`examen_id`),
   CONSTRAINT `pedido_items_ibfk_1` FOREIGN KEY (`pedido_id`) REFERENCES `pedidos` (`id`) ON DELETE CASCADE,
