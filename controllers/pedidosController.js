@@ -85,6 +85,70 @@ function parseExamenIdRef(raw) {
   return Number.isFinite(n) && n > 0 ? n : null;
 }
 
+/** Snapshot JSON para línea EXAMEN con perfil de origen (misma forma que cotizacion_items). */
+function snapshotExamenPerfilOrigenPedido(raw, it) {
+  if (raw.examenes_snapshot_json) {
+    return typeof raw.examenes_snapshot_json === 'string'
+      ? raw.examenes_snapshot_json
+      : JSON.stringify(raw.examenes_snapshot_json);
+  }
+  const perfilOrigenId = raw.perfil_origen_id != null ? Number(raw.perfil_origen_id) : 0;
+  if (!Number.isFinite(perfilOrigenId) || perfilOrigenId <= 0) return null;
+  const tipoEmo = raw.perfil_origen_tipo_emo
+    ? String(raw.perfil_origen_tipo_emo).toUpperCase()
+    : null;
+  return JSON.stringify({
+    origen: 'examen_de_perfil',
+    snapshot_at: new Date().toISOString(),
+    perfil_id: perfilOrigenId,
+    perfil_nombre: raw.perfil_origen_nombre ?? null,
+    tipo_emo: tipoEmo,
+    examen_id: it.examen_id,
+    nombre_catalogo: it.nombre || null,
+  });
+}
+
+function perfilOrigenDesdeRaw(raw) {
+  const perfilOrigenId = raw.perfil_origen_id != null ? Number(raw.perfil_origen_id) : null;
+  const idOk = Number.isFinite(perfilOrigenId) && perfilOrigenId > 0 ? perfilOrigenId : null;
+  const tipoEmoRaw = raw.perfil_origen_tipo_emo ? String(raw.perfil_origen_tipo_emo).toUpperCase() : null;
+  const tipoEmo =
+    tipoEmoRaw && TIPOS_EMO_VALIDOS.has(tipoEmoRaw) ? tipoEmoRaw : null;
+  const nombre =
+    raw.perfil_origen_nombre != null && String(raw.perfil_origen_nombre).trim()
+      ? String(raw.perfil_origen_nombre).trim()
+      : null;
+  return { perfil_origen_id: idOk, perfil_origen_tipo_emo: tipoEmo, perfil_origen_nombre: nombre };
+}
+
+async function insertarPedidoItem(connection, pedidoId, raw, precio_base) {
+  const it = normalizePedidoItem(raw);
+  const origen = perfilOrigenDesdeRaw(raw);
+  const snapshotJson =
+    it.tipo_item === 'EXAMEN' ? snapshotExamenPerfilOrigenPedido(raw, it) : null;
+  await connection.execute(
+    `INSERT INTO pedido_items (
+       pedido_id, tipo_item, perfil_id, tipo_emo, examen_id, nombre, cantidad, precio_base,
+       perfil_origen_id, perfil_origen_tipo_emo, perfil_origen_nombre, examenes_snapshot_json
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      pedidoId,
+      it.tipo_item,
+      it.perfil_id,
+      it.tipo_emo,
+      it.examen_id,
+      it.nombre,
+      it.cantidad,
+      precio_base,
+      origen.perfil_origen_id,
+      origen.perfil_origen_tipo_emo,
+      origen.perfil_origen_nombre,
+      snapshotJson,
+    ]
+  );
+  return it;
+}
+
 const { siguienteNumeroPedido } = require('../utils/numeracion');
 
 /**
@@ -335,6 +399,8 @@ const obtenerPedido = async (req, res) => {
     const [examenes] = await pool.execute(
       `SELECT pi.id, pi.pedido_id, pi.tipo_item, pi.perfil_id, pi.tipo_emo, pi.examen_id,
               pi.nombre, pi.cantidad, pi.precio_base, pi.created_at,
+              pi.perfil_origen_id, pi.perfil_origen_tipo_emo, pi.perfil_origen_nombre,
+              pi.examenes_snapshot_json,
               ex.nombre AS examen_nombre,
               pf.nombre AS perfil_nombre
        FROM pedido_items pi
@@ -617,15 +683,10 @@ const crearPedido = async (req, res) => {
         }
       }
 
-      await connection.execute(
-        `INSERT INTO pedido_items
-           (pedido_id, tipo_item, perfil_id, tipo_emo, examen_id, nombre, cantidad, precio_base)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        [pedido_id, it.tipo_item, it.perfil_id, it.tipo_emo, it.examen_id, it.nombre, it.cantidad, precio_base]
-      );
+      const itInserted = await insertarPedidoItem(connection, pedido_id, raw, precio_base);
 
-      if (it.tipo_item === 'EXAMEN') {
-        pedidoExamenIds.add(Number(it.examen_id));
+      if (itInserted.tipo_item === 'EXAMEN') {
+        pedidoExamenIds.add(Number(itInserted.examen_id));
       }
     }
 

@@ -460,8 +460,19 @@ CREATE TABLE `pedido_items` (
   `nombre` varchar(255) DEFAULT NULL,
   `cantidad` int NOT NULL,
   `precio_base` decimal(12,2) NOT NULL,
-  `item_key` varchar(64) GENERATED ALWAYS AS (
-    CONCAT(`tipo_item`, '|', IFNULL(`perfil_id`, 0), '|', IFNULL(`tipo_emo`, ''), '|', IFNULL(`examen_id`, 0))
+  `perfil_origen_id` int DEFAULT NULL,
+  `perfil_origen_tipo_emo` enum('PREOC','ANUAL','RETIRO','VISITA') DEFAULT NULL,
+  `perfil_origen_nombre` varchar(255) DEFAULT NULL,
+  `examenes_snapshot_json` json DEFAULT NULL COMMENT 'Snapshot examen+perfil origen (tipo_item=EXAMEN).',
+  `item_key` varchar(128) GENERATED ALWAYS AS (
+    CONCAT(
+      `tipo_item`, '|',
+      IFNULL(`perfil_id`, 0), '|',
+      IFNULL(`tipo_emo`, ''), '|',
+      IFNULL(`examen_id`, 0), '|',
+      IFNULL(`perfil_origen_id`, 0), '|',
+      IFNULL(`perfil_origen_tipo_emo`, '')
+    )
   ) VIRTUAL,
   `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
