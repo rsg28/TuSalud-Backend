@@ -110,14 +110,32 @@ function snapshotExamenPerfilOrigenPedido(raw, it) {
 
 function perfilOrigenDesdeRaw(raw) {
   const perfilOrigenId = raw.perfil_origen_id != null ? Number(raw.perfil_origen_id) : null;
-  const idOk = Number.isFinite(perfilOrigenId) && perfilOrigenId > 0 ? perfilOrigenId : null;
-  const tipoEmoRaw = raw.perfil_origen_tipo_emo ? String(raw.perfil_origen_tipo_emo).toUpperCase() : null;
-  const tipoEmo =
-    tipoEmoRaw && TIPOS_EMO_VALIDOS.has(tipoEmoRaw) ? tipoEmoRaw : null;
-  const nombre =
+  let idOk = Number.isFinite(perfilOrigenId) && perfilOrigenId > 0 ? perfilOrigenId : null;
+  let tipoEmoRaw = raw.perfil_origen_tipo_emo ? String(raw.perfil_origen_tipo_emo).toUpperCase() : null;
+  let nombre =
     raw.perfil_origen_nombre != null && String(raw.perfil_origen_nombre).trim()
       ? String(raw.perfil_origen_nombre).trim()
       : null;
+
+  if (!idOk && raw.examenes_snapshot_json) {
+    try {
+      const snap =
+        typeof raw.examenes_snapshot_json === 'string'
+          ? JSON.parse(raw.examenes_snapshot_json)
+          : raw.examenes_snapshot_json;
+      if (snap && typeof snap === 'object' && snap.origen === 'examen_de_perfil') {
+        const pid = Number(snap.perfil_id);
+        if (Number.isFinite(pid) && pid > 0) idOk = pid;
+        if (!tipoEmoRaw && snap.tipo_emo) tipoEmoRaw = String(snap.tipo_emo).toUpperCase();
+        if (!nombre && snap.perfil_nombre) nombre = String(snap.perfil_nombre).trim();
+      }
+    } catch (_) {
+      /* ignore */
+    }
+  }
+
+  const tipoEmo =
+    tipoEmoRaw && TIPOS_EMO_VALIDOS.has(tipoEmoRaw) ? tipoEmoRaw : null;
   return { perfil_origen_id: idOk, perfil_origen_tipo_emo: tipoEmo, perfil_origen_nombre: nombre };
 }
 
