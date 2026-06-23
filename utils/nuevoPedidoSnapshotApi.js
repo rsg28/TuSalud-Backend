@@ -1,6 +1,12 @@
 /**
  * Expande el snapshot del wizard «nuevo pedido» (pacientes → perfiles + adicionales)
  * al payload interno de POST /api/pedidos (empleados + ítems agregados).
+ *
+ * Regla de precios:
+ *   - `precio` en el snapshot del wizard = precio superficial propuesto por el cliente.
+ *   - `pedido_items.precio_base` = precio de catálogo (no se pisa con el del cliente).
+ *   - `examenes_snapshot_json.precio_cliente` = precio superficial del cliente.
+ *   - `examenes_snapshot_json.precio_catalogo` = precio de catálogo congelado.
  */
 
 'use strict';
@@ -14,6 +20,10 @@ function precioSnapshot(valor) {
 
 function clavePerfil(perfilId, emoTipo) {
   return `${perfilId}:${emoTipo}`;
+}
+
+function claveItemPedido(examenId, perfilOrigenId, perfilOrigenTipoEmo) {
+  return `${examenId}|${perfilOrigenId ?? 0}|${perfilOrigenTipoEmo ?? ''}`;
 }
 
 function parseExamenSnapshotRef(raw) {
@@ -31,7 +41,7 @@ function parseExamenSnapshotRef(raw) {
 function parsePerfilSnapshot(raw) {
   if (!raw || typeof raw !== 'object') return null;
   const perfil_id = Number(raw.perfil_id);
-  const emo_tipo = raw.emo_tipo ? String(raw.emo_tipo).toUpperCase() : '';
+  const emo_tipo = String(raw.emo_tipo ?? '').toUpperCase();
   if (!Number.isFinite(perfil_id) || perfil_id <= 0) return null;
   if (!TIPOS_EMO_VALIDOS.has(emo_tipo)) return null;
   const examenes = (Array.isArray(raw.examenes) ? raw.examenes : [])
@@ -50,13 +60,16 @@ function parsePacienteSnapshot(raw) {
   const dni = String(raw.dni ?? '').trim();
   const nombre_completo = String(raw.nombre_completo ?? '').trim();
   if (!dni || !nombre_completo) return null;
+
   const perfiles = (Array.isArray(raw.perfiles) ? raw.perfiles : [])
     .map(parsePerfilSnapshot)
     .filter(Boolean);
   const adicionales = (Array.isArray(raw.adicionales) ? raw.adicionales : [])
     .map(parseExamenSnapshotRef)
     .filter(Boolean);
+
   if (!perfiles.length && !adicionales.length) return null;
+
   return {
     dni,
     nombre_completo,
@@ -71,6 +84,49 @@ function combinarPrecioAgregado(prev, next) {
   const n = precioSnapshot(next);
   const p = precioSnapshot(prev);
   return n > 0 ? n : p;
+}
+
+function parseSnapObj(raw) {
+  if (raw == null || raw === '') return {};
+  if (typeof raw === 'string') {
+    try {
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+  return typeof raw === 'object' ? { ...raw } : {};
+}
+
+/** Arma snapshot JSON de ítem EXAMEN con precio superficial del cliente y catálogo separados. */
+function buildSnapItemPedido({
+  origen,
+  examenId,
+  nombre,
+  precioCliente,
+  precioCatalogo,
+  perfilId,
+  perfilNombre,
+  tipoEmo,
+}) {
+  const snap = {
+    origen,
+    snapshot_at: new Date().toISOString(),
+    examen_id: examenId,
+    nombre_catalogo: nombre,
+    precio_catalogo: precioSnapshot(precioCatalogo),
+  };
+  const pc = precioSnapshot(precioCliente);
+  if (pc > 0 || origen === 'pedido_examen' || origen === 'examen_de_perfil') {
+    snap.precio_cliente = pc;
+  }
+  if (origen === 'examen_de_perfil') {
+    snap.perfil_id = perfilId;
+    snap.perfil_nombre = perfilNombre;
+    snap.tipo_emo = tipoEmo;
+  }
+  return snap;
 }
 
 /** JSON persistido en pedido_pacientes.examenes_snapshot_json */
@@ -133,7 +189,7 @@ function expandirSnapshotPacientesAPedido(pacientesRaw) {
         bucket.set(ex.examen_id, {
           cantidad: (prev?.cantidad ?? 0) + 1,
           nombre: ex.nombre,
-          precio: combinarPrecioAgregado(prev?.precio, ex.precio),
+          precioCliente: combinarPrecioAgregado(prev?.precioCliente, ex.precio),
           meta: {
             perfilId: pr.perfil_id,
             perfilNombre: pr.perfil_nombre,
@@ -149,7 +205,7 @@ function expandirSnapshotPacientesAPedido(pacientesRaw) {
       extraBucket.set(ex.examen_id, {
         cantidad: (prev?.cantidad ?? 0) + 1,
         nombre: ex.nombre,
-        precio: combinarPrecioAgregado(prev?.precio, ex.precio),
+        precioCliente: combinarPrecioAgregado(prev?.precioCliente, ex.precio),
       });
     }
 
@@ -178,25 +234,24 @@ function expandirSnapshotPacientesAPedido(pacientesRaw) {
     const bucket = perfilBuckets.get(bucketKey);
     if (!bucket) continue;
     for (const exId of [...bucket.keys()].sort((a, b) => a - b)) {
-      const { cantidad, meta, nombre, precio } = bucket.get(exId);
-      const snap = {
+      const { cantidad, meta, nombre, precioCliente } = bucket.get(exId);
+      const snap = buildSnapItemPedido({
         origen: 'examen_de_perfil',
-        snapshot_at: new Date().toISOString(),
-        perfil_id: meta.perfilId,
-        perfil_nombre: meta.perfilNombre,
-        tipo_emo: meta.tipoEmo,
-        examen_id: exId,
-        nombre_catalogo: nombre,
-        precio_cliente: precio,
-        precio_catalogo: precio,
-      };
+        examenId: exId,
+        nombre,
+        precioCliente,
+        precioCatalogo: 0,
+        perfilId: meta.perfilId,
+        perfilNombre: meta.perfilNombre,
+        tipoEmo: meta.tipoEmo,
+      });
       items.push({
         tipo_item: 'EXAMEN',
         examen_id: exId,
         nombre,
         cantidad,
-        precio_base: precio,
-        precio_final: precio,
+        precio_base: 0,
+        precio_cliente: precioCliente,
         perfil_origen_id: meta.perfilId,
         perfil_origen_nombre: meta.perfilNombre,
         perfil_origen_tipo_emo: meta.tipoEmo,
@@ -206,22 +261,21 @@ function expandirSnapshotPacientesAPedido(pacientesRaw) {
   }
 
   for (const exId of [...extraBucket.keys()].sort((a, b) => a - b)) {
-    const { cantidad, nombre, precio } = extraBucket.get(exId);
-    const snap = {
+    const { cantidad, nombre, precioCliente } = extraBucket.get(exId);
+    const snap = buildSnapItemPedido({
       origen: 'pedido_examen',
-      snapshot_at: new Date().toISOString(),
-      examen_id: exId,
-      nombre_catalogo: nombre,
-      precio_cliente: precio,
-      precio_catalogo: precio,
-    };
+      examenId: exId,
+      nombre,
+      precioCliente,
+      precioCatalogo: 0,
+    });
     items.push({
       tipo_item: 'EXAMEN',
       examen_id: exId,
       nombre,
       cantidad,
-      precio_base: precio,
-      precio_final: precio,
+      precio_base: 0,
+      precio_cliente: precioCliente,
       examenes_snapshot_json: snap,
     });
   }
@@ -230,10 +284,12 @@ function expandirSnapshotPacientesAPedido(pacientesRaw) {
 }
 
 /**
- * Persiste el snapshot wizard (con precios) en pedido_pacientes y actualiza ítems EXAMEN del pedido.
- * @returns {{ ok: true, empleados: number, items: number } | { ok: false, error: string }}
+ * Persiste snapshot wizard en pacientes e ítems del pedido.
+ * @param {object} [opts]
+ * @param {(examenId: number) => Promise<number>} [opts.fetchCatalogPrice]
  */
-async function sincronizarPedidoWizardSnapshot(dbConn, pedidoId, pacientesRaw) {
+async function sincronizarPedidoWizardSnapshot(dbConn, pedidoId, pacientesRaw, opts = {}) {
+  const { fetchCatalogPrice } = opts;
   const expanded = expandirSnapshotPacientesAPedido(pacientesRaw);
   if (!expanded) return { ok: false, error: 'pacientes inválidos' };
 
@@ -249,38 +305,87 @@ async function sincronizarPedidoWizardSnapshot(dbConn, pedidoId, pacientesRaw) {
     );
   }
 
-  for (const item of expanded.items) {
-    const snapJson =
-      item.examenes_snapshot_json != null
-        ? typeof item.examenes_snapshot_json === 'string'
-          ? item.examenes_snapshot_json
-          : JSON.stringify(item.examenes_snapshot_json)
-        : null;
-    const [existing] = await dbConn.execute(
-      `SELECT id FROM pedido_items WHERE pedido_id = ? AND tipo_item = 'EXAMEN' AND examen_id = ? LIMIT 1`,
-      [pedidoId, item.examen_id]
+  const [existingRows] = await dbConn.execute(
+    `SELECT id, examen_id, cantidad, precio_base,
+            perfil_origen_id, perfil_origen_tipo_emo, perfil_origen_nombre,
+            examenes_snapshot_json, nombre
+     FROM pedido_items
+     WHERE pedido_id = ? AND tipo_item = 'EXAMEN'`,
+    [pedidoId]
+  );
+
+  const existingByKey = new Map();
+  for (const row of existingRows) {
+    existingByKey.set(
+      claveItemPedido(row.examen_id, row.perfil_origen_id, row.perfil_origen_tipo_emo),
+      row
     );
-    if (!existing.length) continue;
-    const precioBase = Number(item.precio_final ?? item.precio_base ?? 0) || 0;
+  }
+
+  let itemsActualizados = 0;
+
+  for (const item of expanded.items) {
+    const precioCliente = precioSnapshot(item.precio_cliente ?? item.precio_final ?? 0);
+    const key = claveItemPedido(
+      item.examen_id,
+      item.perfil_origen_id ?? null,
+      item.perfil_origen_tipo_emo ?? null
+    );
+    let match = existingByKey.get(key);
+    if (!match && item.perfil_origen_id == null) {
+      match = existingRows.find((r) => Number(r.examen_id) === Number(item.examen_id)) ?? null;
+    }
+
+    let precioCatalogo = match ? Number(match.precio_base) || 0 : 0;
+    if (!precioCatalogo && typeof fetchCatalogPrice === 'function') {
+      precioCatalogo = precioSnapshot(await fetchCatalogPrice(item.examen_id));
+    }
+
+    const snapObj = buildSnapItemPedido({
+      origen: item.perfil_origen_id ? 'examen_de_perfil' : 'pedido_examen',
+      examenId: item.examen_id,
+      nombre: item.nombre,
+      precioCliente,
+      precioCatalogo,
+      perfilId: item.perfil_origen_id ?? undefined,
+      perfilNombre: item.perfil_origen_nombre ?? undefined,
+      tipoEmo: item.perfil_origen_tipo_emo ?? undefined,
+    });
+    const snapJson = JSON.stringify(snapObj);
+
+    if (match) {
+      await dbConn.execute(
+        'UPDATE pedido_items SET cantidad = ?, examenes_snapshot_json = ? WHERE id = ?',
+        [item.cantidad, snapJson, match.id]
+      );
+      itemsActualizados += 1;
+      continue;
+    }
+
+    if (typeof fetchCatalogPrice !== 'function') continue;
+
+    if (!precioCatalogo) {
+      precioCatalogo = precioSnapshot(await fetchCatalogPrice(item.examen_id));
+    }
+
     await dbConn.execute(
-      `UPDATE pedido_items SET
-         cantidad = ?,
-         precio_base = ?,
-         perfil_origen_id = ?,
-         perfil_origen_tipo_emo = ?,
-         perfil_origen_nombre = ?,
-         examenes_snapshot_json = COALESCE(?, examenes_snapshot_json)
-       WHERE id = ?`,
+      `INSERT INTO pedido_items (
+         pedido_id, tipo_item, perfil_id, tipo_emo, examen_id, nombre, cantidad, precio_base,
+         perfil_origen_id, perfil_origen_tipo_emo, perfil_origen_nombre, examenes_snapshot_json
+       ) VALUES (?, 'EXAMEN', NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
+        pedidoId,
+        item.examen_id,
+        item.nombre,
         item.cantidad,
-        precioBase,
+        precioCatalogo,
         item.perfil_origen_id ?? null,
         item.perfil_origen_tipo_emo ?? null,
         item.perfil_origen_nombre ?? null,
         snapJson,
-        existing[0].id,
       ]
     );
+    itemsActualizados += 1;
   }
 
   if (expanded.empleados.length > 0) {
@@ -290,7 +395,20 @@ async function sincronizarPedidoWizardSnapshot(dbConn, pedidoId, pacientesRaw) {
     ]);
   }
 
-  return { ok: true, empleados: expanded.empleados.length, items: expanded.items.length };
+  return {
+    ok: true,
+    empleados: expanded.empleados.length,
+    items: expanded.items.length,
+    items_actualizados: itemsActualizados,
+  };
+}
+
+/** Precio superficial propuesto por el cliente en un ítem expandido del wizard. */
+function precioClienteDesdeItemRaw(raw) {
+  const directo = precioSnapshot(raw.precio_cliente ?? raw.precio_final ?? raw.precio);
+  if (directo > 0) return directo;
+  const snap = parseSnapObj(raw.examenes_snapshot_json);
+  return precioSnapshot(snap.precio_cliente);
 }
 
 module.exports = {
@@ -300,4 +418,6 @@ module.exports = {
   expandirSnapshotPacientesAPedido,
   buildWizardPacienteSnapshotJson,
   sincronizarPedidoWizardSnapshot,
+  precioClienteDesdeItemRaw,
+  buildSnapItemPedido,
 };

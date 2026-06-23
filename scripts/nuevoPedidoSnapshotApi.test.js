@@ -8,7 +8,7 @@ const {
   sincronizarPedidoWizardSnapshot,
 } = require('../utils/nuevoPedidoSnapshotApi');
 
-test('expandirSnapshotPacientesAPedido agrupa perfiles, adicionales y precios', () => {
+test('expandirSnapshotPacientesAPedido agrupa perfiles, adicionales y precios superficiales', () => {
   const out = expandirSnapshotPacientesAPedido([
     {
       dni: '10000000',
@@ -48,16 +48,19 @@ test('expandirSnapshotPacientesAPedido agrupa perfiles, adicionales y precios', 
 
   const triaje = out.items.find((i) => i.examen_id === 1);
   assert.equal(triaje?.cantidad, 2);
-  assert.equal(triaje?.precio_base, 8);
+  assert.equal(triaje?.precio_base, 0);
+  assert.equal(triaje?.precio_cliente, 8);
   assert.equal(triaje?.perfil_origen_id, 452);
+  assert.equal(triaje?.examenes_snapshot_json?.precio_cliente, 8);
+  assert.equal(triaje?.examenes_snapshot_json?.precio_catalogo, 0);
 
   const hemograma = out.items.find((i) => i.examen_id === 20);
   assert.equal(hemograma?.cantidad, 1);
-  assert.equal(hemograma?.precio_final, 25);
+  assert.equal(hemograma?.precio_cliente, 25);
   assert.equal(hemograma?.perfil_origen_id, undefined);
 });
 
-test('sincronizarPedidoWizardSnapshot actualiza precio_base sin columna precio_final', async () => {
+test('sincronizarPedidoWizardSnapshot guarda precio_cliente y no toca precio_base', async () => {
   const executed = [];
   const mockConn = {
     async execute(sql, params) {
@@ -65,8 +68,22 @@ test('sincronizarPedidoWizardSnapshot actualiza precio_base sin columna precio_f
       if (/SELECT id FROM pedido_pacientes/i.test(sql)) {
         return [[{ id: 10 }]];
       }
-      if (/SELECT id FROM pedido_items/i.test(sql)) {
-        return [[{ id: 99 }]];
+      if (/FROM pedido_items/i.test(sql) && /SELECT/i.test(sql)) {
+        return [
+          [
+            {
+              id: 99,
+              examen_id: 1,
+              cantidad: 1,
+              precio_base: 15,
+              perfil_origen_id: 452,
+              perfil_origen_tipo_emo: 'PREOC',
+              perfil_origen_nombre: 'Administrativo',
+              examenes_snapshot_json: null,
+              nombre: 'Triaje',
+            },
+          ],
+        ];
       }
       return [{ affectedRows: 1 }];
     },
@@ -93,8 +110,12 @@ test('sincronizarPedidoWizardSnapshot actualiza precio_base sin columna precio_f
 
   const updateItem = executed.find((e) => /UPDATE pedido_items/i.test(e.sql));
   assert.ok(updateItem);
+  assert.ok(!/precio_base/i.test(updateItem.sql));
   assert.ok(!/precio_final/i.test(updateItem.sql));
-  assert.equal(updateItem.params[1], 12);
+  assert.equal(updateItem.params[0], 1);
+  const snap = JSON.parse(updateItem.params[1]);
+  assert.equal(snap.precio_cliente, 12);
+  assert.equal(snap.precio_catalogo, 15);
 });
 
 test('parsePacienteSnapshot rechaza filas sin dni o sin examenes', () => {

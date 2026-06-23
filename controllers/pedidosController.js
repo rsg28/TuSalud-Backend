@@ -4,7 +4,7 @@ const {
   helpers: { emitirNotificacionAVendedorDePedido, emitirNotificacionAClienteDePedido },
 } = require('./notificacionesController');
 const { persistirSnapshotPaciente: persistirSnapshotPacienteBase } = require('../utils/perfilSnapshot');
-const { expandirSnapshotPacientesAPedido, sincronizarPedidoWizardSnapshot } = require('../utils/nuevoPedidoSnapshotApi');
+const { expandirSnapshotPacientesAPedido, sincronizarPedidoWizardSnapshot, precioClienteDesdeItemRaw, buildSnapItemPedido } = require('../utils/nuevoPedidoSnapshotApi');
 const { fetchPrecioExamen } = require('../utils/examenPrecio');
 const seguimientoSvc = require('../services/seguimientoExamenes');
 
@@ -711,10 +711,14 @@ const crearPedido = async (req, res) => {
     ];
     for (const raw of itemsRaw) {
       const it = normalizePedidoItem(raw);
+      const precioClienteWizard = precioClienteDesdeItemRaw(raw);
 
       let precio_base = Number(raw.precio_base ?? raw.precio_final ?? raw.precio);
       if (!Number.isFinite(precio_base) || precio_base < 0) precio_base = 0;
-      if (precio_base === 0) {
+      const usarCatalogo =
+        precio_base === 0 ||
+        (precioClienteWizard > 0 && precio_base === precioClienteWizard);
+      if (usarCatalogo) {
         if (it.tipo_item === 'EXAMEN') {
           precio_base = await fetchPrecioExamen(connection, it.examen_id, sede_id, totalEmpleadosInicial);
         } else {
@@ -730,6 +734,19 @@ const crearPedido = async (req, res) => {
           );
           precio_base = precio.length > 0 ? Number(precio[0].precio) : 0;
         }
+      }
+
+      if (it.tipo_item === 'EXAMEN') {
+        raw.examenes_snapshot_json = buildSnapItemPedido({
+          origen: raw.perfil_origen_id ? 'examen_de_perfil' : 'pedido_examen',
+          examenId: it.examen_id,
+          nombre: it.nombre,
+          precioCliente: precioClienteWizard,
+          precioCatalogo: precio_base,
+          perfilId: raw.perfil_origen_id ?? undefined,
+          perfilNombre: raw.perfil_origen_nombre ?? undefined,
+          tipoEmo: raw.perfil_origen_tipo_emo ?? undefined,
+        });
       }
 
       const itInserted = await insertarPedidoItem(connection, pedido_id, raw, precio_base);
@@ -2084,7 +2101,7 @@ const actualizarWizardSnapshotPedido = async (req, res) => {
 
     const rolUsuario = normalizarRol(req.user?.rol);
     const [pedidoRows] = await connection.execute(
-      'SELECT id, cliente_usuario_id FROM pedidos WHERE id = ?',
+      'SELECT id, cliente_usuario_id, sede_id, total_empleados FROM pedidos WHERE id = ?',
       [pedido_id]
     );
     if (!pedidoRows.length) {
@@ -2101,7 +2118,15 @@ const actualizarWizardSnapshotPedido = async (req, res) => {
       }
     }
 
-    const result = await sincronizarPedidoWizardSnapshot(connection, pedido_id, pacientesSnapshotBody);
+    const result = await sincronizarPedidoWizardSnapshot(connection, pedido_id, pacientesSnapshotBody, {
+      fetchCatalogPrice: (examenId) =>
+        fetchPrecioExamen(
+          connection,
+          examenId,
+          pedido.sede_id,
+          Number(pedido.total_empleados) || 0
+        ),
+    });
     if (!result.ok) {
       await connection.rollback();
       return res.status(400).json({ error: result.error || 'No se pudo sincronizar el snapshot' });
@@ -2112,7 +2137,10 @@ const actualizarWizardSnapshotPedido = async (req, res) => {
   } catch (error) {
     await connection.rollback();
     console.error('Error al actualizar wizard snapshot del pedido:', error);
-    res.status(500).json({ error: 'Error al actualizar snapshot del pedido' });
+    res.status(500).json({
+      error: 'Error al actualizar snapshot del pedido',
+      detail: error?.message || String(error),
+    });
   } finally {
     connection.release();
   }
