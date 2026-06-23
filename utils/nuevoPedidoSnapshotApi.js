@@ -229,10 +229,76 @@ function expandirSnapshotPacientesAPedido(pacientesRaw) {
   return { empleados, items, pacientes };
 }
 
+/**
+ * Persiste el snapshot wizard (con precios) en pedido_pacientes y actualiza ítems EXAMEN del pedido.
+ * @returns {{ ok: true, empleados: number, items: number } | { ok: false, error: string }}
+ */
+async function sincronizarPedidoWizardSnapshot(dbConn, pedidoId, pacientesRaw) {
+  const expanded = expandirSnapshotPacientesAPedido(pacientesRaw);
+  if (!expanded) return { ok: false, error: 'pacientes inválidos' };
+
+  for (const emp of expanded.empleados) {
+    const [rows] = await dbConn.execute(
+      'SELECT id FROM pedido_pacientes WHERE pedido_id = ? AND dni = ?',
+      [pedidoId, emp.dni]
+    );
+    if (!rows.length) continue;
+    await dbConn.execute(
+      'UPDATE pedido_pacientes SET examenes_snapshot_json = ? WHERE id = ?',
+      [emp.wizard_snapshot_json, rows[0].id]
+    );
+  }
+
+  for (const item of expanded.items) {
+    const snapJson =
+      item.examenes_snapshot_json != null
+        ? typeof item.examenes_snapshot_json === 'string'
+          ? item.examenes_snapshot_json
+          : JSON.stringify(item.examenes_snapshot_json)
+        : null;
+    const [existing] = await dbConn.execute(
+      `SELECT id FROM pedido_items WHERE pedido_id = ? AND tipo_item = 'EXAMEN' AND examen_id = ? LIMIT 1`,
+      [pedidoId, item.examen_id]
+    );
+    if (!existing.length) continue;
+    await dbConn.execute(
+      `UPDATE pedido_items SET
+         cantidad = ?,
+         precio_base = ?,
+         precio_final = ?,
+         perfil_origen_id = ?,
+         perfil_origen_tipo_emo = ?,
+         perfil_origen_nombre = ?,
+         examenes_snapshot_json = COALESCE(?, examenes_snapshot_json)
+       WHERE id = ?`,
+      [
+        item.cantidad,
+        item.precio_base,
+        item.precio_final,
+        item.perfil_origen_id ?? null,
+        item.perfil_origen_tipo_emo ?? null,
+        item.perfil_origen_nombre ?? null,
+        snapJson,
+        existing[0].id,
+      ]
+    );
+  }
+
+  if (expanded.empleados.length > 0) {
+    await dbConn.execute('UPDATE pedidos SET total_empleados = ? WHERE id = ?', [
+      expanded.empleados.length,
+      pedidoId,
+    ]);
+  }
+
+  return { ok: true, empleados: expanded.empleados.length, items: expanded.items.length };
+}
+
 module.exports = {
   TIPOS_EMO_VALIDOS,
   precioSnapshot,
   parsePacienteSnapshot,
   expandirSnapshotPacientesAPedido,
   buildWizardPacienteSnapshotJson,
+  sincronizarPedidoWizardSnapshot,
 };

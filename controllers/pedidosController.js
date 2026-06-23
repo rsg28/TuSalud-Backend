@@ -4,7 +4,7 @@ const {
   helpers: { emitirNotificacionAVendedorDePedido, emitirNotificacionAClienteDePedido },
 } = require('./notificacionesController');
 const { persistirSnapshotPaciente: persistirSnapshotPacienteBase } = require('../utils/perfilSnapshot');
-const { expandirSnapshotPacientesAPedido } = require('../utils/nuevoPedidoSnapshotApi');
+const { expandirSnapshotPacientesAPedido, sincronizarPedidoWizardSnapshot } = require('../utils/nuevoPedidoSnapshotApi');
 const { fetchPrecioExamen } = require('../utils/examenPrecio');
 const seguimientoSvc = require('../services/seguimientoExamenes');
 
@@ -2062,6 +2062,61 @@ const obtenerCoberturaCotizacion = async (req, res) => {
   }
 };
 
+/**
+ * PATCH /api/pedidos/:pedido_id/wizard-snapshot
+ * Sincroniza pedido_pacientes.examenes_snapshot_json (con precios) e ítems EXAMEN del pedido.
+ * Body: { pacientes: [...] } — mismo formato que POST /api/pedidos.
+ */
+const actualizarWizardSnapshotPedido = async (req, res) => {
+  const pedido_id = parseInt(String(req.params.pedido_id), 10);
+  if (!Number.isFinite(pedido_id) || pedido_id <= 0) {
+    return res.status(400).json({ error: 'pedido_id inválido' });
+  }
+
+  const { pacientes: pacientesSnapshotBody } = req.body;
+  if (!Array.isArray(pacientesSnapshotBody) || pacientesSnapshotBody.length === 0) {
+    return res.status(400).json({ error: 'pacientes es requerido' });
+  }
+
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+
+    const rolUsuario = normalizarRol(req.user?.rol);
+    const [pedidoRows] = await connection.execute(
+      'SELECT id, cliente_usuario_id FROM pedidos WHERE id = ?',
+      [pedido_id]
+    );
+    if (!pedidoRows.length) {
+      await connection.rollback();
+      return res.status(404).json({ error: 'Pedido no encontrado' });
+    }
+    const pedido = pedidoRows[0];
+    if (rolUsuario === 'cliente') {
+      const uid = parseInt(String(req.user?.id), 10);
+      if (!Number.isFinite(uid) || pedido.cliente_usuario_id !== uid) {
+        await connection.rollback();
+        return res.status(403).json({ error: 'No autorizado' });
+      }
+    }
+
+    const result = await sincronizarPedidoWizardSnapshot(connection, pedido_id, pacientesSnapshotBody);
+    if (!result.ok) {
+      await connection.rollback();
+      return res.status(400).json({ error: result.error || 'No se pudo sincronizar el snapshot' });
+    }
+
+    await connection.commit();
+    res.json({ ok: true, pedido_id, ...result });
+  } catch (error) {
+    await connection.rollback();
+    console.error('Error al actualizar wizard snapshot del pedido:', error);
+    res.status(500).json({ error: 'Error al actualizar snapshot del pedido' });
+  } finally {
+    connection.release();
+  }
+};
+
 module.exports = {
   listarPedidos,
   listarMisPedidos,
@@ -2089,4 +2144,5 @@ module.exports = {
   obtenerAjustesSugeridos,
   aplicarAjustesDirectos,
   obtenerCoberturaCotizacion,
+  actualizarWizardSnapshotPedido,
 };

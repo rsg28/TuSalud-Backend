@@ -92,6 +92,14 @@ router.post(
   pedidosController.crearPedido
 );
 
+// PATCH /api/pedidos/:pedido_id/wizard-snapshot — Sincroniza snapshot wizard (con precios) en pacientes e ítems
+router.patch(
+  '/:pedido_id/wizard-snapshot',
+  authenticateToken,
+  requireRole('vendedor', 'manager', 'cliente'),
+  pedidosController.actualizarWizardSnapshotPedido
+);
+
 // POST /api/pedidos/:pedido_id/asignar-examen-pacientes — Asigna examen suelto a paciente(s) del pedido
 router.post(
   '/:pedido_id/asignar-examen-pacientes',
