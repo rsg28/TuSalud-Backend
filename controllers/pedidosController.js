@@ -504,7 +504,8 @@ const obtenerPacientesExamenes = async (req, res) => {
 
     const [pacientes] = await pool.execute(
       `SELECT pp.id, pp.dni, pp.nombre_completo, pp.cargo, pp.area,
-              pp.emo_tipo, pp.emo_perfil_id, pp.perfiles_aplicados_json
+              pp.emo_tipo, pp.emo_perfil_id, pp.perfiles_aplicados_json,
+              pp.examenes_snapshot_json
        FROM pedido_pacientes pp
        WHERE pp.pedido_id = ?
        ORDER BY pp.nombre_completo`,
@@ -581,6 +582,15 @@ const obtenerPacientesExamenes = async (req, res) => {
         perfiles_aplicados = [];
       }
 
+      let examenes_snapshot_json = null;
+      try {
+        const rawSnap = p.examenes_snapshot_json;
+        examenes_snapshot_json =
+          rawSnap && typeof rawSnap === 'string' ? JSON.parse(rawSnap) : rawSnap ?? null;
+      } catch {
+        examenes_snapshot_json = null;
+      }
+
       resultado.push(sanitizeForJson({
         id: p.id,
         dni: p.dni,
@@ -590,6 +600,7 @@ const obtenerPacientesExamenes = async (req, res) => {
         emo_tipo: p.emo_tipo ?? null,
         emo_perfil_id: p.emo_perfil_id ?? null,
         perfiles_aplicados,
+        examenes_snapshot_json,
         examenes: examenesList,
         examenes_completados: completadosPaciente,
         examenes_ausentes: ausentesPaciente,
