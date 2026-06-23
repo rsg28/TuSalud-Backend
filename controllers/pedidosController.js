@@ -4,6 +4,7 @@ const {
   helpers: { emitirNotificacionAVendedorDePedido, emitirNotificacionAClienteDePedido },
 } = require('./notificacionesController');
 const { persistirSnapshotPaciente: persistirSnapshotPacienteBase } = require('../utils/perfilSnapshot');
+const { expandirSnapshotPacientesAPedido } = require('../utils/nuevoPedidoSnapshotApi');
 const { fetchPrecioExamen } = require('../utils/examenPrecio');
 const seguimientoSvc = require('../services/seguimientoExamenes');
 
@@ -75,13 +76,20 @@ function normalizePedidoItem(it) {
   return { tipo_item: 'EXAMEN', perfil_id: null, tipo_emo: null, examen_id: Number(it.examen_id), nombre: it.nombre || null, cantidad };
 }
 
-/** Examen desde número o objeto `{ id }`; el JSON del cliente puede traer strings. */
+/** Examen desde número u objeto `{ id }` / `{ examen_id }`. */
 function parseExamenIdRef(raw) {
   if (raw == null || raw === '') return null;
-  const n =
-    typeof raw === 'object' && raw !== null && raw.id != null && raw.id !== ''
-      ? Number(raw.id)
-      : Number(raw);
+  if (typeof raw === 'object' && raw !== null) {
+    const fromObj =
+      raw.examen_id != null && raw.examen_id !== ''
+        ? Number(raw.examen_id)
+        : raw.id != null && raw.id !== ''
+          ? Number(raw.id)
+          : NaN;
+    if (Number.isFinite(fromObj) && fromObj > 0) return fromObj;
+    return null;
+  }
+  const n = Number(raw);
   return Number.isFinite(n) && n > 0 ? n : null;
 }
 
@@ -616,7 +624,7 @@ const crearPedido = async (req, res) => {
   try {
     await connection.beginTransaction();
 
-    const { empresa_id, sede_id, cliente_usuario_id, observaciones, condiciones_pago, fecha_vencimiento, examenes, items, empleados, total_empleados: totalEmpleadosBody, totalEmpleados: totalEmpleadosCamel } = req.body;
+    const { empresa_id, sede_id, cliente_usuario_id, observaciones, condiciones_pago, fecha_vencimiento, examenes, items, empleados, pacientes: pacientesSnapshotBody, total_empleados: totalEmpleadosBody, totalEmpleados: totalEmpleadosCamel } = req.body;
     const rolUsuario = normalizarRol(req.user?.rol);
     const vendedor_id = (rolUsuario === 'vendedor' || rolUsuario === 'manager') ? req.user.id : null;
     const toPositiveUserId = (v) => {
@@ -643,7 +651,16 @@ const crearPedido = async (req, res) => {
     }
 
     const numero_pedido = await generarNumeroPedido(connection);
-    const empleadosList = Array.isArray(empleados) ? empleados : [];
+
+    /** Snapshot wizard: pacientes → perfiles + adicionales (+ precio por examen). */
+    const expandedSnapshot =
+      Array.isArray(pacientesSnapshotBody) && pacientesSnapshotBody.length > 0
+        ? expandirSnapshotPacientesAPedido(pacientesSnapshotBody)
+        : null;
+
+    let empleadosList = Array.isArray(empleados) && empleados.length > 0
+      ? empleados
+      : expandedSnapshot?.empleados ?? [];
     const rawTotal = totalEmpleadosBody ?? totalEmpleadosCamel;
     const totalEmpleadosInicial = empleadosList.length > 0
       ? empleadosList.length
@@ -672,18 +689,21 @@ const crearPedido = async (req, res) => {
       );
     }
 
-    // Items del pedido: acepta tanto `items` (híbrido nuevo) como `examenes` (legacy
-    // con sólo examen_id). Si vienen ambos, se concatenan.
+    // Items del pedido: `pacientes` (snapshot wizard), `items`, `examenes` legacy, o derivados del snapshot.
     const pedidoExamenIds = new Set();
     const itemsRaw = [
       ...(Array.isArray(items) ? items : []),
       ...(Array.isArray(examenes) ? examenes : []),
+      ...(expandedSnapshot?.items?.length && !examenes?.length && !items?.length
+        ? expandedSnapshot.items
+        : []),
     ];
     for (const raw of itemsRaw) {
       const it = normalizePedidoItem(raw);
 
-      let precio_base = Number(raw.precio_base);
-      if (!Number.isFinite(precio_base) || precio_base <= 0) {
+      let precio_base = Number(raw.precio_base ?? raw.precio_final ?? raw.precio);
+      if (!Number.isFinite(precio_base) || precio_base < 0) precio_base = 0;
+      if (precio_base === 0) {
         if (it.tipo_item === 'EXAMEN') {
           precio_base = await fetchPrecioExamen(connection, it.examen_id, sede_id, totalEmpleadosInicial);
         } else {
@@ -763,13 +783,18 @@ const crearPedido = async (req, res) => {
         );
       }
 
-      // Snapshot inmutable de los exámenes que quedaron asignados a ESTE paciente
-      // en este momento. Si después cambia el catálogo o se reasigna otro perfil,
-      // este JSON sigue reflejando lo que efectivamente le tocó a la persona.
-      await persistirSnapshotPaciente(connection, paciente_id, {
-        perfilId: emp.emo_perfil_id ?? null,
-        tipoEmo: emp.emo_tipo ?? null,
-      });
+      // Snapshot del wizard (perfiles + adicionales por persona) o regenerado desde BD.
+      if (emp.wizard_snapshot_json) {
+        await connection.execute(
+          'UPDATE pedido_pacientes SET examenes_snapshot_json = ? WHERE id = ?',
+          [emp.wizard_snapshot_json, paciente_id]
+        );
+      } else {
+        await persistirSnapshotPaciente(connection, paciente_id, {
+          perfilId: emp.emo_perfil_id ?? null,
+          tipoEmo: emp.emo_tipo ?? null,
+        });
+      }
     }
 
     if (empleadosList.length > 0) {
