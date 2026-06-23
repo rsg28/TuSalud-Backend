@@ -261,11 +261,11 @@ async function sincronizarPedidoWizardSnapshot(dbConn, pedidoId, pacientesRaw) {
       [pedidoId, item.examen_id]
     );
     if (!existing.length) continue;
+    const precioBase = Number(item.precio_final ?? item.precio_base ?? 0) || 0;
     await dbConn.execute(
       `UPDATE pedido_items SET
          cantidad = ?,
          precio_base = ?,
-         precio_final = ?,
          perfil_origen_id = ?,
          perfil_origen_tipo_emo = ?,
          perfil_origen_nombre = ?,
@@ -273,8 +273,7 @@ async function sincronizarPedidoWizardSnapshot(dbConn, pedidoId, pacientesRaw) {
        WHERE id = ?`,
       [
         item.cantidad,
-        item.precio_base,
-        item.precio_final,
+        precioBase,
         item.perfil_origen_id ?? null,
         item.perfil_origen_tipo_emo ?? null,
         item.perfil_origen_nombre ?? null,

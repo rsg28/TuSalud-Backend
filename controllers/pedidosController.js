@@ -2094,7 +2094,8 @@ const actualizarWizardSnapshotPedido = async (req, res) => {
     const pedido = pedidoRows[0];
     if (rolUsuario === 'cliente') {
       const uid = parseInt(String(req.user?.id), 10);
-      if (!Number.isFinite(uid) || pedido.cliente_usuario_id !== uid) {
+      const clienteId = Number(pedido.cliente_usuario_id);
+      if (!Number.isFinite(uid) || clienteId !== uid) {
         await connection.rollback();
         return res.status(403).json({ error: 'No autorizado' });
       }

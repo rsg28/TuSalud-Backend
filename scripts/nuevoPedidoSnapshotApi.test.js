@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const {
   expandirSnapshotPacientesAPedido,
   parsePacienteSnapshot,
+  sincronizarPedidoWizardSnapshot,
 } = require('../utils/nuevoPedidoSnapshotApi');
 
 test('expandirSnapshotPacientesAPedido agrupa perfiles, adicionales y precios', () => {
@@ -54,6 +55,46 @@ test('expandirSnapshotPacientesAPedido agrupa perfiles, adicionales y precios', 
   assert.equal(hemograma?.cantidad, 1);
   assert.equal(hemograma?.precio_final, 25);
   assert.equal(hemograma?.perfil_origen_id, undefined);
+});
+
+test('sincronizarPedidoWizardSnapshot actualiza precio_base sin columna precio_final', async () => {
+  const executed = [];
+  const mockConn = {
+    async execute(sql, params) {
+      executed.push({ sql: String(sql), params });
+      if (/SELECT id FROM pedido_pacientes/i.test(sql)) {
+        return [[{ id: 10 }]];
+      }
+      if (/SELECT id FROM pedido_items/i.test(sql)) {
+        return [[{ id: 99 }]];
+      }
+      return [{ affectedRows: 1 }];
+    },
+  };
+
+  const pacientes = [
+    {
+      dni: '10000000',
+      nombre_completo: 'Ana',
+      perfiles: [
+        {
+          perfil_id: 452,
+          perfil_nombre: 'Administrativo',
+          emo_tipo: 'PREOC',
+          examenes: [{ examen_id: 1, nombre: 'Triaje', precio: 12 }],
+        },
+      ],
+      adicionales: [],
+    },
+  ];
+
+  const result = await sincronizarPedidoWizardSnapshot(mockConn, 52, pacientes);
+  assert.equal(result.ok, true);
+
+  const updateItem = executed.find((e) => /UPDATE pedido_items/i.test(e.sql));
+  assert.ok(updateItem);
+  assert.ok(!/precio_final/i.test(updateItem.sql));
+  assert.equal(updateItem.params[1], 12);
 });
 
 test('parsePacienteSnapshot rechaza filas sin dni o sin examenes', () => {
