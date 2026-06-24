@@ -205,6 +205,8 @@ exports.listarMias = async (req, res) => {
     if (soloNoLeidas) {
       sql += ' AND n.leida = 0';
     }
+    sql += ' AND n.created_at >= (NOW() - INTERVAL ? HOUR)';
+    params.push(RETENCION_HORAS);
     sql += ' ORDER BY n.created_at DESC LIMIT ?';
     params.push(limit);
 
@@ -244,9 +246,10 @@ exports.contadorNoLeidas = async (req, res) => {
     const [rows] = await pool.execute(
       `SELECT COUNT(*) AS total FROM notificaciones
         WHERE leida = 0
+          AND created_at >= (NOW() - INTERVAL ? HOUR)
           AND (remitente_usuario_id IS NULL OR remitente_usuario_id <> ?)
           AND (destinatario_usuario_id = ? ${extraEmpresa})`,
-      params
+      [RETENCION_HORAS, ...params]
     );
     res.json({ no_leidas: Number(rows[0]?.total ?? 0) });
   } catch (error) {
@@ -480,6 +483,9 @@ exports.responder = async (req, res) => {
     conn.release();
   }
 };
+
+module.exports.purgarAntiguas = purgarAntiguas;
+module.exports.RETENCION_HORAS = RETENCION_HORAS;
 
 module.exports.helpers = {
   emitirNotificacion,

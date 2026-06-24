@@ -123,6 +123,16 @@ app.listen(PORT, async () => {
     const connection = await pool.getConnection();
     console.log('✅ Database connection verified');
     connection.release();
+
+    const { purgarAntiguas, RETENCION_HORAS } = require('./controllers/notificacionesController');
+    await purgarAntiguas();
+    const PURGA_NOTIF_MS = 60 * 60 * 1000;
+    setInterval(() => {
+      purgarAntiguas().catch((err) => {
+        console.warn('[notificaciones] purga programada falló:', err?.message || err);
+      });
+    }, PURGA_NOTIF_MS);
+    console.log(`🔔 Notificaciones: retención máxima ${RETENCION_HORAS} h (purga cada hora)`);
   } catch (err) {
     console.error('⚠️  Database connection warning:', err.message);
     console.error('   Server will start but database operations may fail');
