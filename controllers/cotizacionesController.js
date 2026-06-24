@@ -517,7 +517,7 @@ const createCotizacion = async (req, res) => {
 /** POST /api/cotizaciones/complementarias — Crea una cotización complementaria (vendedor/manager). Body: { pedido_id, cotizacion_base_id?, items }. */
 const createCotizacionComplementaria = async (req, res) => {
   try {
-    const { pedido_id, cotizacion_base_id, items } = req.body;
+    const { pedido_id, cotizacion_base_id, items, wizard_snapshot_json } = req.body;
     if (!pedido_id || !items || !Array.isArray(items) || items.length === 0) {
       return res.status(400).json({ error: 'pedido_id e items (array no vacío) son requeridos' });
     }
@@ -584,6 +584,7 @@ const createCotizacionComplementaria = async (req, res) => {
         items,
         creador_id: userId,
         creador_tipo: creadorTipo,
+        wizard_snapshot_json,
       });
       try {
         const { registrarAuditoria } = require('../utils/audit');
