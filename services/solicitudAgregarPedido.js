@@ -741,9 +741,153 @@ async function resolverOCrearComplementariaParaSolicitud(connection, solicitudId
   return { cotizacionId, creado, vinculado };
 }
 
+function agregarExamenAlPacienteWizardSnap(
+  pacSnap,
+  { examen_id, nombre, cantidad, perfil_origen_id, perfil_origen_nombre, perfil_origen_tipo_emo }
+) {
+  const count = Math.max(1, Number(cantidad) || 1);
+  const ref = { examen_id: Number(examen_id), nombre: String(nombre || `Examen ${examen_id}`), precio: 0 };
+  const perfilId = perfil_origen_id != null ? Number(perfil_origen_id) : null;
+  const tipoEmo = perfil_origen_tipo_emo ? String(perfil_origen_tipo_emo).trim().toUpperCase() : null;
+  if (perfilId && tipoEmo && TIPOS_EMO_VALIDOS.has(tipoEmo)) {
+    let perfil = pacSnap.perfiles.find((p) => p.perfil_id === perfilId && p.emo_tipo === tipoEmo);
+    if (!perfil) {
+      perfil = {
+        perfil_id: perfilId,
+        perfil_nombre: perfil_origen_nombre || `Perfil ${perfilId}`,
+        emo_tipo: tipoEmo,
+        examenes: [],
+      };
+      pacSnap.perfiles.push(perfil);
+    }
+    for (let i = 0; i < count; i++) perfil.examenes.push({ ...ref });
+  } else {
+    for (let i = 0; i < count; i++) pacSnap.adicionales.push({ ...ref });
+  }
+}
+
+function pacienteSnapVacio(dni, nombre_completo, cargo, area) {
+  return {
+    dni: String(dni || '').trim(),
+    nombre_completo: String(nombre_completo || '').trim(),
+    cargo: cargo != null ? String(cargo).trim() || undefined : undefined,
+    area: area != null ? String(area).trim() || undefined : undefined,
+    perfiles: [],
+    adicionales: [],
+  };
+}
+
+/**
+ * Arma snapshot wizard v2 solo con lo solicitado en una solicitud complementaria.
+ * Misma estructura que nuevo pedido: pacientes → perfiles + adicionales.
+ */
+async function buildWizardSnapshotDesdeSolicitud(connection, solicitudId, pedido_id) {
+  const [pedidoRow] = await connection.execute(
+    'SELECT sede_id, empresa_id, total_empleados FROM pedidos WHERE id = ?',
+    [pedido_id]
+  );
+  const sede_id = pedidoRow[0]?.sede_id ?? null;
+  const empresa_id = pedidoRow[0]?.empresa_id ?? null;
+
+  const [pacientesSol] = await connection.execute(
+    `SELECT sap.id, sap.pedido_paciente_id, sap.dni, sap.nombre_completo, sap.cargo, sap.area,
+            pp.dni AS pedido_paciente_dni, pp.nombre_completo AS pedido_paciente_nombre,
+            pp.cargo AS pedido_paciente_cargo, pp.area AS pedido_paciente_area
+     FROM solicitud_agregar_paciente sap
+     LEFT JOIN pedido_pacientes pp ON pp.id = sap.pedido_paciente_id
+     WHERE sap.solicitud_id = ?
+     ORDER BY sap.id`,
+    [solicitudId]
+  );
+
+  let examenesRows;
+  try {
+    [examenesRows] = await connection.execute(
+      `SELECT sae.solicitud_agregar_paciente_id, sae.examen_id, sae.cantidad,
+              sae.perfil_origen_id, sae.perfil_origen_nombre, sae.perfil_origen_tipo_emo,
+              e.nombre AS examen_nombre
+       FROM solicitud_agregar_examenes sae
+       LEFT JOIN examenes e ON e.id = sae.examen_id
+       WHERE sae.solicitud_id = ?`,
+      [solicitudId]
+    );
+  } catch (colErr) {
+    if (colErr?.code !== 'ER_BAD_FIELD_ERROR') throw colErr;
+    [examenesRows] = await connection.execute(
+      `SELECT sae.solicitud_agregar_paciente_id, sae.examen_id, sae.cantidad, e.nombre AS examen_nombre
+       FROM solicitud_agregar_examenes sae
+       LEFT JOIN examenes e ON e.id = sae.examen_id
+       WHERE sae.solicitud_id = ?`,
+      [solicitudId]
+    );
+  }
+
+  const globalRows = examenesRows.filter((e) => e.solicitud_agregar_paciente_id == null);
+  const pacientes = [];
+
+  const pushExamenesEnPaciente = (pacSnap, rows) => {
+    for (const row of rows) {
+      agregarExamenAlPacienteWizardSnap(pacSnap, {
+        examen_id: row.examen_id,
+        nombre: row.examen_nombre || `Examen ${row.examen_id}`,
+        cantidad: row.cantidad,
+        perfil_origen_id: row.perfil_origen_id,
+        perfil_origen_nombre: row.perfil_origen_nombre,
+        perfil_origen_tipo_emo: row.perfil_origen_tipo_emo,
+      });
+    }
+  };
+
+  if (pacientesSol.length > 0) {
+    for (const p of pacientesSol) {
+      const dni = (p.dni || p.pedido_paciente_dni || '').trim();
+      const nombre = (p.nombre_completo || p.pedido_paciente_nombre || '').trim();
+      if (!dni || !nombre) continue;
+      const pacSnap = pacienteSnapVacio(
+        dni,
+        nombre,
+        p.cargo ?? p.pedido_paciente_cargo,
+        p.area ?? p.pedido_paciente_area
+      );
+      const especificos = examenesRows.filter((e) => e.solicitud_agregar_paciente_id === p.id);
+      pushExamenesEnPaciente(pacSnap, [...especificos, ...globalRows]);
+      if (pacSnap.perfiles.length > 0 || pacSnap.adicionales.length > 0) pacientes.push(pacSnap);
+    }
+  } else if (globalRows.length > 0) {
+    const [pedidoPacientes] = await connection.execute(
+      'SELECT dni, nombre_completo, cargo, area FROM pedido_pacientes WHERE pedido_id = ? ORDER BY id',
+      [pedido_id]
+    );
+    const lista = pedidoPacientes.length > 0 ? pedidoPacientes : [{ dni: '—', nombre_completo: 'Todos los pacientes' }];
+    for (const pp of lista) {
+      const pacSnap = pacienteSnapVacio(pp.dni, pp.nombre_completo, pp.cargo, pp.area);
+      pushExamenesEnPaciente(pacSnap, globalRows);
+      if (pacSnap.perfiles.length > 0 || pacSnap.adicionales.length > 0) pacientes.push(pacSnap);
+    }
+  }
+
+  if (!pacientes.length) return null;
+
+  return {
+    version: 2,
+    generado_en: new Date().toISOString(),
+    sede_id,
+    empresa_id,
+    pedido_id,
+    pacientes,
+  };
+}
+
+function serializeWizardSnapshotJson(snapshot) {
+  if (!snapshot) return null;
+  return typeof snapshot === 'string' ? snapshot : JSON.stringify(snapshot);
+}
+
 module.exports = {
   aplicarSolicitudAgregarAlPedido,
   buildItemsComplementariaDesdeSolicitud,
+  buildWizardSnapshotDesdeSolicitud,
+  serializeWizardSnapshotJson,
   marcarSolicitudPorComplementaria,
   vincularComplementariaASolicitud,
   resolverCotizacionBaseId,

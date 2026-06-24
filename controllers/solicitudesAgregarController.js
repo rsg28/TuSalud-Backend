@@ -6,6 +6,7 @@ const {
 const {
   aplicarSolicitudAgregarAlPedido,
   buildItemsComplementariaDesdeSolicitud,
+  buildWizardSnapshotDesdeSolicitud,
   vincularComplementariaASolicitud,
   obtenerCotizacionPrincipalAprobadaId,
   resolverOCrearComplementariaParaSolicitud,
@@ -154,7 +155,7 @@ const obtenerDetalle = async (req, res) => {
 const crear = async (req, res) => {
   const connection = await pool.getConnection();
   try {
-    const { pedido_id, mensaje_cliente, pacientes, examenes } = req.body;
+    const { pedido_id, mensaje_cliente, pacientes, examenes, wizard_snapshot } = req.body;
     if (!pedido_id) {
       connection.release();
       return res.status(400).json({ error: 'pedido_id es requerido' });
@@ -264,6 +265,11 @@ const crear = async (req, res) => {
       });
     }
 
+    let wizardSnapshot = wizard_snapshot ?? null;
+    if (!wizardSnapshot) {
+      wizardSnapshot = await buildWizardSnapshotDesdeSolicitud(connection, solicitud_id, pedido_id);
+    }
+
     const { cotizacionId, numero_cotizacion } = await crearCotizacionComplementariaConConnection(
       connection,
       {
@@ -272,6 +278,7 @@ const crear = async (req, res) => {
         items: itemsComp,
         creador_id: req.user.id,
         creador_tipo: 'CLIENTE',
+        wizard_snapshot_json: wizardSnapshot,
       }
     );
     cotizacionComplementariaId = cotizacionId;

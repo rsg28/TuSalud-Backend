@@ -179,8 +179,13 @@ const {
 } = require('../utils/cotizacionPrincipal');
 
 /** Crea una cotización complementaria usando la conexión dada (sin commit). Usado por solicitudes aprobadas o por POST /complementarias. */
+function serializeWizardSnapshotField(snapshot) {
+  if (snapshot == null || snapshot === '') return null;
+  return typeof snapshot === 'string' ? snapshot : JSON.stringify(snapshot);
+}
+
 const crearCotizacionComplementariaConConnection = async (connection, opts) => {
-  const { pedido_id, cotizacion_base_id, items, creador_id, creador_tipo } = opts;
+  const { pedido_id, cotizacion_base_id, items, creador_id, creador_tipo, wizard_snapshot_json } = opts;
   if (!pedido_id || !cotizacion_base_id || !items || !Array.isArray(items) || items.length === 0) {
     throw new Error('pedido_id, cotizacion_base_id e items (array no vacío) son requeridos');
   }
@@ -189,13 +194,26 @@ const crearCotizacionComplementariaConConnection = async (connection, opts) => {
   const numero_cotizacion = await generarNumeroCotizacionComplementaria(connection);
   const itemsNorm = items.map(normalizeItem);
   const total = itemsNorm.reduce((acc, it) => acc + it.subtotal, 0);
-  const [result] = await connection.execute(
-    `INSERT INTO cotizaciones (
-      numero_cotizacion, pedido_id, cotizacion_base_id, es_complementaria,
-      estado, creador_tipo, creador_id, total
-    ) VALUES (?, ?, ?, 1, 'BORRADOR', ?, ?, ?)`,
-    [numero_cotizacion, pedido_id, cotizacion_base_id, tipo, creador_id ?? null, total]
-  );
+  const snapJson = serializeWizardSnapshotField(wizard_snapshot_json);
+  let result;
+  try {
+    [result] = await connection.execute(
+      `INSERT INTO cotizaciones (
+        numero_cotizacion, pedido_id, cotizacion_base_id, es_complementaria,
+        estado, creador_tipo, creador_id, total, wizard_snapshot_json
+      ) VALUES (?, ?, ?, 1, 'BORRADOR', ?, ?, ?, ?)`,
+      [numero_cotizacion, pedido_id, cotizacion_base_id, tipo, creador_id ?? null, total, snapJson]
+    );
+  } catch (insErr) {
+    if (insErr?.code !== 'ER_BAD_FIELD_ERROR' || snapJson != null) throw insErr;
+    [result] = await connection.execute(
+      `INSERT INTO cotizaciones (
+        numero_cotizacion, pedido_id, cotizacion_base_id, es_complementaria,
+        estado, creador_tipo, creador_id, total
+      ) VALUES (?, ?, ?, 1, 'BORRADOR', ?, ?, ?)`,
+      [numero_cotizacion, pedido_id, cotizacion_base_id, tipo, creador_id ?? null, total]
+    );
+  }
   const cotizacionId = result.insertId;
   for (const it of itemsNorm) {
     await insertarCotizacionItem(connection, cotizacionId, it);
@@ -632,6 +650,7 @@ const updateCotizacion = async (req, res) => {
       mensaje_rechazo,
       notas_manager,
       items,
+      wizard_snapshot_json,
       expected_updated_at, // versionado optimista opcional (ISO/datetime)
     } = req.body;
 
@@ -804,6 +823,18 @@ const updateCotizacion = async (req, res) => {
           await insertarCotizacionItem(connection, id, it);
         }
         await connection.execute('UPDATE cotizaciones SET total = ? WHERE id = ?', [total, id]);
+      }
+
+      if (wizard_snapshot_json !== undefined) {
+        const snapJson = serializeWizardSnapshotField(wizard_snapshot_json);
+        try {
+          await connection.execute(
+            'UPDATE cotizaciones SET wizard_snapshot_json = ? WHERE id = ?',
+            [snapJson, id]
+          );
+        } catch (snapErr) {
+          if (snapErr?.code !== 'ER_BAD_FIELD_ERROR') throw snapErr;
+        }
       }
 
       // Auditoría dentro de la transacción: si algo falla, no queda rastro inconsistente.
