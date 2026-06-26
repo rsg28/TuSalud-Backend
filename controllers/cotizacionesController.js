@@ -423,7 +423,8 @@ const createCotizacion = async (req, res) => {
       cotizacion_base_id,
       es_complementaria,
       creador_tipo,
-      items
+      items,
+      wizard_snapshot_json,
     } = req.body;
 
     if (!pedido_id || !items || !Array.isArray(items) || items.length === 0) {
@@ -445,22 +446,44 @@ const createCotizacion = async (req, res) => {
       const numero_cotizacion = await generarNumeroCotizacion(connection);
       const itemsNorm = items.map(normalizeItem);
       const total = itemsNorm.reduce((acc, it) => acc + it.subtotal, 0);
+      const snapJson = serializeWizardSnapshotField(wizard_snapshot_json);
 
-      const [result] = await connection.execute(
-        `INSERT INTO cotizaciones (
-          numero_cotizacion, pedido_id, cotizacion_base_id, es_complementaria,
-          estado, creador_tipo, creador_id, total
-        ) VALUES (?, ?, ?, ?, 'BORRADOR', ?, ?, ?)`,
-        [
-          numero_cotizacion,
-          pedido_id,
-          cotizacion_base_id || null,
-          es_complementaria ? 1 : 0,
-          creador_tipo || 'VENDEDOR',
-          req.user ? req.user.id : null,
-          total
-        ]
-      );
+      let result;
+      try {
+        [result] = await connection.execute(
+          `INSERT INTO cotizaciones (
+            numero_cotizacion, pedido_id, cotizacion_base_id, es_complementaria,
+            estado, creador_tipo, creador_id, total, wizard_snapshot_json
+          ) VALUES (?, ?, ?, ?, 'BORRADOR', ?, ?, ?, ?)`,
+          [
+            numero_cotizacion,
+            pedido_id,
+            cotizacion_base_id || null,
+            es_complementaria ? 1 : 0,
+            creador_tipo || 'VENDEDOR',
+            req.user ? req.user.id : null,
+            total,
+            snapJson,
+          ]
+        );
+      } catch (insErr) {
+        if (insErr?.code !== 'ER_BAD_FIELD_ERROR' || snapJson != null) throw insErr;
+        [result] = await connection.execute(
+          `INSERT INTO cotizaciones (
+            numero_cotizacion, pedido_id, cotizacion_base_id, es_complementaria,
+            estado, creador_tipo, creador_id, total
+          ) VALUES (?, ?, ?, ?, 'BORRADOR', ?, ?, ?)`,
+          [
+            numero_cotizacion,
+            pedido_id,
+            cotizacion_base_id || null,
+            es_complementaria ? 1 : 0,
+            creador_tipo || 'VENDEDOR',
+            req.user ? req.user.id : null,
+            total,
+          ]
+        );
+      }
 
       const cotizacionId = result.insertId;
 
