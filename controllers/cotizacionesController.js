@@ -177,6 +177,13 @@ const {
   obtenerCotizacionPrincipalAprobadaId,
   MSG_SIN_PRINCIPAL_APROBADA,
 } = require('../utils/cotizacionPrincipal');
+const {
+  calcularTotalDesdeItems,
+  obtenerTotalCotizacion,
+  aplicarTotalesCalculados,
+  aplicarTotalCalculado,
+  cotizacionConTotalCalculado,
+} = require('../utils/cotizacionTotal');
 
 /** Crea una cotización complementaria usando la conexión dada (sin commit). Usado por solicitudes aprobadas o por POST /complementarias. */
 function serializeWizardSnapshotField(snapshot) {
@@ -290,7 +297,8 @@ const getAllCotizaciones = async (req, res) => {
 
     query += ' ORDER BY c.fecha DESC, c.created_at DESC';
     const [cotizaciones] = await pool.execute(query, params);
-    res.json({ cotizaciones });
+    const cotizacionesConTotal = await aplicarTotalesCalculados(pool, cotizaciones);
+    res.json({ cotizaciones: cotizacionesConTotal });
   } catch (error) {
     console.error('Error al obtener cotizaciones:', error);
     res.status(500).json({ error: 'Error al obtener cotizaciones' });
@@ -312,7 +320,8 @@ const getCotizacionesEnviadasAlManager = async (req, res) => {
        ORDER BY c.fecha DESC, c.created_at DESC`,
       []
     );
-    res.json({ cotizaciones });
+    const cotizacionesConTotal = await aplicarTotalesCalculados(pool, cotizaciones);
+    res.json({ cotizaciones: cotizacionesConTotal });
   } catch (error) {
     console.error('Error al obtener cotizaciones enviadas al manager:', error);
     res.status(500).json({ error: 'Error al obtener cotizaciones' });
@@ -362,8 +371,8 @@ const getCotizacionById = async (req, res) => {
     items = await enrichCotizacionItemsSnapshots(pool, items, pedRow[0]?.sede_id ?? null);
 
     res.json({
-      cotizacion: cotizaciones[0],
-      items
+      cotizacion: aplicarTotalCalculado(cotizaciones[0], calcularTotalDesdeItems(items)),
+      items,
     });
   } catch (error) {
     console.error('Error al obtener cotización:', error);
@@ -523,7 +532,7 @@ const createCotizacion = async (req, res) => {
 
       res.status(201).json({
         message: 'Cotización creada exitosamente',
-        cotizacion: newCot[0]
+        cotizacion: aplicarTotalCalculado(newCot[0], calcularTotalDesdeItems(itemsNorm)),
       });
     } catch (err) {
       await connection.rollback();
@@ -631,9 +640,10 @@ const createCotizacionComplementaria = async (req, res) => {
       } catch (_) { /* best-effort */ }
       await connection.commit();
       const [newCot] = await pool.execute('SELECT * FROM cotizaciones WHERE id = ?', [cotizacionId]);
+      const itemsNormComp = items.map(normalizeItem);
       res.status(201).json({
         message: 'Cotización complementaria creada',
-        cotizacion: newCot[0],
+        cotizacion: aplicarTotalCalculado(newCot[0], calcularTotalDesdeItems(itemsNormComp)),
         numero_cotizacion,
       });
     } catch (err) {
@@ -842,11 +852,9 @@ const updateCotizacion = async (req, res) => {
       if (items && Array.isArray(items) && puedeActualizarItems) {
         await connection.execute('DELETE FROM cotizacion_items WHERE cotizacion_id = ?', [id]);
         const itemsNorm = items.map(normalizeItem);
-        const total = itemsNorm.reduce((acc, it) => acc + it.subtotal, 0);
         for (const it of itemsNorm) {
           await insertarCotizacionItem(connection, id, it);
         }
-        await connection.execute('UPDATE cotizaciones SET total = ? WHERE id = ?', [total, id]);
       }
 
       if (wizard_snapshot_json !== undefined) {
@@ -888,6 +896,7 @@ const updateCotizacion = async (req, res) => {
       await connection.commit();
 
       const [updated] = await pool.execute('SELECT * FROM cotizaciones WHERE id = ?', [id]);
+      const cotizacionActualizada = await cotizacionConTotalCalculado(pool, updated[0]);
 
       // Notificación por WhatsApp (best-effort, no bloquea respuesta):
       //   - cotización del CLIENTE en ENVIADA → al vendedor
@@ -902,7 +911,7 @@ const updateCotizacion = async (req, res) => {
         console.warn('[whatsapp] no se pudo cargar el controller:', e?.message || e);
       }
 
-      res.json({ message: 'Cotización actualizada', cotizacion: updated[0] });
+      res.json({ message: 'Cotización actualizada', cotizacion: cotizacionActualizada });
     } catch (err) {
       await connection.rollback();
       throw err;
@@ -1016,7 +1025,7 @@ const updateEstadoCotizacion = async (req, res) => {
       return res.status(400).json({ error: `estado debe ser uno de: ${ESTADOS_COTIZACION.join(', ')}` });
     }
     const [existing] = await pool.execute(
-      'SELECT id, estado, pedido_id, es_complementaria, creador_tipo, creador_id, numero_cotizacion, total FROM cotizaciones WHERE id = ?',
+      'SELECT id, estado, pedido_id, es_complementaria, creador_tipo, creador_id, numero_cotizacion FROM cotizaciones WHERE id = ?',
       [id]
     );
     if (existing.length === 0) {
@@ -1025,6 +1034,8 @@ const updateEstadoCotizacion = async (req, res) => {
     if (existing[0].estado === 'APROBADA') {
       return res.status(403).json({ error: 'No se pueden modificar cotizaciones ya aprobadas.' });
     }
+
+    const totalCotizacion = await obtenerTotalCotizacion(pool, id);
 
     // Validar permiso para la transición.
     const rol = (req.user?.rol || '').toLowerCase();
@@ -1037,7 +1048,7 @@ const updateEstadoCotizacion = async (req, res) => {
       creadorTipo,
       esCreador,
       esComplementaria: !!existing[0].es_complementaria,
-      totalCotizacion: existing[0].total,
+      totalCotizacion,
     });
     if (!auth.ok) {
       return res.status(403).json({ error: auth.error });
@@ -1189,7 +1200,7 @@ const updateEstadoCotizacion = async (req, res) => {
         );
       } else if (estado === 'APROBADA' && es_complementaria) {
         const aprobadaPorVendedor = rol === 'vendedor' || rol === 'manager';
-        const totalCot = Number(existing[0].total ?? 0);
+        const totalCot = await obtenerTotalCotizacion(connection, id);
         const esAjusteAusencia = esComplementariaNegativaAusencia(
           true,
           totalCot,
@@ -1281,6 +1292,7 @@ const updateEstadoCotizacion = async (req, res) => {
       } catch (_) { /* best-effort */ }
       await connection.commit();
       const [updated] = await pool.execute('SELECT * FROM cotizaciones WHERE id = ?', [id]);
+      const cotizacionActualizada = await cotizacionConTotalCalculado(pool, updated[0]);
 
       // Emitir notificaciones según el estado nuevo. Best-effort: cualquier
       // error aquí solo se loggea, no rompe la respuesta al usuario.
@@ -1446,7 +1458,7 @@ const updateEstadoCotizacion = async (req, res) => {
         console.warn('[whatsapp] no se pudo cargar el controller:', e?.message || e);
       }
 
-      res.json({ message: 'Estado actualizado', cotizacion: updated[0] });
+      res.json({ message: 'Estado actualizado', cotizacion: cotizacionActualizada });
     } catch (err) {
       await connection.rollback();
       throw err;

@@ -7,6 +7,7 @@ const { persistirSnapshotPaciente: persistirSnapshotPacienteBase } = require('..
 const { expandirSnapshotPacientesAPedido, sincronizarPedidoWizardSnapshot, precioClienteDesdeItemRaw, buildSnapItemPedido } = require('../utils/nuevoPedidoSnapshotApi');
 const { fetchPrecioExamen } = require('../utils/examenPrecio');
 const seguimientoSvc = require('../services/seguimientoExamenes');
+const { aplicarTotalesCalculados } = require('../utils/cotizacionTotal');
 
 /**
  * Congela el snapshot histórico de un paciente con el tag «pedidos» para los logs.
@@ -437,12 +438,13 @@ const obtenerPedido = async (req, res) => {
       [pedido_id]
     );
 
-    const [cotizaciones] = await pool.execute(
+    const [cotizacionesRaw] = await pool.execute(
       `SELECT id, numero_cotizacion, estado, es_complementaria, creador_tipo,
-              total, fecha, created_at, mensaje_rechazo
+              fecha, created_at, mensaje_rechazo
        FROM cotizaciones WHERE pedido_id = ? ORDER BY es_complementaria ASC, id ASC`,
       [pedido_id]
     );
+    const cotizaciones = await aplicarTotalesCalculados(pool, cotizacionesRaw);
 
     let factura = null;
     if (pedido.factura_id) {
@@ -1525,7 +1527,7 @@ const obtenerCotizacionesDelPedido = async (req, res) => {
     if (pedido.length === 0) {
       return res.status(404).json({ error: 'Pedido no encontrado' });
     }
-    const [cotizaciones] = await pool.execute(
+    const [cotizacionesRaw] = await pool.execute(
       `SELECT c.*, p.numero_pedido, e.razon_social AS empresa_nombre, e.ruc AS empresa_ruc
        FROM cotizaciones c
        JOIN pedidos p ON c.pedido_id = p.id
@@ -1534,6 +1536,7 @@ const obtenerCotizacionesDelPedido = async (req, res) => {
        ORDER BY c.es_complementaria ASC, c.fecha DESC, c.id ASC`,
       [pedido_id]
     );
+    const cotizaciones = await aplicarTotalesCalculados(pool, cotizacionesRaw);
     res.json({ cotizaciones: sanitizeForJson(cotizaciones) });
   } catch (error) {
     console.error('Error al obtener cotizaciones del pedido:', error);

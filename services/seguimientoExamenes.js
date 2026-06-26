@@ -551,17 +551,13 @@ async function aplicarAjustesDirectos(pedidoId, opts = {}) {
       }
     }
 
-    // Recalculamos el total de la cotización con los items restantes.
+    // Recalculamos el total de la cotización con los items restantes (solo para historial).
     const [totRows] = await connection.execute(
       `SELECT COALESCE(SUM(cantidad * precio_final), 0) AS total
          FROM cotizacion_items WHERE cotizacion_id = ?`,
       [principal.id]
     );
     const nuevoTotal = Number(totRows[0]?.total ?? 0);
-    await connection.execute('UPDATE cotizaciones SET total = ? WHERE id = ?', [
-      nuevoTotal,
-      principal.id,
-    ]);
 
     // Historial.
     const descripcionPartes = [];

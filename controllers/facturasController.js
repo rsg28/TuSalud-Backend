@@ -1,4 +1,7 @@
 const pool = require('../config/database');
+const {
+  aplicarTotalesCalculados,
+} = require('../utils/cotizacionTotal');
 const { validationResult } = require('express-validator');
 const { siguienteNumeroFactura } = require('../utils/numeracion');
 const {
@@ -62,7 +65,8 @@ const getFacturaById = async (req, res) => {
     }
 
     const [cotizaciones] = await pool.execute(
-      `SELECT fc.*, c.numero_cotizacion, c.es_complementaria, c.total AS cotizacion_total
+      `SELECT fc.*, c.numero_cotizacion, c.es_complementaria,
+              (SELECT COALESCE(SUM(ci.subtotal), 0) FROM cotizacion_items ci WHERE ci.cotizacion_id = c.id) AS cotizacion_total
        FROM factura_cotizacion fc
        JOIN cotizaciones c ON fc.cotizacion_id = c.id
        WHERE fc.factura_id = ?
@@ -174,7 +178,8 @@ const createFactura = async (req, res) => {
       // Releemos las cotizaciones DENTRO de la TX y bloqueamos sus filas para que
       // no se aprueben/desaprueben durante la facturación.
       const [filas] = await connection.execute(
-        `SELECT c.id, c.total, c.es_complementaria, c.numero_cotizacion
+        `SELECT c.id, c.es_complementaria, c.numero_cotizacion,
+                (SELECT COALESCE(SUM(ci.subtotal), 0) FROM cotizacion_items ci WHERE ci.cotizacion_id = c.id) AS total
          FROM cotizaciones c
          WHERE c.pedido_id = ?
            AND c.estado = 'APROBADA'
@@ -183,7 +188,7 @@ const createFactura = async (req, res) => {
          FOR UPDATE`,
         [pedido_id, principalId]
       );
-      cotizacionesParaFacturar = filas;
+      cotizacionesParaFacturar = await aplicarTotalesCalculados(connection, filas);
 
       if (cotizacionesParaFacturar.length === 0) {
         await connection.rollback();
@@ -340,8 +345,9 @@ const sincronizarCotizacionesFactura = async (req, res) => {
     }
 
     const pedido_id = factura.pedido_id;
-    const [pendientes] = await connection.execute(
-      `SELECT c.id, c.total, c.es_complementaria, c.numero_cotizacion
+    const [pendientesRaw] = await connection.execute(
+      `SELECT c.id, c.es_complementaria, c.numero_cotizacion,
+              (SELECT COALESCE(SUM(ci.subtotal), 0) FROM cotizacion_items ci WHERE ci.cotizacion_id = c.id) AS total
        FROM cotizaciones c
        WHERE c.pedido_id = ?
          AND c.estado = 'APROBADA'
@@ -352,6 +358,7 @@ const sincronizarCotizacionesFactura = async (req, res) => {
        ORDER BY c.id ASC`,
       [pedido_id]
     );
+    const pendientes = await aplicarTotalesCalculados(connection, pendientesRaw);
 
     if (pendientes.length === 0) {
       await connection.commit();

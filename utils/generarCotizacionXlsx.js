@@ -21,6 +21,7 @@
 
 const ExcelJS = require('exceljs');
 const pool = require('../config/database');
+const { calcularTotalDesdeItems } = require('./cotizacionTotal');
 
 function fmtMoneda(n) {
   const v = Number(n);
@@ -71,6 +72,8 @@ async function generarXlsxCotizacion(cotizacionId) {
     [cotizacionId]
   );
 
+  const totalCalculado = calcularTotalDesdeItems(items);
+
   const workbook = new ExcelJS.Workbook();
   workbook.creator = 'TuSalud';
   workbook.created = new Date();
@@ -109,7 +112,7 @@ async function generarXlsxCotizacion(cotizacionId) {
   ws.getCell('A4').font = { bold: true };
 
   ws.getCell('A5').value = 'Total:';
-  ws.getCell('B5').value = `S/ ${fmtMoneda(cot.total)}`;
+  ws.getCell('B5').value = `S/ ${fmtMoneda(totalCalculado)}`;
   ws.getCell('A5').font = { bold: true };
   ws.getCell('B5').font = { bold: true, color: { argb: 'FF1B5E20' } };
 
@@ -165,7 +168,7 @@ async function generarXlsxCotizacion(cotizacionId) {
   ws.getCell(`A${totalRowIdx}`).value = 'TOTAL';
   ws.getCell(`A${totalRowIdx}`).alignment = { horizontal: 'right' };
   ws.getCell(`A${totalRowIdx}`).font = { bold: true, size: 12 };
-  ws.getCell(`I${totalRowIdx}`).value = Number(cot.total) || 0;
+  ws.getCell(`I${totalRowIdx}`).value = totalCalculado;
   ws.getCell(`I${totalRowIdx}`).numFmt = '#,##0.00';
   ws.getCell(`I${totalRowIdx}`).font = { bold: true, size: 12 };
 
@@ -180,7 +183,7 @@ async function generarXlsxCotizacion(cotizacionId) {
       numero: cot.numero_cotizacion || `COT-${cot.id}`,
       empresa: empresaNombre,
       pedidoNumero: cot.numero_pedido || `PED-${cot.pedido_id}`,
-      total: Number(cot.total) || 0,
+      total: totalCalculado,
       nItems: items.length,
     },
   };
