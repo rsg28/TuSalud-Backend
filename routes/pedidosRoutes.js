@@ -92,7 +92,7 @@ router.post(
   pedidosController.crearPedido
 );
 
-// PUT /api/pedidos/:pedido_id — Actualiza metadatos del pedido (centro de costos, observaciones, etc.)
+// PUT /api/pedidos/:pedido_id — Actualiza metadatos del pedido (observaciones, etc.)
 router.put(
   '/:pedido_id',
   authenticateToken,

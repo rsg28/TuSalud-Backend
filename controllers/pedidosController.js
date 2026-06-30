@@ -637,7 +637,7 @@ const crearPedido = async (req, res) => {
   try {
     await connection.beginTransaction();
 
-    const { empresa_id, sede_id, cliente_usuario_id, observaciones, condiciones_pago, centro_costo, fecha_vencimiento, examenes, items, empleados, pacientes: pacientesSnapshotBody, total_empleados: totalEmpleadosBody, totalEmpleados: totalEmpleadosCamel } = req.body;
+    const { empresa_id, sede_id, cliente_usuario_id, observaciones, condiciones_pago, fecha_vencimiento, examenes, items, empleados, pacientes: pacientesSnapshotBody, total_empleados: totalEmpleadosBody, totalEmpleados: totalEmpleadosCamel } = req.body;
     const rolUsuario = normalizarRol(req.user?.rol);
     const vendedor_id = (rolUsuario === 'vendedor' || rolUsuario === 'manager') ? req.user.id : null;
     const toPositiveUserId = (v) => {
@@ -679,15 +679,10 @@ const crearPedido = async (req, res) => {
       ? empleadosList.length
       : ((rawTotal !== undefined && rawTotal !== null && Number(rawTotal) >= 0) ? Math.max(0, parseInt(rawTotal, 10)) : 0);
 
-    const centroCostoFinal =
-      centro_costo != null && String(centro_costo).trim() !== ''
-        ? String(centro_costo).trim().slice(0, 100)
-        : null;
-
     const [result] = await connection.execute(
-      `INSERT INTO pedidos (numero_pedido, empresa_id, sede_id, vendedor_id, cliente_usuario_id, estado, total_empleados, observaciones, condiciones_pago, centro_costo, fecha_vencimiento)
-       VALUES (?, ?, ?, ?, ?, 'ESPERA_COTIZACION', ?, ?, ?, ?, ?, ?)`,
-      [numero_pedido, empresa_id, sede_id, vendedor_id, cliente_idFinal, totalEmpleadosInicial, observaciones || null, condiciones_pago || null, centroCostoFinal, fecha_vencimiento || null]
+      `INSERT INTO pedidos (numero_pedido, empresa_id, sede_id, vendedor_id, cliente_usuario_id, estado, total_empleados, observaciones, condiciones_pago, fecha_vencimiento)
+       VALUES (?, ?, ?, ?, ?, 'ESPERA_COTIZACION', ?, ?, ?, ?)`,
+      [numero_pedido, empresa_id, sede_id, vendedor_id, cliente_idFinal, totalEmpleadosInicial, observaciones || null, condiciones_pago || null, fecha_vencimiento || null]
     );
     const pedido_id = Number(result.insertId);
     if (!Number.isFinite(pedido_id) || pedido_id <= 0) {
@@ -2155,12 +2150,12 @@ const actualizarWizardSnapshotPedido = async (req, res) => {
 };
 
 /**
- * PUT /api/pedidos/:pedido_id — Actualiza metadatos del pedido (centro de costos, observaciones, etc.).
+ * PUT /api/pedidos/:pedido_id — Actualiza metadatos del pedido (observaciones, etc.).
  */
 const actualizarPedido = async (req, res) => {
   try {
     const { pedido_id } = req.params;
-    const { observaciones, condiciones_pago, centro_costo, fecha_vencimiento } = req.body ?? {};
+    const { observaciones, condiciones_pago, fecha_vencimiento } = req.body ?? {};
 
     const [rows] = await pool.execute(
       'SELECT id, cliente_usuario_id, vendedor_id, estado FROM pedidos WHERE id = ?',
@@ -2195,14 +2190,6 @@ const actualizarPedido = async (req, res) => {
       params.push(
         condiciones_pago != null && String(condiciones_pago).trim() !== ''
           ? String(condiciones_pago).trim()
-          : null
-      );
-    }
-    if (centro_costo !== undefined) {
-      sets.push('centro_costo = ?');
-      params.push(
-        centro_costo != null && String(centro_costo).trim() !== ''
-          ? String(centro_costo).trim().slice(0, 100)
           : null
       );
     }

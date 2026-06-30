@@ -305,7 +305,6 @@ CREATE TABLE `pedidos` (
   `fecha_vencimiento` date DEFAULT NULL,
   `observaciones` text,
   `condiciones_pago` varchar(255) DEFAULT NULL,
-  `centro_costo` varchar(100) DEFAULT NULL,
   `cotizacion_principal_id` int DEFAULT NULL,
   `factura_id` int DEFAULT NULL,
   `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
