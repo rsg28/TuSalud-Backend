@@ -637,7 +637,7 @@ const crearPedido = async (req, res) => {
   try {
     await connection.beginTransaction();
 
-    const { empresa_id, sede_id, cliente_usuario_id, observaciones, condiciones_pago, fecha_vencimiento, examenes, items, empleados, pacientes: pacientesSnapshotBody, total_empleados: totalEmpleadosBody, totalEmpleados: totalEmpleadosCamel } = req.body;
+    const { empresa_id, sede_id, cliente_usuario_id, observaciones, condiciones_pago, centro_costo, fecha_vencimiento, examenes, items, empleados, pacientes: pacientesSnapshotBody, total_empleados: totalEmpleadosBody, totalEmpleados: totalEmpleadosCamel } = req.body;
     const rolUsuario = normalizarRol(req.user?.rol);
     const vendedor_id = (rolUsuario === 'vendedor' || rolUsuario === 'manager') ? req.user.id : null;
     const toPositiveUserId = (v) => {
@@ -679,10 +679,15 @@ const crearPedido = async (req, res) => {
       ? empleadosList.length
       : ((rawTotal !== undefined && rawTotal !== null && Number(rawTotal) >= 0) ? Math.max(0, parseInt(rawTotal, 10)) : 0);
 
+    const centroCostoFinal =
+      centro_costo != null && String(centro_costo).trim() !== ''
+        ? String(centro_costo).trim().slice(0, 100)
+        : null;
+
     const [result] = await connection.execute(
-      `INSERT INTO pedidos (numero_pedido, empresa_id, sede_id, vendedor_id, cliente_usuario_id, estado, total_empleados, observaciones, condiciones_pago, fecha_vencimiento)
-       VALUES (?, ?, ?, ?, ?, 'ESPERA_COTIZACION', ?, ?, ?, ?)`,
-      [numero_pedido, empresa_id, sede_id, vendedor_id, cliente_idFinal, totalEmpleadosInicial, observaciones || null, condiciones_pago || null, fecha_vencimiento || null]
+      `INSERT INTO pedidos (numero_pedido, empresa_id, sede_id, vendedor_id, cliente_usuario_id, estado, total_empleados, observaciones, condiciones_pago, centro_costo, fecha_vencimiento)
+       VALUES (?, ?, ?, ?, ?, 'ESPERA_COTIZACION', ?, ?, ?, ?, ?, ?)`,
+      [numero_pedido, empresa_id, sede_id, vendedor_id, cliente_idFinal, totalEmpleadosInicial, observaciones || null, condiciones_pago || null, centroCostoFinal, fecha_vencimiento || null]
     );
     const pedido_id = Number(result.insertId);
     if (!Number.isFinite(pedido_id) || pedido_id <= 0) {
@@ -2149,6 +2154,90 @@ const actualizarWizardSnapshotPedido = async (req, res) => {
   }
 };
 
+/**
+ * PUT /api/pedidos/:pedido_id — Actualiza metadatos del pedido (centro de costos, observaciones, etc.).
+ */
+const actualizarPedido = async (req, res) => {
+  try {
+    const { pedido_id } = req.params;
+    const { observaciones, condiciones_pago, centro_costo, fecha_vencimiento } = req.body ?? {};
+
+    const [rows] = await pool.execute(
+      'SELECT id, cliente_usuario_id, vendedor_id, estado FROM pedidos WHERE id = ?',
+      [pedido_id]
+    );
+    if (rows.length === 0) {
+      return res.status(404).json({ error: 'Pedido no encontrado' });
+    }
+    const pedido = rows[0];
+    if (pedido.estado === 'CANCELADO') {
+      return res.status(409).json({ error: 'No se puede editar un pedido cancelado' });
+    }
+
+    const rol = normalizarRol(req.user?.rol);
+    const userId = req.user?.id;
+    if (rol === 'cliente') {
+      if (Number(pedido.cliente_usuario_id) !== Number(userId)) {
+        return res.status(403).json({ error: 'No tiene permiso para editar este pedido' });
+      }
+    } else if (rol !== 'vendedor' && rol !== 'manager') {
+      return res.status(403).json({ error: 'Rol no autorizado' });
+    }
+
+    const sets = [];
+    const params = [];
+    if (observaciones !== undefined) {
+      sets.push('observaciones = ?');
+      params.push(observaciones != null && String(observaciones).trim() !== '' ? String(observaciones).trim() : null);
+    }
+    if (condiciones_pago !== undefined) {
+      sets.push('condiciones_pago = ?');
+      params.push(
+        condiciones_pago != null && String(condiciones_pago).trim() !== ''
+          ? String(condiciones_pago).trim()
+          : null
+      );
+    }
+    if (centro_costo !== undefined) {
+      sets.push('centro_costo = ?');
+      params.push(
+        centro_costo != null && String(centro_costo).trim() !== ''
+          ? String(centro_costo).trim().slice(0, 100)
+          : null
+      );
+    }
+    if (fecha_vencimiento !== undefined) {
+      sets.push('fecha_vencimiento = ?');
+      params.push(fecha_vencimiento || null);
+    }
+
+    if (sets.length === 0) {
+      return res.status(400).json({ error: 'No hay campos para actualizar' });
+    }
+
+    params.push(pedido_id);
+    await pool.execute(`UPDATE pedidos SET ${sets.join(', ')} WHERE id = ?`, params);
+
+    const [updated] = await pool.execute(
+      `SELECT p.*,
+        e.razon_social AS empresa_nombre, e.ruc AS empresa_ruc,
+        s.nombre AS sede_nombre,
+        u.nombre_completo AS vendedor_nombre
+       FROM pedidos p
+       JOIN empresas e ON p.empresa_id = e.id
+       JOIN sedes s ON p.sede_id = s.id
+       LEFT JOIN usuarios u ON p.vendedor_id = u.id
+       WHERE p.id = ?`,
+      [pedido_id]
+    );
+
+    res.json({ message: 'Pedido actualizado', pedido: updated[0] });
+  } catch (error) {
+    console.error('Error al actualizar pedido:', error);
+    res.status(500).json({ error: 'Error al actualizar pedido' });
+  }
+};
+
 module.exports = {
   listarPedidos,
   listarMisPedidos,
@@ -2159,6 +2248,7 @@ module.exports = {
   obtenerFacturasDelPedido,
   obtenerPacientesCompletados,
   crearPedido,
+  actualizarPedido,
   asignarExamenAPacientes,
   asignarPerfilAPacientes,
   agregarExamen,

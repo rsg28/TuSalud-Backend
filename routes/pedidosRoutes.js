@@ -92,6 +92,14 @@ router.post(
   pedidosController.crearPedido
 );
 
+// PUT /api/pedidos/:pedido_id — Actualiza metadatos del pedido (centro de costos, observaciones, etc.)
+router.put(
+  '/:pedido_id',
+  authenticateToken,
+  requireRole('vendedor', 'manager', 'cliente'),
+  pedidosController.actualizarPedido
+);
+
 // PATCH /api/pedidos/:pedido_id/wizard-snapshot — Sincroniza snapshot wizard (con precios) en pacientes e ítems
 router.patch(
   '/:pedido_id/wizard-snapshot',
