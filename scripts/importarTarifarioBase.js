@@ -26,13 +26,15 @@
  *     (si hay filas previas, este script AÑADE, no reemplaza).
  *   - .env con DB_* configurado.
  *
+ * Archivo por defecto (en el repo):
+ *   docs/Tarifario Base  S.O. TU SALUD SAC (3).xlsx
+ *
  * Uso:
- *   node scripts/importarTarifarioBase.js \
- *        --xlsx "C:\\Users\\rgome\\Downloads\\Tarifario Base  S.O. TU SALUD SAC (3).xlsx"
+ *   node scripts/importarTarifarioBase.js
  *
  * Por defecto corre en DRY-RUN (no escribe en la DB). Para persistir:
  *
- *   node scripts/importarTarifarioBase.js --xlsx "<ruta>" --apply
+ *   node scripts/importarTarifarioBase.js --apply
  *
  * Otras banderas:
  *   --sheet "Precios"      Nombre de la hoja (default: primera del workbook)
@@ -77,8 +79,9 @@ function parseArgs(argv) {
 const argv = parseArgs(process.argv.slice(2));
 
 const DEFAULT_XLSX = path.join(
-  process.env.USERPROFILE || process.env.HOME || '.',
-  'Downloads',
+  __dirname,
+  '..',
+  'docs',
   'Tarifario Base  S.O. TU SALUD SAC (3).xlsx'
 );
 const XLSX_PATH = String(argv.xlsx || DEFAULT_XLSX);

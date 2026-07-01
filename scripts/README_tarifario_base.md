@@ -3,13 +3,14 @@
 Flujo de "borrón y cuenta nueva" para el catálogo de exámenes/precios, alineado al Excel:
 
 ```
-Tarifario Base  S.O. TU SALUD SAC (3).xlsx
+docs/Tarifario Base  S.O. TU SALUD SAC (3).xlsx
 ```
 
 ## Archivos involucrados
 
 | Archivo | Propósito |
 |---|---|
+| `docs/Tarifario Base  S.O. TU SALUD SAC (3).xlsx` | Tarifario fuente (versionado en el repo). |
 | `scripts/reset_catalogo_examenes.sql` | **Borra** el catálogo (categorías, exámenes, precios, perfiles) **y toda la data transaccional dependiente** (pedidos, cotizaciones, facturas, pacientes, solicitudes, historial). |
 | `scripts/importarTarifarioBase.js` | **Carga** categorías + exámenes + precios base desde el `.xlsx`. |
 
@@ -40,26 +41,35 @@ Hoja: `Precios`. Cabecera en la fila 3:
 
 ### 1) Borrar todo lo actual
 
-```powershell
-mysql -h <host> -u <user> -p <database> < scripts/reset_catalogo_examenes.sql
+Desde `~/app/TuSalud-Backend` en el servidor:
+
+```bash
+mysql -h tusaluddb.cwt2imwkyevt.us-east-1.rds.amazonaws.com -P 3306 -u admin -p tusalud \
+  < scripts/reset_catalogo_examenes.sql
 ```
 
 Al final imprime un `SELECT` con el conteo por tabla (todo debe quedar en 0).
 
 ### 2) Cargar el tarifario
 
-Dry-run (no toca la DB, valida el parseo):
+Dry-run (no toca la DB, valida el parseo). Por defecto lee `docs/Tarifario Base  S.O. TU SALUD SAC (3).xlsx`:
 
-```powershell
-node scripts/importarTarifarioBase.js `
-  --xlsx "C:\Users\rgome\Downloads\Tarifario Base  S.O. TU SALUD SAC (3).xlsx"
+```bash
+cd ~/app/TuSalud-Backend
+node scripts/importarTarifarioBase.js
 ```
 
 Aplicar de verdad:
 
-```powershell
-node scripts/importarTarifarioBase.js `
-  --xlsx "C:\Users\rgome\Downloads\Tarifario Base  S.O. TU SALUD SAC (3).xlsx" `
+```bash
+node scripts/importarTarifarioBase.js --apply
+```
+
+Ruta explícita (si hace falta):
+
+```bash
+node scripts/importarTarifarioBase.js \
+  --xlsx "docs/Tarifario Base  S.O. TU SALUD SAC (3).xlsx" \
   --apply
 ```
 
