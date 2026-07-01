@@ -307,6 +307,7 @@ CREATE TABLE `pedidos` (
   `condiciones_pago` varchar(255) DEFAULT NULL,
   `cotizacion_principal_id` int DEFAULT NULL,
   `factura_id` int DEFAULT NULL,
+  `cliente_ve_precios_individuales` tinyint(1) NOT NULL DEFAULT '0',
   `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
@@ -641,6 +642,33 @@ CREATE TABLE `solicitudes_cancelacion` (
   CONSTRAINT `solicitudes_cancel_ibfk_1` FOREIGN KEY (`pedido_id`) REFERENCES `pedidos` (`id`) ON DELETE CASCADE,
   CONSTRAINT `solicitudes_cancel_ibfk_2` FOREIGN KEY (`cliente_usuario_id`) REFERENCES `usuarios` (`id`) ON DELETE CASCADE,
   CONSTRAINT `solicitudes_cancel_ibfk_3` FOREIGN KEY (`revisado_por_usuario_id`) REFERENCES `usuarios` (`id`) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+-- -----------------------------------------------------------------------------
+-- Solicitudes «ver detalle de precios» (cliente ↔ vendedor)
+-- Al aprobarla, se activa `pedidos.cliente_ve_precios_individuales = 1`, lo
+-- que desbloquea la vista detallada en cotizaciones y factura del pedido.
+-- -----------------------------------------------------------------------------
+CREATE TABLE `solicitudes_ver_precios_detalle` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `pedido_id` int NOT NULL,
+  `cliente_usuario_id` int NOT NULL,
+  `estado` enum('PENDIENTE','APROBADA','RECHAZADA') NOT NULL DEFAULT 'PENDIENTE',
+  `mensaje_cliente` text,
+  `mensaje_rechazo` text,
+  `fecha_solicitud` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
+  `fecha_revision` timestamp NULL DEFAULT NULL,
+  `revisado_por_usuario_id` int DEFAULT NULL,
+  `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `svpd_cliente_usuario_id` (`cliente_usuario_id`),
+  KEY `svpd_revisado_por_usuario_id` (`revisado_por_usuario_id`),
+  KEY `idx_svpd_pedido` (`pedido_id`),
+  KEY `idx_svpd_estado` (`estado`),
+  CONSTRAINT `svpd_ibfk_1` FOREIGN KEY (`pedido_id`) REFERENCES `pedidos` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `svpd_ibfk_2` FOREIGN KEY (`cliente_usuario_id`) REFERENCES `usuarios` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `svpd_ibfk_3` FOREIGN KEY (`revisado_por_usuario_id`) REFERENCES `usuarios` (`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 -- -----------------------------------------------------------------------------

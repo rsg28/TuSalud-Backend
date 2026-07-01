@@ -52,7 +52,9 @@ const getFacturaById = async (req, res) => {
   try {
     const { id } = req.params;
     const [facturas] = await pool.execute(
-      `SELECT f.*, p.numero_pedido, p.empresa_id, e.razon_social AS empresa_nombre, e.ruc AS empresa_ruc
+      `SELECT f.*, p.numero_pedido, p.empresa_id,
+              p.cliente_ve_precios_individuales,
+              e.razon_social AS empresa_nombre, e.ruc AS empresa_ruc
        FROM facturas f
        JOIN pedidos p ON f.pedido_id = p.id
        JOIN empresas e ON p.empresa_id = e.id
