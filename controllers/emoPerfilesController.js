@@ -299,6 +299,13 @@ exports.listarVisiblesParaEmpresa = async (req, res) => {
       );
       params.push(tipoEmoRaw);
     }
+    // Clientes solo ven perfiles con al menos un examen asignado (el vendedor configura).
+    const rolUsuario = String(req.user?.rol ?? '').trim().toLowerCase();
+    if (rolUsuario === 'cliente') {
+      filtros.push(
+        `EXISTS (SELECT 1 FROM emo_perfil_examenes mpe2 WHERE mpe2.perfil_id = p.id)`
+      );
+    }
     const whereExtra = filtros.length > 0 ? ` AND (${filtros.join(' AND ')})` : '';
 
     const visibilidadParaEmpresa = `
@@ -559,11 +566,21 @@ exports.guardarExamenesPorTipo = async (req, res) => {
     try {
       await connection.beginTransaction();
 
-      const [perfilRows] = await connection.execute('SELECT id FROM emo_perfiles WHERE id = ?', [perfilId]);
+      const [perfilRows] = await connection.execute(
+        'SELECT id, nombre FROM emo_perfiles WHERE id = ?',
+        [perfilId]
+      );
       if (perfilRows.length === 0) {
         await connection.rollback();
         return res.status(404).json({ error: 'Perfil no encontrado' });
       }
+      const perfilNombre = perfilRows[0].nombre;
+
+      const [countAntesRows] = await connection.execute(
+        'SELECT COUNT(*) AS total FROM emo_perfil_examenes WHERE perfil_id = ?',
+        [perfilId]
+      );
+      const totalAntes = Number(countAntesRows[0]?.total ?? 0);
 
       await connection.execute('DELETE FROM emo_perfil_examenes WHERE perfil_id = ? AND tipo_emo = ?', [perfilId, tipoEmoRaw]);
 
@@ -574,6 +591,47 @@ exports.guardarExamenesPorTipo = async (req, res) => {
       }
 
       await connection.commit();
+
+      // Si el perfil proviene de una solicitud de cliente y acaba de tener exámenes, avisar.
+      const [countDespuesRows] = await pool.execute(
+        'SELECT COUNT(*) AS total FROM emo_perfil_examenes WHERE perfil_id = ?',
+        [perfilId]
+      );
+      const totalDespues = Number(countDespuesRows[0]?.total ?? 0);
+      if (totalAntes === 0 && totalDespues > 0) {
+        try {
+          const [solRows] = await pool.execute(
+            `SELECT s.empresa_id FROM solicitudes_perfil_emo s
+              WHERE s.perfil_creado_id = ? AND s.estado = 'APROBADA'
+              LIMIT 1`,
+            [perfilId]
+          );
+          if (solRows.length > 0) {
+            const connNotif = await pool.getConnection();
+            try {
+              await emitirNotificacionAClientesDeEmpresa(connNotif, {
+                empresaId: solRows[0].empresa_id,
+                tipo: 'PERFIL_ASIGNADO',
+                titulo: `Perfil "${perfilNombre}" listo`,
+                mensaje:
+                  'Tu vendedor ya asignó los exámenes. Ya puedes seleccionar este perfil al armar pedidos.',
+                contextoJson: {
+                  evento: 'PERFIL_EMO_LISTO',
+                  perfil_id: perfilId,
+                  perfil_nombre: perfilNombre,
+                  empresa_id: solRows[0].empresa_id,
+                },
+                remitenteUsuarioId: req.user?.id ?? null,
+              });
+            } finally {
+              connNotif.release();
+            }
+          }
+        } catch (notifErr) {
+          console.warn('[emo-perfiles] notif perfil listo falló:', notifErr?.message || notifErr);
+        }
+      }
+
       return res.json({ message: 'Mapeo EMO guardado', perfil_id: perfilId, tipo_emo: tipoEmoRaw, total: values.length });
     } catch (err) {
       await connection.rollback();

@@ -20,6 +20,9 @@ const {
   helpers: { emitirNotificacion, emitirNotificacionAClientesDeEmpresa },
 } = require('./notificacionesController');
 
+const EMO_TIPOS_VALIDOS = ['PREOC', 'ANUAL', 'RETIRO', 'VISITA'];
+const VISIBILIDADES_VALIDAS = ['GLOBAL', 'PRIVADO'];
+
 async function obtenerEmpresaDelUsuario(userId) {
   const [rows] = await pool.execute('SELECT empresa_id FROM usuarios WHERE id = ?', [userId]);
   if (rows.length === 0) return null;
@@ -202,7 +205,11 @@ exports.listarParaStaff = async (req, res) => {
 
 /**
  * POST /api/solicitudes-perfil-emo/:id/aprobar
- * Body: { nombre_final? } — si se envía, se usa como nombre del perfil creado.
+ * Body: {
+ *   nombre_final?,
+ *   visibilidad?: 'GLOBAL'|'PRIVADO'  (default PRIVADO),
+ *   tipo_emo?: 'PREOC'|'ANUAL'|'RETIRO'|'VISITA'  (default PREOC; el vendedor asigna exámenes bajo ese tipo)
+ * }
  * Rol: vendedor/manager.
  */
 exports.aprobar = async (req, res) => {
@@ -210,6 +217,16 @@ exports.aprobar = async (req, res) => {
   if (!Number.isInteger(id) || id <= 0) {
     return res.status(400).json({ error: 'id inválido' });
   }
+
+  const visibilidadRaw = String(req.body?.visibilidad ?? 'PRIVADO').trim().toUpperCase();
+  if (!VISIBILIDADES_VALIDAS.includes(visibilidadRaw)) {
+    return res.status(400).json({ error: 'visibilidad inválida (GLOBAL|PRIVADO)' });
+  }
+  const tipoEmoRaw = String(req.body?.tipo_emo ?? 'PREOC').trim().toUpperCase();
+  if (!EMO_TIPOS_VALIDOS.includes(tipoEmoRaw)) {
+    return res.status(400).json({ error: 'tipo_emo inválido (PREOC|ANUAL|RETIRO|VISITA)' });
+  }
+
   const conn = await pool.getConnection();
   try {
     await conn.beginTransaction();
@@ -243,18 +260,20 @@ exports.aprobar = async (req, res) => {
         .json({ error: 'Ya existe un perfil con ese nombre. Edita el nombre final antes de aprobar.' });
     }
 
-    // Crear perfil PRIVADO
+    // Crear perfil con la visibilidad elegida por el vendedor
     const [insPerfil] = await conn.execute(
-      "INSERT INTO emo_perfiles (nombre, visibilidad) VALUES (?, 'PRIVADO')",
-      [nombreFinal]
+      'INSERT INTO emo_perfiles (nombre, visibilidad) VALUES (?, ?)',
+      [nombreFinal, visibilidadRaw]
     );
     const perfilId = insPerfil.insertId;
 
-    // Asignar a la empresa
-    await conn.execute(
-      'INSERT INTO emo_perfil_asignacion (perfil_id, empresa_id) VALUES (?, ?)',
-      [perfilId, sol.empresa_id]
-    );
+    // Si es PRIVADO, asignar a la empresa que solicitó el perfil
+    if (visibilidadRaw === 'PRIVADO') {
+      await conn.execute(
+        'INSERT INTO emo_perfil_asignacion (perfil_id, empresa_id) VALUES (?, ?)',
+        [perfilId, sol.empresa_id]
+      );
+    }
 
     // Marcar solicitud como aprobada
     await conn.execute(
@@ -267,18 +286,21 @@ exports.aprobar = async (req, res) => {
       [perfilId, req.user.id, id]
     );
 
-    // Notificar al cliente
+    // Notificar al cliente (sin exámenes aún; el vendedor los asigna bajo el tipo EMO elegido).
+    const visibilidadLabel = visibilidadRaw === 'GLOBAL' ? 'global' : 'privado de tu empresa';
     try {
       await emitirNotificacionAClientesDeEmpresa(conn, {
         empresaId: sol.empresa_id,
         tipo: 'SOLICITUD_PERFIL_EMO',
-        titulo: `Perfil "${nombreFinal}" creado`,
-        mensaje: `Tu solicitud fue aprobada. El vendedor está configurando los exámenes del perfil.`,
+        titulo: `Solicitud de perfil "${nombreFinal}" aceptada`,
+        mensaje: `Tu vendedor creará el perfil (${visibilidadLabel}, tipo ${tipoEmoRaw}) y asignará los exámenes. Podrás usarlo en pedidos cuando esté listo.`,
         contextoJson: {
           evento: 'SOLICITUD_PERFIL_EMO_APROBADA',
           solicitud_id: id,
           perfil_id: perfilId,
           nombre: nombreFinal,
+          visibilidad: visibilidadRaw,
+          tipo_emo: tipoEmoRaw,
         },
         remitenteUsuarioId: req.user.id,
       });
@@ -291,6 +313,8 @@ exports.aprobar = async (req, res) => {
       solicitud_id: id,
       perfil_id: perfilId,
       nombre: nombreFinal,
+      visibilidad: visibilidadRaw,
+      tipo_emo: tipoEmoRaw,
       estado: 'APROBADA',
     });
   } catch (err) {
