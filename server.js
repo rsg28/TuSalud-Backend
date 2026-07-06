@@ -56,6 +56,7 @@ app.use('/api/solicitudes-cancelacion', require('./routes/solicitudesCancelacion
 app.use('/api/solicitudes-ver-precios-detalle', require('./routes/solicitudesVerPreciosDetalleRoutes'));
 app.use('/api/precios', require('./routes/preciosEmpresaRoutes'));
 app.use('/api/emo-perfiles', require('./routes/emoPerfilesRoutes'));
+app.use('/api/solicitudes-perfil-emo', require('./routes/solicitudesPerfilEmoRoutes'));
 app.use('/api/reniec', require('./routes/reniecRoutes'));
 app.use('/api/import', require('./routes/pdfTextoEmbebidoRoutes'));
 app.use('/api/whatsapp', require('./routes/whatsappRoutes'));
