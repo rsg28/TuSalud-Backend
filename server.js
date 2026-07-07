@@ -63,6 +63,7 @@ app.use('/api/whatsapp', require('./routes/whatsappRoutes'));
 app.use('/api/integraciones', require('./routes/integracionesRoutes'));
 app.use('/api/auditoria', require('./routes/auditoriaRoutes'));
 app.use('/api/presencia', require('./routes/presenciaRoutes'));
+app.use('/api/mis-archivos-cotizaciones', require('./routes/misArchivosCotizacionesRoutes'));
 
 // 404 handler
 app.use((req, res) => {

@@ -201,6 +201,142 @@ async function getPresignedDownloadUrl(key, opts = {}) {
   return presignerSingleton.getSignedUrl(client, cmd, { expiresIn });
 }
 
+/**
+ * Sube un buffer a S3 usando EXACTAMENTE la key indicada, sin agregar prefijos,
+ * fechas ni sufijos aleatorios. Útil cuando el llamador quiere controlar la
+ * jerarquía completa (por ejemplo: `vendedor/juan@tusalud.com/cotizaciones/foo.xlsx`).
+ *
+ * @param {Buffer} buffer
+ * @param {string} key         Key completa dentro del bucket.
+ * @param {object} [opts]
+ * @param {string} [opts.contentType]
+ * @param {Record<string,string>} [opts.metadata]
+ */
+async function putObjectAtKey(buffer, key, opts = {}) {
+  if (!Buffer.isBuffer(buffer) || buffer.length === 0) {
+    throw new Error('putObjectAtKey: buffer vacío o inválido');
+  }
+  if (!key || typeof key !== 'string') {
+    throw new Error('putObjectAtKey: key requerida');
+  }
+  const aws = loadAwsLazily();
+  if (!aws) throw new Error('AWS SDK no instalado en el backend');
+  const bucket = getBucket();
+  const region = getRegion();
+  if (!bucket || !region) throw new Error('AWS_S3_BUCKET / AWS_REGION no configurados');
+  const client = getClient();
+  if (!client) throw new Error('No se pudo construir el cliente S3');
+
+  const sha = sha256Hex(buffer);
+  const cmd = new aws.s3.PutObjectCommand({
+    Bucket: bucket,
+    Key: key,
+    Body: buffer,
+    ContentType: opts.contentType || 'application/octet-stream',
+    Metadata: {
+      sha256: sha,
+      ...(opts.metadata || {}),
+    },
+    ServerSideEncryption: 'AES256',
+  });
+  const out = await client.send(cmd);
+  return {
+    key,
+    bucket,
+    region,
+    etag: out?.ETag ? String(out.ETag).replace(/"/g, '') : null,
+    versionId: out?.VersionId || null,
+    sha256: sha,
+    size: buffer.length,
+  };
+}
+
+/**
+ * Lista objetos bajo un prefijo. Devuelve `[{ key, size, lastModified }]`.
+ * Maneja paginación (hasta 5000 objetos por prefijo, más que suficiente para
+ * la carpeta de un usuario).
+ *
+ * @param {string} prefix
+ */
+async function listObjectsUnderPrefix(prefix) {
+  const aws = loadAwsLazily();
+  if (!aws) throw new Error('AWS SDK no instalado en el backend');
+  const bucket = getBucket();
+  if (!bucket) throw new Error('AWS_S3_BUCKET no configurado');
+  const client = getClient();
+  if (!client) throw new Error('No se pudo construir el cliente S3');
+
+  const items = [];
+  let continuationToken;
+  const MAX_ITER = 5;
+  for (let i = 0; i < MAX_ITER; i++) {
+    const cmd = new aws.s3.ListObjectsV2Command({
+      Bucket: bucket,
+      Prefix: prefix,
+      MaxKeys: 1000,
+      ContinuationToken: continuationToken,
+    });
+    const out = await client.send(cmd);
+    for (const obj of out?.Contents || []) {
+      if (!obj?.Key) continue;
+      items.push({
+        key: obj.Key,
+        size: Number(obj.Size ?? 0),
+        lastModified: obj.LastModified ? new Date(obj.LastModified).toISOString() : null,
+        etag: obj.ETag ? String(obj.ETag).replace(/"/g, '') : null,
+      });
+    }
+    if (!out?.IsTruncated) break;
+    continuationToken = out.NextContinuationToken;
+    if (!continuationToken) break;
+  }
+  return items;
+}
+
+/**
+ * Elimina un objeto por key. No falla si el objeto no existía (idempotente).
+ * @param {string} key
+ */
+async function deleteObjectByKey(key) {
+  if (!key) throw new Error('deleteObjectByKey: key requerida');
+  const aws = loadAwsLazily();
+  if (!aws) throw new Error('AWS SDK no instalado en el backend');
+  const bucket = getBucket();
+  if (!bucket) throw new Error('AWS_S3_BUCKET no configurado');
+  const client = getClient();
+  if (!client) throw new Error('No se pudo construir el cliente S3');
+
+  const cmd = new aws.s3.DeleteObjectCommand({ Bucket: bucket, Key: key });
+  await client.send(cmd);
+  return { key, bucket };
+}
+
+/**
+ * ¿Existe un objeto con este key? Usa HeadObject (barato).
+ * @param {string} key
+ * @returns {Promise<boolean>}
+ */
+async function objectExists(key) {
+  if (!key) return false;
+  const aws = loadAwsLazily();
+  if (!aws) throw new Error('AWS SDK no instalado en el backend');
+  const bucket = getBucket();
+  if (!bucket) throw new Error('AWS_S3_BUCKET no configurado');
+  const client = getClient();
+  if (!client) throw new Error('No se pudo construir el cliente S3');
+  try {
+    const cmd = new aws.s3.HeadObjectCommand({ Bucket: bucket, Key: key });
+    await client.send(cmd);
+    return true;
+  } catch (err) {
+    const name = err?.name || err?.$metadata?.httpStatusCode;
+    if (name === 'NotFound' || name === 404 || err?.$metadata?.httpStatusCode === 404) {
+      return false;
+    }
+    throw err;
+  }
+}
+
 module.exports = {
   isEnabled,
   uploadBuffer,
@@ -209,4 +345,8 @@ module.exports = {
   sha256Hex,
   getBucket,
   getRegion,
+  putObjectAtKey,
+  listObjectsUnderPrefix,
+  deleteObjectByKey,
+  objectExists,
 };
