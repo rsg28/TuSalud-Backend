@@ -4,6 +4,13 @@ const { authenticateToken } = require('../middleware/auth');
 const { auditarUploadMiddleware } = require('../middleware/auditarUpload');
 const { extraerPdfTextoEmbebido } = require('../controllers/pdfTextoEmbebidoController');
 const { extraerPdfPerfilTablas } = require('../controllers/pdfPerfilTablasController');
+const {
+  initChunkedUpload,
+  receiveChunk,
+  completeChunkedUpload,
+  getChunkedJobStatus,
+} = require('../controllers/pdfPerfilTablasChunkedController');
+const { ocrXlsxImagenes } = require('../controllers/xlsxImagenesOcrController');
 
 const router = express.Router();
 
@@ -73,5 +80,18 @@ router.post(
   auditarUploadMiddleware('import.pdf-perfil-tablas'),
   extraerPdfPerfilTablas
 );
+
+/** Subida por chunks (redes con Fortinet / firewalls que truncan POST grandes). */
+router.post('/pdf-perfil-tablas/upload/init', authenticateToken, initChunkedUpload);
+router.post('/pdf-perfil-tablas/upload/chunk', authenticateToken, receiveChunk);
+router.post('/pdf-perfil-tablas/upload/complete', authenticateToken, completeChunkedUpload);
+router.get('/pdf-perfil-tablas/upload/status/:jobId', authenticateToken, getChunkedJobStatus);
+
+/**
+ * OCR de imágenes embebidas en .xlsx (cuando la tabla de perfiles fue pegada
+ * como imagen y los parsers de tabla no pueden leerla). Body JSON con
+ * `file_base64` del xlsx.
+ */
+router.post('/pdf-perfil-tablas/xlsx-imagenes-ocr', authenticateToken, ocrXlsxImagenes);
 
 module.exports = router;
