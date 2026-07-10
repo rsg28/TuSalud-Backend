@@ -19,4 +19,31 @@ router.post('/', authenticateToken, soloRolesConCarpeta, ctrl.subirMiArchivo);
 router.post('/descargar', authenticateToken, soloRolesConCarpeta, ctrl.generarUrlDescarga);
 router.delete('/', authenticateToken, soloRolesConCarpeta, ctrl.eliminarMiArchivo);
 
+/**
+ * Subida por chunks para redes con Fortinet u otros firewalls que cortan
+ * POSTs grandes. El cliente:
+ *   1) POST /upload/init      → { upload_id }
+ *   2) POST /upload/chunk × N → sube el archivo en lotes ~200 KB
+ *   3) POST /upload/complete  → { ok, nombre, tamano, key }
+ * El servidor ensambla en memoria y sube a S3 solo al `complete`.
+ */
+router.post(
+  '/upload/init',
+  authenticateToken,
+  soloRolesConCarpeta,
+  ctrl.iniciarSubidaPorChunks
+);
+router.post(
+  '/upload/chunk',
+  authenticateToken,
+  soloRolesConCarpeta,
+  ctrl.recibirChunk
+);
+router.post(
+  '/upload/complete',
+  authenticateToken,
+  soloRolesConCarpeta,
+  ctrl.completarSubidaPorChunks
+);
+
 module.exports = router;

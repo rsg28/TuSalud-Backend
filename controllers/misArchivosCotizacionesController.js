@@ -18,6 +18,7 @@
  */
 
 const s3 = require('../utils/s3');
+const chunkSessions = require('../utils/misArchivosUploadSessions');
 
 const ROLES_VALIDOS = new Set(['manager', 'vendedor', 'cliente']);
 
@@ -240,9 +241,131 @@ async function eliminarMiArchivo(req, res) {
   }
 }
 
+/**
+ * POST /api/mis-archivos-cotizaciones/upload/init
+ * Body: { nombre, total_chunks, mime_type?, total_bytes? }
+ *   → { upload_id, total_chunks }
+ *
+ * Inicia una sesión de subida por chunks. Ideal para archivos grandes que
+ * Fortinet u otros firewalls corporativos suelen bloquear en un único POST.
+ */
+async function iniciarSubidaPorChunks(req, res) {
+  if (!ensureS3(res)) return;
+  try {
+    const nombreInput = obtenerNombreDeReq(req);
+    const nombre = sanitizarNombreArchivo(nombreInput);
+    if (!nombre) {
+      return res.status(400).json({ error: 'Nombre de archivo requerido.' });
+    }
+    // Verificamos que el usuario tenga rol/email válidos ANTES de crear la
+    // sesión (evita gastar memoria si el complete iba a fallar igual).
+    const prefijo = construirPrefijoUsuario(req.user);
+    if (!prefijo) {
+      return res.status(400).json({ error: 'Usuario sin rol o correo válidos.' });
+    }
+    const totalChunks = req.body?.total_chunks ?? req.body?.totalChunks;
+    if (totalChunks == null) {
+      return res.status(400).json({ error: 'total_chunks es requerido' });
+    }
+    const contentType = req.body?.mime_type ?? req.body?.mimeType ?? 'application/octet-stream';
+    const totalBytes = req.body?.total_bytes ?? req.body?.totalBytes ?? null;
+
+    const out = chunkSessions.createSession(req.user.id, {
+      nombre,
+      totalChunks,
+      contentType,
+      totalBytes,
+    });
+    return res.json({
+      upload_id: out.uploadId,
+      uploadId: out.uploadId,
+      total_chunks: out.totalChunks,
+    });
+  } catch (err) {
+    console.error('[mis-archivos] init-chunk error:', err?.message || err);
+    return res.status(400).json({ error: err?.message || 'No se pudo iniciar la subida' });
+  }
+}
+
+/**
+ * POST /api/mis-archivos-cotizaciones/upload/chunk
+ * Body: { upload_id, index, total, chunk_base64 }
+ *   → { received, total, complete }
+ */
+async function recibirChunk(req, res) {
+  try {
+    const uploadId = req.body?.upload_id ?? req.body?.uploadId;
+    const index = req.body?.index ?? req.body?.chunk_index;
+    const total = req.body?.total ?? req.body?.total_chunks;
+    const chunkBase64 = req.body?.chunk_base64 ?? req.body?.chunkBase64;
+    if (!uploadId || index == null || total == null || !chunkBase64) {
+      return res.status(400).json({
+        error: 'upload_id, index, total y chunk_base64 son requeridos',
+      });
+    }
+    const out = chunkSessions.putChunk(req.user.id, {
+      uploadId: String(uploadId),
+      index,
+      total,
+      chunkBase64,
+    });
+    return res.json(out);
+  } catch (err) {
+    const msg = err?.message || 'Error al recibir chunk';
+    const code = /no encontrada|expirada|autorizado/i.test(msg) ? 404 : 400;
+    if (code >= 500 || /supera el tamaño/i.test(msg)) {
+      console.warn('[mis-archivos] chunk error:', msg);
+    }
+    return res.status(code).json({ error: msg });
+  }
+}
+
+/**
+ * POST /api/mis-archivos-cotizaciones/upload/complete
+ * Body: { upload_id }
+ *   → { ok, nombre, tamano, key }
+ *
+ * Ensambla los chunks y sube el archivo a S3 en la carpeta del usuario.
+ */
+async function completarSubidaPorChunks(req, res) {
+  if (!ensureS3(res)) return;
+  try {
+    const uploadId = req.body?.upload_id ?? req.body?.uploadId;
+    if (!uploadId) {
+      return res.status(400).json({ error: 'upload_id es requerido' });
+    }
+    const buildKey = (nombre) => construirKey(req.user, nombre);
+    const result = await chunkSessions.completeToS3(
+      req.user.id,
+      String(uploadId),
+      buildKey,
+      { id: req.user?.id, email: req.user?.email, rol: req.user?.rol }
+    );
+    return res.json({
+      ok: true,
+      nombre: result.nombre,
+      tamano: result.tamano,
+      key: result.key,
+    });
+  } catch (err) {
+    const msg = err?.message || 'No se pudo completar la subida';
+    const code = /no encontrada|expirada|autorizado/i.test(msg)
+      ? 404
+      : /supera el tamaño|inválid|faltan chunks/i.test(msg)
+        ? 400
+        : 500;
+    if (code >= 500) console.error('[mis-archivos] complete-chunk error:', msg);
+    else console.warn('[mis-archivos] complete-chunk aviso:', msg);
+    return res.status(code).json({ error: msg });
+  }
+}
+
 module.exports = {
   listarMisArchivos,
   subirMiArchivo,
   generarUrlDescarga,
   eliminarMiArchivo,
+  iniciarSubidaPorChunks,
+  recibirChunk,
+  completarSubidaPorChunks,
 };
