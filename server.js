@@ -64,6 +64,7 @@ app.use('/api/integraciones', require('./routes/integracionesRoutes'));
 app.use('/api/auditoria', require('./routes/auditoriaRoutes'));
 app.use('/api/presencia', require('./routes/presenciaRoutes'));
 app.use('/api/mis-archivos-cotizaciones', require('./routes/misArchivosCotizacionesRoutes'));
+app.use('/api/borradores-cotizacion', require('./routes/borradoresCotizacionRoutes'));
 
 // 404 handler
 app.use((req, res) => {
