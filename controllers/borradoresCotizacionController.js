@@ -197,12 +197,25 @@ function normalizeParseo(rawJson, meta) {
   const examenesUnmatched = itemsNorm
     .filter((x) => x.tipo_item === 'EXAMEN' && (!x.matched || !x.examen_id))
     .map((x) => x.nombre_archivo);
-  // Un perfil también puede tener exámenes internos sin match: los contamos como advertencia
-  // (no bloquean para adjuntar, porque el perfil de BD ya define sus propios exámenes).
+  // También deben estar vinculados todos los exámenes internos de cada perfil.
+  let examenesInternosOk = true;
+  for (const it of itemsNorm) {
+    if (it.tipo_item !== 'PERFIL') continue;
+    for (const ex of it.examenes || []) {
+      if (!ex.matched || !ex.examen_id) {
+        examenesInternosOk = false;
+        break;
+      }
+    }
+    if (!examenesInternosOk) break;
+  }
   // Requerimos AL MENOS un ítem (perfil o examen) para permitir adjuntar.
   const hayItems = perfilesTotal + examenesTotal > 0;
   const puede_adjuntar =
-    hayItems && perfilesUnmatched.length === 0 && examenesUnmatched.length === 0;
+    hayItems &&
+    perfilesUnmatched.length === 0 &&
+    examenesUnmatched.length === 0 &&
+    examenesInternosOk;
 
   return {
     version: 1,
