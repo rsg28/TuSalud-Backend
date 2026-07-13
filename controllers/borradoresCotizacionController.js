@@ -854,6 +854,70 @@ async function resolverNombres(req, res) {
   }
 }
 
+/**
+ * GET /buscar-examenes?q=...
+ * Búsqueda por letra (LIKE) en el catálogo activo, sin sede. Para vincular
+ * manualmente exámenes de una propuesta que no coincidieron por nombre.
+ */
+async function buscarExamenesCatalogo(req, res) {
+  try {
+    const q = String(req.query?.q || '').trim();
+    if (q.length < 1) return res.json({ examenes: [] });
+    const like = `%${q.replace(/[%_]/g, '')}%`;
+    const [rows] = await pool.execute(
+      `SELECT id, nombre
+         FROM examenes
+        WHERE activo = 1 AND nombre LIKE ?
+        ORDER BY
+          CASE WHEN LOWER(nombre) LIKE LOWER(?) THEN 0 ELSE 1 END,
+          nombre ASC
+        LIMIT 40`,
+      [like, `${q.replace(/[%_]/g, '')}%`]
+    );
+    return res.json({
+      examenes: (rows || []).map((r) => ({
+        examen_id: Number(r.id),
+        nombre_examen: String(r.nombre || '').trim(),
+      })),
+    });
+  } catch (err) {
+    console.error('[borradores-cotizacion] buscar-examenes error:', err?.message || err);
+    return res.status(500).json({ error: 'No se pudieron buscar exámenes' });
+  }
+}
+
+/**
+ * GET /buscar-perfiles?q=...
+ * Búsqueda por letra en emo_perfiles para vincular un perfil de la propuesta
+ * a uno ya existente en BD.
+ */
+async function buscarPerfilesCatalogo(req, res) {
+  try {
+    const q = String(req.query?.q || '').trim();
+    if (q.length < 1) return res.json({ perfiles: [] });
+    const like = `%${q.replace(/[%_]/g, '')}%`;
+    const [rows] = await pool.execute(
+      `SELECT id, nombre
+         FROM emo_perfiles
+        WHERE nombre LIKE ?
+        ORDER BY
+          CASE WHEN LOWER(nombre) LIKE LOWER(?) THEN 0 ELSE 1 END,
+          nombre ASC
+        LIMIT 40`,
+      [like, `${q.replace(/[%_]/g, '')}%`]
+    );
+    return res.json({
+      perfiles: (rows || []).map((r) => ({
+        perfil_id: Number(r.id),
+        nombre: String(r.nombre || '').trim(),
+      })),
+    });
+  } catch (err) {
+    console.error('[borradores-cotizacion] buscar-perfiles error:', err?.message || err);
+    return res.status(500).json({ error: 'No se pudieron buscar perfiles' });
+  }
+}
+
 module.exports = {
   iniciarSubida,
   recibirChunk,
@@ -865,4 +929,6 @@ module.exports = {
   eliminarBorrador,
   adjuntarAPedido,
   resolverNombres,
+  buscarExamenesCatalogo,
+  buscarPerfilesCatalogo,
 };

@@ -35,6 +35,19 @@ router.post(
   ctrl.resolverNombres
 );
 
+router.get(
+  '/buscar-examenes',
+  authenticateToken,
+  soloRolesConCarpeta,
+  ctrl.buscarExamenesCatalogo
+);
+router.get(
+  '/buscar-perfiles',
+  authenticateToken,
+  soloRolesConCarpeta,
+  ctrl.buscarPerfilesCatalogo
+);
+
 router.post('/upload/init', authenticateToken, soloRolesConCarpeta, ctrl.iniciarSubida);
 router.post('/upload/chunk', authenticateToken, soloRolesConCarpeta, ctrl.recibirChunk);
 router.post('/upload/complete', authenticateToken, soloRolesConCarpeta, ctrl.completarSubida);
