@@ -156,23 +156,31 @@ function normalizeParseo(rawJson, meta) {
       if (tipoEmo && !TIPOS_EMO_VALIDOS.has(tipoEmo)) {
         throw new Error(`item[${idx}].tipo_emo inválido`);
       }
+      const examenes = Array.isArray(it.examenes)
+        ? it.examenes.slice(0, 200).map((ex) => ({
+            nombre_archivo: String(ex.nombre_archivo || '').slice(0, 300),
+            precio_archivo: Number.isFinite(Number(ex.precio_archivo))
+              ? Math.max(0, Number(ex.precio_archivo))
+              : 0,
+            matched: Boolean(ex.matched),
+            examen_id:
+              ex.matched && ex.examen_id != null ? Number(ex.examen_id) || null : null,
+            nombre_bd: ex.nombre_bd ? String(ex.nombre_bd).slice(0, 300) : null,
+          }))
+        : [];
+      // Precio del perfil = suma de precios de sus exámenes (no se edita aparte).
+      const sumaExamenes = examenes.reduce((acc, ex) => acc + (Number(ex.precio_archivo) || 0), 0);
+      const precioPerfil =
+        examenes.length > 0
+          ? Math.round(sumaExamenes * 100) / 100
+          : precio_archivo;
       return {
         ...base,
+        precio_archivo: precioPerfil,
         tipo_emo: tipoEmo,
         perfil_id: matched && it.perfil_id != null ? Number(it.perfil_id) || null : null,
         nombre_bd: it.nombre_bd ? String(it.nombre_bd).slice(0, 300) : null,
-        examenes: Array.isArray(it.examenes)
-          ? it.examenes.slice(0, 200).map((ex) => ({
-              nombre_archivo: String(ex.nombre_archivo || '').slice(0, 300),
-              precio_archivo: Number.isFinite(Number(ex.precio_archivo))
-                ? Math.max(0, Number(ex.precio_archivo))
-                : 0,
-              matched: Boolean(ex.matched),
-              examen_id:
-                ex.matched && ex.examen_id != null ? Number(ex.examen_id) || null : null,
-              nombre_bd: ex.nombre_bd ? String(ex.nombre_bd).slice(0, 300) : null,
-            }))
-          : [],
+        examenes,
       };
     }
     // EXAMEN
@@ -437,7 +445,7 @@ async function listarBorradores(req, res) {
           try {
             const p = JSON.parse(buf.toString('utf8'));
             return {
-              id: p.id,
+              id: p.id || (key.match(/\/(brd_[a-f0-9]{16,32})\//i) || [])[1] || null,
               nombre_archivo: p.nombre_archivo,
               mime_type: p.mime_type,
               tamano_bytes: p.tamano_bytes,
@@ -450,7 +458,7 @@ async function listarBorradores(req, res) {
           }
         })
       );
-      for (const b of parseados) if (b) borradores.push(b);
+      for (const b of parseados) if (b && b.id) borradores.push(b);
     }
     borradores.sort((a, b) => {
       const ta = a.updated_at ? Date.parse(a.updated_at) : 0;
@@ -508,14 +516,19 @@ async function eliminarBorrador(req, res) {
   if (!ensureS3(res)) return;
   try {
     const brdId = String(req.params.brd_id || '').trim();
-    const parseo = await readParseoJson(req.user, brdId);
-    if (!parseo) return res.status(404).json({ error: 'Borrador no encontrado' });
+    if (!/^brd_[a-f0-9]{16,32}$/i.test(brdId)) {
+      return res.status(400).json({ error: 'Identificador de borrador inválido' });
+    }
     const prefijo = construirPrefijoUsuario(req.user);
     if (!prefijo) return res.status(400).json({ error: 'Usuario sin rol o correo válidos.' });
 
     // Listar todos los objetos bajo `{prefijo}{brdId}/` y borrarlos.
+    // No exigimos parseo.json: si falta (o está corrupto), igual limpiamos la carpeta.
     const carpeta = `${prefijo}${brdId}/`;
     const objs = await s3.listObjectsUnderPrefix(carpeta);
+    if (!objs || objs.length === 0) {
+      return res.status(404).json({ error: 'Borrador no encontrado' });
+    }
     for (const o of objs) {
       try {
         await s3.deleteObjectByKey(o.key);
@@ -592,14 +605,14 @@ async function adjuntarAPedido(req, res) {
     }
 
     // Construir items para INSERT en `cotizacion_items`.
-    // Nota: `cantidad` viene del parseo (por defecto 1 por línea del archivo);
-    // el vendedor puede ajustarla luego editando la cotización desde la UI.
+    // Importante: expandimos cada PERFIL a EXÁMENES con precio del archivo y un
+    // snapshot `examen_de_perfil` para que nueva-cotizacion pueda:
+    //   1) mostrar precio por examen,
+    //   2) agrupar bajo el perfil de origen,
+    //   3) vincular/aplicar precios a líneas similares del pedido.
     const items = [];
     for (const it of parseo.items) {
       const cantidad = Math.max(1, Math.trunc(Number(it.cantidad) || 1));
-      const precio_base = Math.max(0, Number(it.precio_archivo) || 0);
-      const precio_final = precio_base;
-      const subtotal = precio_final * cantidad;
 
       if (it.tipo_item === 'PERFIL') {
         if (!it.perfil_id || !it.tipo_emo) {
@@ -607,37 +620,95 @@ async function adjuntarAPedido(req, res) {
             error: `El perfil "${it.nombre_archivo}" no tiene perfil_id o tipo_emo válidos.`,
           });
         }
-        items.push({
-          tipo_item: 'PERFIL',
-          perfil_id: Number(it.perfil_id),
-          tipo_emo: String(it.tipo_emo).toUpperCase(),
-          examen_id: null,
-          nombre: it.nombre_bd || it.nombre_archivo || 'Perfil',
-          cantidad,
-          precio_base,
-          precio_final,
-          variacion_pct: 0,
-          subtotal,
-        });
-      } else {
-        if (!it.examen_id) {
-          return res.status(400).json({
-            error: `El examen "${it.nombre_archivo}" no tiene examen_id.`,
+        const perfilId = Number(it.perfil_id);
+        const tipoEmo = String(it.tipo_emo).toUpperCase();
+        const perfilNombre = it.nombre_bd || it.nombre_archivo || 'Perfil';
+        const examenes = Array.isArray(it.examenes) ? it.examenes : [];
+
+        if (examenes.length === 0) {
+          // Perfil sin detalle de exámenes: guardamos la fila PERFIL (precio total).
+          const precio_base = Math.max(0, Number(it.precio_archivo) || 0);
+          items.push({
+            tipo_item: 'PERFIL',
+            perfil_id: perfilId,
+            tipo_emo: tipoEmo,
+            examen_id: null,
+            nombre: perfilNombre,
+            cantidad,
+            precio_base,
+            precio_final: precio_base,
+            variacion_pct: 0,
+            subtotal: precio_base * cantidad,
+            examenes_snapshot_json: null,
+          });
+          continue;
+        }
+
+        for (const ex of examenes) {
+          if (!ex?.matched || !ex.examen_id) {
+            return res.status(400).json({
+              error: `El perfil "${perfilNombre}" tiene un examen sin vincular a la BD.`,
+            });
+          }
+          const examenId = Number(ex.examen_id);
+          const precio = Math.max(0, Number(ex.precio_archivo) || 0);
+          const nombreEx = ex.nombre_bd || ex.nombre_archivo || `Examen ${examenId}`;
+          items.push({
+            tipo_item: 'EXAMEN',
+            perfil_id: null,
+            tipo_emo: null,
+            examen_id: examenId,
+            nombre: nombreEx,
+            cantidad,
+            precio_base: precio,
+            precio_final: precio,
+            variacion_pct: 0,
+            subtotal: precio * cantidad,
+            examenes_snapshot_json: {
+              origen: 'examen_de_perfil',
+              snapshot_at: new Date().toISOString(),
+              perfil_id: perfilId,
+              perfil_nombre: perfilNombre,
+              tipo_emo: tipoEmo,
+              examen_id: examenId,
+              nombre_catalogo: nombreEx,
+              precio_archivo: precio,
+              nombre_archivo: ex.nombre_archivo || null,
+            },
           });
         }
-        items.push({
-          tipo_item: 'EXAMEN',
-          perfil_id: null,
-          tipo_emo: null,
-          examen_id: Number(it.examen_id),
-          nombre: it.nombre_bd || it.nombre_archivo || 'Examen',
-          cantidad,
-          precio_base,
-          precio_final,
-          variacion_pct: 0,
-          subtotal,
+        continue;
+      }
+
+      // EXAMEN suelto
+      if (!it.examen_id) {
+        return res.status(400).json({
+          error: `El examen "${it.nombre_archivo}" no tiene examen_id.`,
         });
       }
+      const examenId = Number(it.examen_id);
+      const precio = Math.max(0, Number(it.precio_archivo) || 0);
+      const nombreEx = it.nombre_bd || it.nombre_archivo || 'Examen';
+      items.push({
+        tipo_item: 'EXAMEN',
+        perfil_id: null,
+        tipo_emo: null,
+        examen_id: examenId,
+        nombre: nombreEx,
+        cantidad,
+        precio_base: precio,
+        precio_final: precio,
+        variacion_pct: 0,
+        subtotal: precio * cantidad,
+        examenes_snapshot_json: {
+          origen: 'propuesta_examen_suelto',
+          snapshot_at: new Date().toISOString(),
+          examen_id: examenId,
+          nombre_catalogo: nombreEx,
+          precio_archivo: precio,
+          nombre_archivo: it.nombre_archivo || null,
+        },
+      });
     }
 
     if (items.length === 0) {
@@ -668,11 +739,18 @@ async function adjuntarAPedido(req, res) {
       cotizacionId = result.insertId;
 
       for (const it of items) {
+        const snapJson =
+          it.examenes_snapshot_json != null
+            ? typeof it.examenes_snapshot_json === 'string'
+              ? it.examenes_snapshot_json
+              : JSON.stringify(it.examenes_snapshot_json)
+            : null;
         await connection.execute(
           `INSERT INTO cotizacion_items (
             cotizacion_id, tipo_item, perfil_id, tipo_emo, examen_id,
-            nombre, cantidad, precio_base, precio_final, variacion_pct, subtotal
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            nombre, cantidad, precio_base, precio_final, variacion_pct, subtotal,
+            examenes_snapshot_json
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             cotizacionId,
             it.tipo_item,
@@ -685,6 +763,7 @@ async function adjuntarAPedido(req, res) {
             it.precio_final,
             it.variacion_pct,
             it.subtotal,
+            snapJson,
           ]
         );
       }
