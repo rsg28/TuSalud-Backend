@@ -21,6 +21,7 @@
  */
 
 const pool = require('../config/database');
+const crypto = require('crypto');
 const s3 = require('../utils/s3');
 const chunkSessions = require('../utils/borradoresCotizacionSessions');
 
@@ -931,10 +932,60 @@ async function buscarPerfilesCatalogo(req, res) {
   }
 }
 
+/**
+ * POST /manual
+ * Crea una propuesta/plantilla de cotización sin archivo subido (armado a mano
+ * en la UI). Solo persiste `parseo.json` en S3 — igual que un borrador de archivo,
+ * pero sin `original.*`. Luego se puede adjuntar a un pedido con POST /:brd_id/adjuntar.
+ *
+ * Body: { nombre?: string, parseo: { items: [...] } }
+ */
+async function crearBorradorManual(req, res) {
+  if (!ensureS3(res)) return;
+  try {
+    const prefijo = construirPrefijoUsuario(req.user);
+    if (!prefijo) return res.status(400).json({ error: 'Usuario sin rol o correo válidos.' });
+
+    const parseoRaw = req.body?.parseo;
+    if (!parseoRaw || typeof parseoRaw !== 'object') {
+      return res.status(400).json({ error: 'parseo es requerido en el body' });
+    }
+    const items = Array.isArray(parseoRaw.items) ? parseoRaw.items : [];
+    if (items.length === 0) {
+      return res.status(400).json({ error: 'La plantilla necesita al menos un perfil o examen' });
+    }
+
+    const brdId = `brd_${crypto.randomBytes(12).toString('hex')}`;
+    const nombre = String(req.body?.nombre || parseoRaw.nombre_archivo || 'Plantilla manual')
+      .trim()
+      .slice(0, 200) || 'Plantilla manual';
+
+    const normalizado = normalizeParseo(parseoRaw, {
+      brdId,
+      nombre_archivo: nombre,
+      mime_type: 'application/json',
+      tamano_bytes: 0,
+      s3_key_original: null,
+      subido_at: new Date().toISOString(),
+    });
+    await guardarParseoEnS3(req.user, normalizado);
+
+    return res.status(201).json({
+      ok: true,
+      brd_id: brdId,
+      parseo: normalizado,
+    });
+  } catch (err) {
+    console.error('[borradores-cotizacion] crear-manual error:', err?.message || err);
+    return res.status(400).json({ error: err?.message || 'No se pudo guardar la plantilla' });
+  }
+}
+
 module.exports = {
   iniciarSubida,
   recibirChunk,
   completarSubida,
+  crearBorradorManual,
   actualizarParseo,
   listarBorradores,
   obtenerBorrador,

@@ -51,6 +51,8 @@ router.get(
 router.post('/upload/init', authenticateToken, soloRolesConCarpeta, ctrl.iniciarSubida);
 router.post('/upload/chunk', authenticateToken, soloRolesConCarpeta, ctrl.recibirChunk);
 router.post('/upload/complete', authenticateToken, soloRolesConCarpeta, ctrl.completarSubida);
+/** Plantilla armada a mano (sin archivo): misma carpeta de propuestas. */
+router.post('/manual', authenticateToken, soloRolesConCarpeta, ctrl.crearBorradorManual);
 
 router.get('/', authenticateToken, soloRolesConCarpeta, ctrl.listarBorradores);
 router.get('/:brd_id', authenticateToken, soloRolesConCarpeta, ctrl.obtenerBorrador);
