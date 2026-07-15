@@ -411,6 +411,118 @@ function precioClienteDesdeItemRaw(raw) {
   return precioSnapshot(snap.precio_cliente);
 }
 
+/**
+ * Si el paciente tiene snapshot wizard (`origen: nuevo_pedido_wizard`), lo actualiza
+ * en sitio al asignar un perfil. Devuelve true si se pudo conservar el wizard;
+ * false si hay que caer al snapshot plano.
+ */
+function mergePerfilEnWizardPacienteSnapshotJson(rawJson, opts = {}) {
+  let snap = null;
+  try {
+    snap = typeof rawJson === 'string' ? JSON.parse(rawJson) : rawJson;
+  } catch {
+    return null;
+  }
+  if (!snap || typeof snap !== 'object' || snap.origen !== 'nuevo_pedido_wizard') {
+    return null;
+  }
+
+  const perfilId = Number(opts.perfilId);
+  const tipoEmo = String(opts.tipoEmo || '').toUpperCase();
+  if (!Number.isFinite(perfilId) || perfilId <= 0 || !TIPOS_EMO_VALIDOS.has(tipoEmo)) {
+    return null;
+  }
+
+  const examenesIn = Array.isArray(opts.examenes) ? opts.examenes : [];
+  const examenesNorm = examenesIn
+    .map((e) => {
+      const examen_id = Number(e.examen_id ?? e.id);
+      if (!Number.isFinite(examen_id) || examen_id <= 0) return null;
+      return {
+        examen_id,
+        nombre: String(e.nombre || `Examen ${examen_id}`).trim(),
+        precio: precioSnapshot(e.precio),
+        origen: 'perfil',
+      };
+    })
+    .filter(Boolean);
+
+  const perfiles = Array.isArray(snap.perfiles) ? [...snap.perfiles] : [];
+  let adicionales = Array.isArray(snap.adicionales) ? [...snap.adicionales] : [];
+  const idsPerfil = new Set(examenesNorm.map((e) => e.examen_id));
+  adicionales = adicionales.filter((a) => !idsPerfil.has(Number(a.examen_id)));
+
+  const idx = perfiles.findIndex(
+    (pr) => Number(pr.perfil_id) === perfilId && String(pr.emo_tipo || '').toUpperCase() === tipoEmo
+  );
+  if (idx >= 0) {
+    const prev = perfiles[idx];
+    const prevEx = Array.isArray(prev.examenes) ? [...prev.examenes] : [];
+    const idsYa = new Set(prevEx.map((e) => Number(e.examen_id)));
+    for (const ex of examenesNorm) {
+      if (idsYa.has(ex.examen_id)) continue;
+      prevEx.push(ex);
+      idsYa.add(ex.examen_id);
+    }
+    perfiles[idx] = {
+      ...prev,
+      perfil_nombre: opts.perfilNombre || prev.perfil_nombre,
+      examenes: prevEx,
+    };
+  } else {
+    perfiles.push({
+      perfil_id: perfilId,
+      perfil_nombre: opts.perfilNombre || `Perfil ${perfilId}`,
+      emo_tipo: tipoEmo,
+      examenes: examenesNorm,
+    });
+  }
+
+  return JSON.stringify({
+    ...snap,
+    origen: 'nuevo_pedido_wizard',
+    snapshot_at: new Date().toISOString(),
+    perfiles,
+    adicionales,
+  });
+}
+
+/**
+ * Tras asignar perfil: conserva wizard snapshot si existe; si no, snapshot plano.
+ */
+async function persistirSnapshotTrasAsignarPerfil(dbConn, pacienteId, opts = {}) {
+  if (!pacienteId) return;
+  const tag = opts.tag || 'asignar-perfil';
+  try {
+    const [rows] = await dbConn.execute(
+      'SELECT examenes_snapshot_json FROM pedido_pacientes WHERE id = ?',
+      [pacienteId]
+    );
+    const raw = rows[0]?.examenes_snapshot_json;
+    const merged = mergePerfilEnWizardPacienteSnapshotJson(raw, {
+      perfilId: opts.perfilId,
+      tipoEmo: opts.tipoEmo,
+      perfilNombre: opts.perfilNombre,
+      examenes: opts.examenes,
+    });
+    if (merged) {
+      await dbConn.execute(
+        'UPDATE pedido_pacientes SET examenes_snapshot_json = ? WHERE id = ?',
+        [merged, pacienteId]
+      );
+      return;
+    }
+  } catch (e) {
+    console.warn(`[${tag}] merge wizard snapshot falló:`, e?.message || e);
+  }
+  const { persistirSnapshotPaciente } = require('./perfilSnapshot');
+  await persistirSnapshotPaciente(dbConn, pacienteId, {
+    perfilId: opts.perfilId,
+    tipoEmo: opts.tipoEmo,
+    tag,
+  });
+}
+
 module.exports = {
   TIPOS_EMO_VALIDOS,
   precioSnapshot,
@@ -420,4 +532,6 @@ module.exports = {
   sincronizarPedidoWizardSnapshot,
   precioClienteDesdeItemRaw,
   buildSnapItemPedido,
+  mergePerfilEnWizardPacienteSnapshotJson,
+  persistirSnapshotTrasAsignarPerfil,
 };

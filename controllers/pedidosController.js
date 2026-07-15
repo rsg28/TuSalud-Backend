@@ -4,7 +4,13 @@ const {
   helpers: { emitirNotificacionAVendedorDePedido, emitirNotificacionAClienteDePedido },
 } = require('./notificacionesController');
 const { persistirSnapshotPaciente: persistirSnapshotPacienteBase } = require('../utils/perfilSnapshot');
-const { expandirSnapshotPacientesAPedido, sincronizarPedidoWizardSnapshot, precioClienteDesdeItemRaw, buildSnapItemPedido } = require('../utils/nuevoPedidoSnapshotApi');
+const {
+  expandirSnapshotPacientesAPedido,
+  sincronizarPedidoWizardSnapshot,
+  precioClienteDesdeItemRaw,
+  buildSnapItemPedido,
+  persistirSnapshotTrasAsignarPerfil,
+} = require('../utils/nuevoPedidoSnapshotApi');
 const { fetchPrecioExamen } = require('../utils/examenPrecio');
 const seguimientoSvc = require('../services/seguimientoExamenes');
 const { aplicarTotalesCalculados } = require('../utils/cotizacionTotal');
@@ -1137,10 +1143,20 @@ const asignarPerfilAPacientes = async (req, res) => {
       const nombrePerfil = nombreBody || perfilRows[0].nombre || 'Perfil EMO';
 
       const [examRows] = await connection.execute(
-        'SELECT examen_id FROM emo_perfil_examenes WHERE perfil_id = ? AND tipo_emo = ?',
+        `SELECT pe.examen_id, e.nombre AS examen_nombre
+           FROM emo_perfil_examenes pe
+           JOIN examenes e ON e.id = pe.examen_id
+          WHERE pe.perfil_id = ? AND pe.tipo_emo = ?`,
         [perfil_id, tipo_emo]
       );
       const examenIds = examRows.map((r) => Number(r.examen_id)).filter((id) => id > 0);
+      const examenesDetalle = examRows
+        .map((r) => ({
+          examen_id: Number(r.examen_id),
+          nombre: String(r.examen_nombre || `Examen ${r.examen_id}`),
+          precio: 0,
+        }))
+        .filter((e) => e.examen_id > 0);
 
       let targetIds = [];
       if (para_todos) {
@@ -1201,9 +1217,11 @@ const asignarPerfilAPacientes = async (req, res) => {
             [pid, examen_id]
           );
         }
-        await persistirSnapshotPaciente(connection, pid, {
+        await persistirSnapshotTrasAsignarPerfil(connection, pid, {
           perfilId: perfil_id,
           tipoEmo: tipo_emo,
+          perfilNombre: nombrePerfil,
+          examenes: examenesDetalle,
           tag: 'asignar-perfil-cotizacion',
         });
         aplicadosIds.push(pid);
