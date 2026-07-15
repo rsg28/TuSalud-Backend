@@ -1142,21 +1142,39 @@ const asignarPerfilAPacientes = async (req, res) => {
       }
       const nombrePerfil = nombreBody || perfilRows[0].nombre || 'Perfil EMO';
 
-      const [examRows] = await connection.execute(
-        `SELECT pe.examen_id, e.nombre AS examen_nombre
-           FROM emo_perfil_examenes pe
-           JOIN examenes e ON e.id = pe.examen_id
-          WHERE pe.perfil_id = ? AND pe.tipo_emo = ?`,
-        [perfil_id, tipo_emo]
-      );
-      const examenIds = examRows.map((r) => Number(r.examen_id)).filter((id) => id > 0);
-      const examenesDetalle = examRows
-        .map((r) => ({
-          examen_id: Number(r.examen_id),
-          nombre: String(r.examen_nombre || `Examen ${r.examen_id}`),
-          precio: 0,
-        }))
-        .filter((e) => e.examen_id > 0);
+      // Preferir examenes congelados del cliente (id + nombre + precio).
+      // El catálogo BD solo es fallback legacy si el body no trae examenes.
+      const examenesBody = Array.isArray(body.examenes) ? body.examenes : [];
+      let examenesDetalle = examenesBody
+        .map((e) => {
+          const examen_id = Number(e?.examen_id ?? e?.id);
+          const nombre = String(e?.nombre ?? '').trim();
+          if (!Number.isFinite(examen_id) || examen_id <= 0 || !nombre) return null;
+          return {
+            examen_id,
+            nombre,
+            precio: Number(e?.precio) || 0,
+          };
+        })
+        .filter(Boolean);
+
+      if (examenesDetalle.length === 0) {
+        const [examRows] = await connection.execute(
+          `SELECT pe.examen_id, e.nombre AS examen_nombre
+             FROM emo_perfil_examenes pe
+             JOIN examenes e ON e.id = pe.examen_id
+            WHERE pe.perfil_id = ? AND pe.tipo_emo = ?`,
+          [perfil_id, tipo_emo]
+        );
+        examenesDetalle = examRows
+          .map((r) => ({
+            examen_id: Number(r.examen_id),
+            nombre: String(r.examen_nombre || `Examen ${r.examen_id}`),
+            precio: 0,
+          }))
+          .filter((e) => e.examen_id > 0);
+      }
+      const examenIds = examenesDetalle.map((e) => e.examen_id);
 
       let targetIds = [];
       if (para_todos) {
