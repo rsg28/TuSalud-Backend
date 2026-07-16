@@ -95,9 +95,11 @@ const SELECT_ITEMS_SQL = `
          ci.nombre, ci.cantidad, ci.precio_base, ci.precio_final, ci.variacion_pct, ci.subtotal,
          ci.examenes_snapshot_json,
          ex.nombre AS examen_nombre,
+         cat.nombre AS categoria_nombre,
          pf.nombre AS perfil_nombre
   FROM cotizacion_items ci
   LEFT JOIN examenes ex   ON ci.examen_id = ex.id
+  LEFT JOIN emo_categorias cat ON ex.categoria_id = cat.id
   LEFT JOIN emo_perfiles pf ON ci.perfil_id = pf.id
   WHERE ci.cotizacion_id = ?
   ORDER BY ci.id
