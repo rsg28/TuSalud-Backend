@@ -126,6 +126,33 @@ function sha256Hex(buffer) {
 }
 
 /**
+ * S3 user-defined metadata MUST be US-ASCII (AWS PutObject).
+ * Filenames with accents (e.g. "Exámenes Médicos…") otherwise make
+ * complete → 500; if the chunk session was already deleted → retry 404.
+ */
+function sanitizeS3MetadataValue(value) {
+  const s = String(value ?? '');
+  if (!s) return '';
+  if (/^[\x20-\x7E]*$/.test(s)) return s.slice(0, 1024);
+  return encodeURIComponent(s).slice(0, 2048);
+}
+
+function sanitizeS3Metadata(meta) {
+  const out = {};
+  if (!meta || typeof meta !== 'object') return out;
+  for (const [rawKey, rawVal] of Object.entries(meta)) {
+    const key = String(rawKey || '')
+      .toLowerCase()
+      .replace(/[^a-z0-9_-]+/g, '_')
+      .replace(/^_+|_+$/g, '')
+      .slice(0, 128);
+    if (!key) continue;
+    out[key] = sanitizeS3MetadataValue(rawVal);
+  }
+  return out;
+}
+
+/**
  * Sube un Buffer a S3 y devuelve metadatos.
  *
  * @param {Buffer} buffer
@@ -157,10 +184,10 @@ async function uploadBuffer(buffer, opts = {}) {
     Key: key,
     Body: buffer,
     ContentType: opts.contentType || 'application/octet-stream',
-    Metadata: {
+    Metadata: sanitizeS3Metadata({
       sha256: sha,
       ...(opts.metadata || {}),
-    },
+    }),
     ServerSideEncryption: 'AES256',
   });
 
@@ -233,10 +260,10 @@ async function putObjectAtKey(buffer, key, opts = {}) {
     Key: key,
     Body: buffer,
     ContentType: opts.contentType || 'application/octet-stream',
-    Metadata: {
+    Metadata: sanitizeS3Metadata({
       sha256: sha,
       ...(opts.metadata || {}),
-    },
+    }),
     ServerSideEncryption: 'AES256',
   });
   const out = await client.send(cmd);

@@ -220,19 +220,20 @@ async function completeToS3(userId, uploadId, buildKey, usuarioMeta) {
     throw new Error(`Faltan chunks (${session.chunks.size}/${session.totalChunks})`);
   }
 
-  let buffer;
-  try {
-    buffer = assembleBuffer(session);
-  } finally {
+  const buffer = assembleBuffer(session);
+  if (!buffer.length) {
     sessions.delete(uploadId);
+    throw new Error('El archivo está vacío');
   }
-  if (!buffer.length) throw new Error('El archivo está vacío');
 
   const brdId = newId('brd');
   const ext = extensionDeNombre(session.nombre);
   const keyRelativo = `original${ext}`;
   const key = buildKey(brdId, keyRelativo);
-  if (!key) throw new Error('No se pudo construir la key del archivo (usuario inválido)');
+  if (!key) {
+    sessions.delete(uploadId);
+    throw new Error('No se pudo construir la key del archivo (usuario inválido)');
+  }
 
   const t0 = Date.now();
   log('info', 'complete:uploading-to-s3', {
@@ -243,33 +244,47 @@ async function completeToS3(userId, uploadId, buildKey, usuarioMeta) {
     contentType: session.contentType,
   });
 
-  const result = await s3.putObjectAtKey(buffer, key, {
-    contentType: session.contentType,
-    metadata: {
-      usuario_id: String(usuarioMeta?.id ?? ''),
-      usuario_email: String(usuarioMeta?.email ?? ''),
-      usuario_rol: String(usuarioMeta?.rol ?? ''),
-      borrador_id: brdId,
-      nombre_original: session.nombre.slice(0, 200),
-      chunked: '1',
-      chunks_total: String(session.totalChunks),
-    },
-  });
+  try {
+    const result = await s3.putObjectAtKey(buffer, key, {
+      contentType: session.contentType,
+      metadata: {
+        usuario_id: String(usuarioMeta?.id ?? ''),
+        usuario_email: String(usuarioMeta?.email ?? ''),
+        usuario_rol: String(usuarioMeta?.rol ?? ''),
+        borrador_id: brdId,
+        nombre_original: session.nombre.slice(0, 200),
+        chunked: '1',
+        chunks_total: String(session.totalChunks),
+      },
+    });
 
-  log('info', 'complete:s3-ok', {
-    brdId,
-    key: result.key,
-    bytes: result.size,
-    ms: Date.now() - t0,
-  });
+    // Solo liberamos la sesión tras éxito: si S3 falla, el cliente puede
+    // reintentar /complete con el mismo upload_id sin re-enviar chunks.
+    sessions.delete(uploadId);
 
-  return {
-    brdId,
-    nombre: session.nombre,
-    tamano: result.size,
-    key: result.key,
-    contentType: session.contentType,
-  };
+    log('info', 'complete:s3-ok', {
+      brdId,
+      key: result.key,
+      bytes: result.size,
+      ms: Date.now() - t0,
+    });
+
+    return {
+      brdId,
+      nombre: session.nombre,
+      tamano: result.size,
+      key: result.key,
+      contentType: session.contentType,
+    };
+  } catch (err) {
+    log('error', 'complete:s3-fail', {
+      uploadId,
+      brdId,
+      key,
+      message: err?.message || String(err),
+    });
+    throw err;
+  }
 }
 
 module.exports = {
