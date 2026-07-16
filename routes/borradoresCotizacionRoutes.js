@@ -62,6 +62,12 @@ router.patch(
   soloRolesConCarpeta,
   ctrl.actualizarParseo
 );
+router.patch(
+  '/:brd_id/empresa',
+  authenticateToken,
+  soloRolesConCarpeta,
+  ctrl.actualizarEmpresa
+);
 router.post(
   '/:brd_id/descargar',
   authenticateToken,

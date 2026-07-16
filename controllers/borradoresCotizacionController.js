@@ -126,6 +126,21 @@ const TIPOS_EMO_VALIDOS = new Set(['PREOC', 'ANUAL', 'RETIRO', 'VISITA']);
  * Valida el shape mínimo del parseo enviado por el cliente. Rechaza campos
  * peligrosos y normaliza los que persistiremos.
  */
+/**
+ * Devuelve `{ empresa_id, empresa_nombre }` limpios a partir de una fuente,
+ * aceptando strings vacíos ⇒ null. `empresa_id` opcional: si es NaN o <=0,
+ * lo tratamos como no vinculado.
+ */
+function normalizeEmpresaLink(source) {
+  const idRaw = source?.empresa_id;
+  const nombreRaw = source?.empresa_nombre;
+  const idNum = Number(idRaw);
+  const empresaId = Number.isInteger(idNum) && idNum > 0 ? idNum : null;
+  const empresaNombre =
+    typeof nombreRaw === 'string' && nombreRaw.trim() ? nombreRaw.trim().slice(0, 200) : null;
+  return { empresa_id: empresaId, empresa_nombre: empresaNombre };
+}
+
 function normalizeParseo(rawJson, meta) {
   if (!rawJson || typeof rawJson !== 'object') {
     throw new Error('parseo inválido');
@@ -226,6 +241,15 @@ function normalizeParseo(rawJson, meta) {
     examenesUnmatched.length === 0 &&
     examenesInternosOk;
 
+  // La empresa vinculada puede venir en meta (prioridad), o del propio parseo
+  // previo. Aceptamos null explícito para desasignar.
+  let empresaLink;
+  if (Object.prototype.hasOwnProperty.call(meta || {}, 'empresa_id')) {
+    empresaLink = normalizeEmpresaLink(meta);
+  } else {
+    empresaLink = normalizeEmpresaLink(rawJson);
+  }
+
   return {
     version: 1,
     id: meta.brdId,
@@ -235,6 +259,8 @@ function normalizeParseo(rawJson, meta) {
     s3_key_original: meta.s3_key_original || rawJson.s3_key_original || null,
     subido_at: meta.subido_at || rawJson.subido_at || new Date().toISOString(),
     updated_at: new Date().toISOString(),
+    empresa_id: empresaLink.empresa_id,
+    empresa_nombre: empresaLink.empresa_nombre,
     resumen: {
       perfiles_total: perfilesTotal,
       perfiles_matched: perfilesMatched,
@@ -404,6 +430,13 @@ async function actualizarParseo(req, res) {
     if (!previo) {
       return res.status(404).json({ error: 'Borrador no encontrado' });
     }
+    // Si el nuevo parseo no trae empresa, heredamos la del parseo previo (para
+    // que un guardado parcial no borre la asignación de empresa hecha antes).
+    const empresaHeredada = normalizeEmpresaLink({
+      empresa_id: parseo.empresa_id ?? previo.empresa_id,
+      empresa_nombre: parseo.empresa_nombre ?? previo.empresa_nombre,
+    });
+
     const normalizado = normalizeParseo(parseo, {
       brdId,
       nombre_archivo: previo.nombre_archivo,
@@ -411,12 +444,67 @@ async function actualizarParseo(req, res) {
       tamano_bytes: previo.tamano_bytes,
       s3_key_original: previo.s3_key_original,
       subido_at: previo.subido_at,
+      empresa_id: empresaHeredada.empresa_id,
+      empresa_nombre: empresaHeredada.empresa_nombre,
     });
     await guardarParseoEnS3(req.user, normalizado);
     return res.json({ ok: true, parseo: normalizado });
   } catch (err) {
     console.error('[borradores-cotizacion] parseo error:', err?.message || err);
     return res.status(400).json({ error: err?.message || 'No se pudo guardar el parseo' });
+  }
+}
+
+/**
+ * PATCH /:brd_id/empresa — (re)asigna la empresa del borrador desde el
+ * listado sin necesidad de reenviar todo el parseo. `empresa_id: null`
+ * desasigna. Si no se pasa `empresa_nombre` y el id es válido, se toma
+ * `razon_social` de la BD.
+ */
+async function actualizarEmpresa(req, res) {
+  if (!ensureS3(res)) return;
+  try {
+    const brdId = String(req.params.brd_id || '').trim();
+    const previo = await readParseoJson(req.user, brdId);
+    if (!previo) return res.status(404).json({ error: 'Borrador no encontrado' });
+
+    const bodyLink = normalizeEmpresaLink({
+      empresa_id: req.body?.empresa_id,
+      empresa_nombre: req.body?.empresa_nombre,
+    });
+    if (bodyLink.empresa_id != null) {
+      const [empresas] = await pool.execute('SELECT id, razon_social FROM empresas WHERE id = ?', [
+        bodyLink.empresa_id,
+      ]);
+      if (empresas.length === 0) {
+        return res.status(400).json({ error: 'La empresa no existe.' });
+      }
+      if (!bodyLink.empresa_nombre && empresas[0].razon_social) {
+        bodyLink.empresa_nombre = String(empresas[0].razon_social).slice(0, 200);
+      }
+    }
+
+    const normalizado = normalizeParseo(previo, {
+      brdId,
+      nombre_archivo: previo.nombre_archivo,
+      mime_type: previo.mime_type,
+      tamano_bytes: previo.tamano_bytes,
+      s3_key_original: previo.s3_key_original,
+      subido_at: previo.subido_at,
+      empresa_id: bodyLink.empresa_id,
+      empresa_nombre: bodyLink.empresa_nombre,
+    });
+    await guardarParseoEnS3(req.user, normalizado);
+    return res.json({
+      ok: true,
+      empresa_id: normalizado.empresa_id,
+      empresa_nombre: normalizado.empresa_nombre,
+    });
+  } catch (err) {
+    console.error('[borradores-cotizacion] empresa error:', err?.message || err);
+    return res
+      .status(400)
+      .json({ error: err?.message || 'No se pudo actualizar la empresa del borrador' });
   }
 }
 
@@ -451,6 +539,8 @@ async function listarBorradores(req, res) {
               tamano_bytes: p.tamano_bytes,
               subido_at: p.subido_at,
               updated_at: p.updated_at,
+              empresa_id: p.empresa_id ?? null,
+              empresa_nombre: p.empresa_nombre ?? null,
               resumen: p.resumen,
             };
           } catch {
@@ -1039,6 +1129,25 @@ async function crearBorradorManual(req, res) {
       .trim()
       .slice(0, 200) || 'Plantilla manual';
 
+    // Empresa opcional al crear la plantilla: puede llegar en el body top-level
+    // o dentro del `parseo`. Validamos existencia en BD si viene un id > 0.
+    const empresaFromBody = normalizeEmpresaLink({
+      empresa_id: req.body?.empresa_id ?? parseoRaw.empresa_id,
+      empresa_nombre: req.body?.empresa_nombre ?? parseoRaw.empresa_nombre,
+    });
+    if (empresaFromBody.empresa_id != null) {
+      const [empresas] = await pool.execute('SELECT id, razon_social FROM empresas WHERE id = ?', [
+        empresaFromBody.empresa_id,
+      ]);
+      if (empresas.length === 0) {
+        return res.status(400).json({ error: 'La empresa asignada no existe.' });
+      }
+      // Preferimos el nombre canónico de BD para consistencia en el listado.
+      if (empresas[0].razon_social) {
+        empresaFromBody.empresa_nombre = String(empresas[0].razon_social).slice(0, 200);
+      }
+    }
+
     const normalizado = normalizeParseo(parseoRaw, {
       brdId,
       nombre_archivo: nombre,
@@ -1046,6 +1155,8 @@ async function crearBorradorManual(req, res) {
       tamano_bytes: 0,
       s3_key_original: null,
       subido_at: new Date().toISOString(),
+      empresa_id: empresaFromBody.empresa_id,
+      empresa_nombre: empresaFromBody.empresa_nombre,
     });
     await guardarParseoEnS3(req.user, normalizado);
 
@@ -1066,6 +1177,7 @@ module.exports = {
   completarSubida,
   crearBorradorManual,
   actualizarParseo,
+  actualizarEmpresa,
   listarBorradores,
   obtenerBorrador,
   generarUrlDescarga,
