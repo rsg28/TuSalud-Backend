@@ -127,18 +127,21 @@ const TIPOS_EMO_VALIDOS = new Set(['PREOC', 'ANUAL', 'RETIRO', 'VISITA']);
  * peligrosos y normaliza los que persistiremos.
  */
 /**
- * Devuelve `{ empresa_id, empresa_nombre }` limpios a partir de una fuente,
+ * Devuelve `{ empresa_id, empresa_nombre, empresa_ruc }` limpios a partir de una fuente,
  * aceptando strings vacíos ⇒ null. `empresa_id` opcional: si es NaN o <=0,
  * lo tratamos como no vinculado.
  */
 function normalizeEmpresaLink(source) {
   const idRaw = source?.empresa_id;
   const nombreRaw = source?.empresa_nombre;
+  const rucRaw = source?.empresa_ruc;
   const idNum = Number(idRaw);
   const empresaId = Number.isInteger(idNum) && idNum > 0 ? idNum : null;
   const empresaNombre =
     typeof nombreRaw === 'string' && nombreRaw.trim() ? nombreRaw.trim().slice(0, 200) : null;
-  return { empresa_id: empresaId, empresa_nombre: empresaNombre };
+  const empresaRuc =
+    typeof rucRaw === 'string' && rucRaw.trim() ? rucRaw.trim().slice(0, 20) : null;
+  return { empresa_id: empresaId, empresa_nombre: empresaNombre, empresa_ruc: empresaRuc };
 }
 
 function normalizeParseo(rawJson, meta) {
@@ -261,6 +264,7 @@ function normalizeParseo(rawJson, meta) {
     updated_at: new Date().toISOString(),
     empresa_id: empresaLink.empresa_id,
     empresa_nombre: empresaLink.empresa_nombre,
+    empresa_ruc: empresaLink.empresa_ruc,
     resumen: {
       perfiles_total: perfilesTotal,
       perfiles_matched: perfilesMatched,
@@ -435,6 +439,7 @@ async function actualizarParseo(req, res) {
     const empresaHeredada = normalizeEmpresaLink({
       empresa_id: parseo.empresa_id ?? previo.empresa_id,
       empresa_nombre: parseo.empresa_nombre ?? previo.empresa_nombre,
+      empresa_ruc: parseo.empresa_ruc ?? previo.empresa_ruc,
     });
 
     const normalizado = normalizeParseo(parseo, {
@@ -446,6 +451,7 @@ async function actualizarParseo(req, res) {
       subido_at: previo.subido_at,
       empresa_id: empresaHeredada.empresa_id,
       empresa_nombre: empresaHeredada.empresa_nombre,
+      empresa_ruc: empresaHeredada.empresa_ruc,
     });
     await guardarParseoEnS3(req.user, normalizado);
     return res.json({ ok: true, parseo: normalizado });
@@ -471,16 +477,21 @@ async function actualizarEmpresa(req, res) {
     const bodyLink = normalizeEmpresaLink({
       empresa_id: req.body?.empresa_id,
       empresa_nombre: req.body?.empresa_nombre,
+      empresa_ruc: req.body?.empresa_ruc,
     });
     if (bodyLink.empresa_id != null) {
-      const [empresas] = await pool.execute('SELECT id, razon_social FROM empresas WHERE id = ?', [
-        bodyLink.empresa_id,
-      ]);
+      const [empresas] = await pool.execute(
+        'SELECT id, razon_social, ruc FROM empresas WHERE id = ?',
+        [bodyLink.empresa_id]
+      );
       if (empresas.length === 0) {
         return res.status(400).json({ error: 'La empresa no existe.' });
       }
       if (!bodyLink.empresa_nombre && empresas[0].razon_social) {
         bodyLink.empresa_nombre = String(empresas[0].razon_social).slice(0, 200);
+      }
+      if (!bodyLink.empresa_ruc && empresas[0].ruc) {
+        bodyLink.empresa_ruc = String(empresas[0].ruc).slice(0, 20);
       }
     }
 
@@ -493,12 +504,14 @@ async function actualizarEmpresa(req, res) {
       subido_at: previo.subido_at,
       empresa_id: bodyLink.empresa_id,
       empresa_nombre: bodyLink.empresa_nombre,
+      empresa_ruc: bodyLink.empresa_ruc,
     });
     await guardarParseoEnS3(req.user, normalizado);
     return res.json({
       ok: true,
       empresa_id: normalizado.empresa_id,
       empresa_nombre: normalizado.empresa_nombre,
+      empresa_ruc: normalizado.empresa_ruc,
     });
   } catch (err) {
     console.error('[borradores-cotizacion] empresa error:', err?.message || err);
@@ -541,6 +554,7 @@ async function listarBorradores(req, res) {
               updated_at: p.updated_at,
               empresa_id: p.empresa_id ?? null,
               empresa_nombre: p.empresa_nombre ?? null,
+              empresa_ruc: p.empresa_ruc ?? null,
               resumen: p.resumen,
             };
           } catch {
@@ -1129,22 +1143,49 @@ async function crearBorradorManual(req, res) {
       .trim()
       .slice(0, 200) || 'Plantilla manual';
 
+    // Evitar nombres repetidos entre propuestas del mismo usuario (case-insensitive).
+    const objsExistentes = await s3.listObjectsUnderPrefix(prefijo);
+    const parseoKeysExistentes = objsExistentes
+      .map((o) => o.key)
+      .filter((k) => /\/parseo\.json$/i.test(k));
+    const nombreNorm = nombre.toLowerCase();
+    for (const key of parseoKeysExistentes) {
+      const buf = await getObjectBufferOrNull(key);
+      if (!buf) continue;
+      try {
+        const p = JSON.parse(buf.toString('utf8'));
+        const existente = String(p?.nombre_archivo || '').trim().toLowerCase();
+        if (existente && existente === nombreNorm) {
+          return res.status(409).json({
+            error: `Ya existe una propuesta con el nombre "${nombre}". Elige otro nombre.`,
+          });
+        }
+      } catch {
+        /* ignore corrupt */
+      }
+    }
+
     // Empresa opcional al crear la plantilla: puede llegar en el body top-level
     // o dentro del `parseo`. Validamos existencia en BD si viene un id > 0.
     const empresaFromBody = normalizeEmpresaLink({
       empresa_id: req.body?.empresa_id ?? parseoRaw.empresa_id,
       empresa_nombre: req.body?.empresa_nombre ?? parseoRaw.empresa_nombre,
+      empresa_ruc: req.body?.empresa_ruc ?? parseoRaw.empresa_ruc,
     });
     if (empresaFromBody.empresa_id != null) {
-      const [empresas] = await pool.execute('SELECT id, razon_social FROM empresas WHERE id = ?', [
-        empresaFromBody.empresa_id,
-      ]);
+      const [empresas] = await pool.execute(
+        'SELECT id, razon_social, ruc FROM empresas WHERE id = ?',
+        [empresaFromBody.empresa_id]
+      );
       if (empresas.length === 0) {
         return res.status(400).json({ error: 'La empresa asignada no existe.' });
       }
       // Preferimos el nombre canónico de BD para consistencia en el listado.
       if (empresas[0].razon_social) {
         empresaFromBody.empresa_nombre = String(empresas[0].razon_social).slice(0, 200);
+      }
+      if (empresas[0].ruc) {
+        empresaFromBody.empresa_ruc = String(empresas[0].ruc).slice(0, 20);
       }
     }
 
@@ -1157,6 +1198,7 @@ async function crearBorradorManual(req, res) {
       subido_at: new Date().toISOString(),
       empresa_id: empresaFromBody.empresa_id,
       empresa_nombre: empresaFromBody.empresa_nombre,
+      empresa_ruc: empresaFromBody.empresa_ruc,
     });
     await guardarParseoEnS3(req.user, normalizado);
 
