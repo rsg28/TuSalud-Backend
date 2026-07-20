@@ -128,6 +128,17 @@ app.listen(PORT, async () => {
     console.log('✅ Database connection verified');
     connection.release();
 
+    try {
+      const { ensureVerPreciosDetalleSchema } = require('./services/ensureVerPreciosDetalleSchema');
+      await ensureVerPreciosDetalleSchema(pool);
+      console.log('✅ Schema solicitudes_ver_precios_detalle OK');
+    } catch (schemaErr) {
+      console.warn(
+        '⚠️  No se pudo asegurar schema ver-precios-detalle:',
+        schemaErr?.message || schemaErr
+      );
+    }
+
     const { purgarAntiguas, RETENCION_HORAS } = require('./controllers/notificacionesController');
     await purgarAntiguas();
     const PURGA_NOTIF_MS = 60 * 60 * 1000;

@@ -18,6 +18,18 @@ const pool = require('../config/database');
 const {
   helpers: { emitirNotificacionAVendedorDePedido },
 } = require('./notificacionesController');
+const { ensureVerPreciosDetalleSchema } = require('../services/ensureVerPreciosDetalleSchema');
+
+let schemaReadyPromise = null;
+function ensureSchemaOnce() {
+  if (!schemaReadyPromise) {
+    schemaReadyPromise = ensureVerPreciosDetalleSchema(pool).catch((err) => {
+      schemaReadyPromise = null;
+      throw err;
+    });
+  }
+  return schemaReadyPromise;
+}
 
 function sanitizeForJson(obj) {
   if (obj === null || obj === undefined) return obj;
@@ -55,6 +67,16 @@ async function puedeAccederPedido(req, pedidoId) {
  */
 const listar = async (req, res) => {
   try {
+    try {
+      await ensureSchemaOnce();
+    } catch (schemaErr) {
+      console.error('Schema ver-precios-detalle no disponible:', schemaErr);
+      return res.status(500).json({
+        error: 'No se pudo preparar la tabla de solicitudes de desglose.',
+        details: schemaErr?.message || String(schemaErr),
+      });
+    }
+
     const pedido_id = req.query.pedido_id ? parseInt(req.query.pedido_id, 10) : null;
     const estado = req.query.estado ? String(req.query.estado).toUpperCase() : null;
     const rol = (req.user?.rol || '').toLowerCase();
@@ -135,6 +157,18 @@ const listar = async (req, res) => {
 const crear = async (req, res) => {
   const connection = await pool.getConnection();
   try {
+    try {
+      await ensureSchemaOnce();
+    } catch (schemaErr) {
+      connection.release();
+      console.error('Schema ver-precios-detalle no disponible:', schemaErr);
+      return res.status(500).json({
+        error:
+          'No se pudo preparar la tabla de solicitudes de desglose. Revisa la base de datos o reinicia el backend.',
+        details: schemaErr?.message || String(schemaErr),
+      });
+    }
+
     const { pedido_id, mensaje_cliente } = req.body || {};
     if (!pedido_id) {
       connection.release();
@@ -145,7 +179,7 @@ const crear = async (req, res) => {
       connection.release();
       return res.status(access.status).json({ error: access.error });
     }
-    if (req.user.rol !== 'cliente') {
+    if (String(req.user.rol || '').toLowerCase() !== 'cliente') {
       connection.release();
       return res.status(403).json({ error: 'Solo el cliente puede solicitar ver el detalle de precios' });
     }
@@ -181,18 +215,26 @@ const crear = async (req, res) => {
     );
     const solicitudId = ins.insertId;
 
-    await connection.execute(
-      `INSERT INTO historial_pedido (pedido_id, tipo_evento, descripcion, usuario_id, usuario_nombre)
-       VALUES (?, 'SOLICITUD_MANAGER', ?, ?, ?)`,
-      [
-        pedido_id,
-        mensaje
-          ? `Cliente solicitó ver el detalle de precios individuales. Mensaje: ${mensaje}`
-          : 'Cliente solicitó ver el detalle de precios individuales (sin mensaje)',
-        req.user.id,
-        req.user.nombre_completo || null,
-      ]
-    );
+    try {
+      await connection.execute(
+        `INSERT INTO historial_pedido (pedido_id, tipo_evento, descripcion, usuario_id, usuario_nombre)
+         VALUES (?, 'SOLICITUD_MANAGER', ?, ?, ?)`,
+        [
+          pedido_id,
+          mensaje
+            ? `Cliente solicitó ver el detalle de precios individuales. Mensaje: ${mensaje}`
+            : 'Cliente solicitó ver el detalle de precios individuales (sin mensaje)',
+          req.user.id,
+          req.user.nombre_completo || null,
+        ]
+      );
+    } catch (histErr) {
+      // No bloquear la solicitud si el enum de historial_pedido está desfasado.
+      console.warn(
+        'No se pudo registrar historial de ver-precios-detalle:',
+        histErr?.message || histErr
+      );
+    }
 
     try {
       await emitirNotificacionAVendedorDePedido(connection, {
@@ -225,7 +267,16 @@ const crear = async (req, res) => {
       return res.status(409).json({ error: 'Ya existe una solicitud pendiente' });
     }
     console.error('Error crear solicitud ver precios detalle:', err);
-    res.status(500).json({ error: 'Error al crear solicitud', details: err.message });
+    const missingSchema =
+      err?.code === 'ER_NO_SUCH_TABLE' ||
+      err?.code === 'ER_BAD_FIELD_ERROR' ||
+      /solicitudes_ver_precios_detalle|cliente_ve_precios_individuales/i.test(String(err?.message || ''));
+    res.status(500).json({
+      error: missingSchema
+        ? 'Falta la migración de desglose de precios en la base de datos. Reinicia el backend o ejecuta migration_solicitudes_ver_precios_detalle.sql'
+        : 'Error al crear solicitud',
+      details: err.message,
+    });
   }
 };
 
@@ -239,6 +290,17 @@ const crear = async (req, res) => {
 const actualizarEstado = async (req, res) => {
   const connection = await pool.getConnection();
   try {
+    try {
+      await ensureSchemaOnce();
+    } catch (schemaErr) {
+      connection.release();
+      console.error('Schema ver-precios-detalle no disponible:', schemaErr);
+      return res.status(500).json({
+        error: 'No se pudo preparar la tabla de solicitudes de desglose.',
+        details: schemaErr?.message || String(schemaErr),
+      });
+    }
+
     const id = parseInt(req.params.id, 10);
     const { estado, mensaje_rechazo } = req.body || {};
     const estadoUpper = estado ? String(estado).toUpperCase() : '';
@@ -246,7 +308,8 @@ const actualizarEstado = async (req, res) => {
       connection.release();
       return res.status(400).json({ error: 'estado debe ser APROBADA o RECHAZADA' });
     }
-    if (req.user.rol !== 'vendedor' && req.user.rol !== 'manager') {
+    const rol = String(req.user.rol || '').toLowerCase();
+    if (rol !== 'vendedor' && rol !== 'manager') {
       connection.release();
       return res.status(403).json({ error: 'Solo vendedor o manager puede responder solicitudes' });
     }
@@ -303,16 +366,23 @@ const actualizarEstado = async (req, res) => {
         console.warn('No se pudo emitir notificación de aprobación ver-precios:', notifErr?.message || notifErr);
       }
 
-      await connection.execute(
-        `INSERT INTO historial_pedido (pedido_id, tipo_evento, descripcion, usuario_id, usuario_nombre)
-         VALUES (?, 'SOLICITUD_MANAGER', ?, ?, ?)`,
-        [
-          sol.pedido_id,
-          'Se aprobó al cliente ver el detalle de precios individuales del pedido.',
-          req.user.id,
-          req.user.nombre_completo || null,
-        ]
-      );
+      try {
+        await connection.execute(
+          `INSERT INTO historial_pedido (pedido_id, tipo_evento, descripcion, usuario_id, usuario_nombre)
+           VALUES (?, 'SOLICITUD_MANAGER', ?, ?, ?)`,
+          [
+            sol.pedido_id,
+            'Se aprobó al cliente ver el detalle de precios individuales del pedido.',
+            req.user.id,
+            req.user.nombre_completo || null,
+          ]
+        );
+      } catch (histErr) {
+        console.warn(
+          'No se pudo registrar historial de aprobación ver-precios:',
+          histErr?.message || histErr
+        );
+      }
 
       await connection.commit();
       connection.release();
@@ -353,7 +423,14 @@ const actualizarEstado = async (req, res) => {
           req.user.nombre_completo || null,
         ]
       );
+    } catch (histErr) {
+      console.warn(
+        'No se pudo registrar historial de rechazo ver-precios:',
+        histErr?.message || histErr
+      );
+    }
 
+    try {
       const [ped] = await connection.execute(
         'SELECT numero_pedido, empresa_id, cliente_usuario_id FROM pedidos WHERE id = ?',
         [sol.pedido_id]

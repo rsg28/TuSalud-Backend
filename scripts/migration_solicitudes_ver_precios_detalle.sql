@@ -31,7 +31,7 @@ SET @col_exists := (
 );
 SET @stmt := IF(
   @col_exists = 0,
-  'ALTER TABLE `pedidos` ADD COLUMN `cliente_ve_precios_individuales` TINYINT(1) NOT NULL DEFAULT 0 AFTER `factura_id`',
+  'ALTER TABLE `pedidos` ADD COLUMN `cliente_ve_precios_individuales` TINYINT(1) NOT NULL DEFAULT 0',
   'SELECT 1'
 );
 PREPARE addcol FROM @stmt;
