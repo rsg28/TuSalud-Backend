@@ -122,10 +122,58 @@ const getFacturaById = async (req, res) => {
       [pedidoId]
     );
 
+    const facturaRow = facturas[0];
+    let detallesOut = detalles;
+
+    /**
+     * Cliente sin permiso: no devolver precio unitario por examen ni precios
+     * dentro del snapshot del perfil. Sí se mantienen precios de líneas PERFIL
+     * (paquete) y los totales de la factura.
+     */
+    const rol = String(req.user?.rol || '').toLowerCase();
+    const esCliente = rol === 'cliente';
+    const veDesglose = Number(facturaRow.cliente_ve_precios_individuales) === 1;
+    if (esCliente && !veDesglose) {
+      detallesOut = detalles.map((d) => {
+        const tipo = String(d.tipo_item || '').toUpperCase();
+        let snap = d.examenes_snapshot_json;
+        if (snap) {
+          try {
+            const parsed = typeof snap === 'string' ? JSON.parse(snap) : snap;
+            if (parsed?.categorias && Array.isArray(parsed.categorias)) {
+              const redacted = {
+                ...parsed,
+                categorias: parsed.categorias.map((cat) => ({
+                  ...cat,
+                  examenes: (cat.examenes || []).map((ex) => ({
+                    ...ex,
+                    precio: null,
+                  })),
+                })),
+              };
+              snap = typeof d.examenes_snapshot_json === 'string'
+                ? JSON.stringify(redacted)
+                : redacted;
+            }
+          } catch {
+            /* dejar snapshot original si no parsea */
+          }
+        }
+        if (tipo === 'EXAMEN') {
+          return {
+            ...d,
+            precio_unitario: null,
+            examenes_snapshot_json: snap,
+          };
+        }
+        return { ...d, examenes_snapshot_json: snap };
+      });
+    }
+
     res.json({
-      factura: facturas[0],
+      factura: facturaRow,
       cotizaciones,
-      detalles,
+      detalles: detallesOut,
       cliente_reporto_pago: histReporte.length > 0,
     });
   } catch (error) {
