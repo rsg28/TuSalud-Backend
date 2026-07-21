@@ -1090,6 +1090,48 @@ async function buscarExamenesCatalogo(req, res) {
 }
 
 /**
+ * POST /categorias-examenes
+ * Body: { examen_ids: number[] }
+ * Devuelve categoría de catálogo (emo_categorias) por examen_id.
+ * Usado al exportar GF de propuestas antiguas sin categoria_nombre en el JSON.
+ */
+async function categoriasPorExamenIds(req, res) {
+  try {
+    const raw = Array.isArray(req.body?.examen_ids) ? req.body.examen_ids : [];
+    const ids = [
+      ...new Set(
+        raw
+          .map((x) => Number(x))
+          .filter((n) => Number.isInteger(n) && n > 0)
+      ),
+    ].slice(0, 500);
+    if (ids.length === 0) return res.json({ categorias: [] });
+    const placeholders = ids.map(() => '?').join(',');
+    const [rows] = await pool.execute(
+      `SELECT e.id AS examen_id,
+              e.nombre AS nombre_examen,
+              c.nombre AS categoria_nombre
+         FROM examenes e
+         LEFT JOIN emo_categorias c ON c.id = e.categoria_id
+        WHERE e.id IN (${placeholders})`,
+      ids
+    );
+    return res.json({
+      categorias: (rows || []).map((r) => ({
+        examen_id: Number(r.examen_id),
+        nombre_examen: String(r.nombre_examen || '').trim(),
+        categoria_nombre: r.categoria_nombre
+          ? String(r.categoria_nombre).trim()
+          : null,
+      })),
+    });
+  } catch (err) {
+    console.error('[borradores-cotizacion] categorias-examenes error:', err?.message || err);
+    return res.status(500).json({ error: 'No se pudieron obtener categorías' });
+  }
+}
+
+/**
  * GET /buscar-perfiles?q=...
  * Búsqueda por letra en emo_perfiles para vincular un perfil de la propuesta
  * a uno ya existente en BD.
@@ -1234,4 +1276,5 @@ module.exports = {
   resolverNombres,
   buscarExamenesCatalogo,
   buscarPerfilesCatalogo,
+  categoriasPorExamenIds,
 };

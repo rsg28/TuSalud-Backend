@@ -47,6 +47,12 @@ router.get(
   soloRolesConCarpeta,
   ctrl.buscarPerfilesCatalogo
 );
+router.post(
+  '/categorias-examenes',
+  authenticateToken,
+  soloRolesConCarpeta,
+  ctrl.categoriasPorExamenIds
+);
 
 router.post('/upload/init', authenticateToken, soloRolesConCarpeta, ctrl.iniciarSubida);
 router.post('/upload/chunk', authenticateToken, soloRolesConCarpeta, ctrl.recibirChunk);

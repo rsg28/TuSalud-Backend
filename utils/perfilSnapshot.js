@@ -148,6 +148,8 @@ async function buildPerfilSnapshot(dbConn, perfilId, tipoEmo) {
     if (!bucket) {
       bucket = {
         id: f.categoria_nombre || null,
+        nombre: f.categoria_nombre || null,
+        categoria_nombre: f.categoria_nombre || null,
         id_cola: f.categoria_id_cola || null,
         examenes: [],
       };
