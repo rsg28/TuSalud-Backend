@@ -31,6 +31,25 @@ function safeUpper(s) {
   return s == null ? null : String(s).toUpperCase();
 }
 
+function parseCondicionesJson(raw) {
+  if (raw == null) return [];
+  let parsed = raw;
+  if (typeof raw === 'string') {
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return [];
+    }
+  }
+  if (Array.isArray(parsed)) {
+    return parsed.map((x) => String(x || '').trim().toUpperCase()).filter(Boolean);
+  }
+  if (parsed && typeof parsed === 'object' && Array.isArray(parsed.codigos)) {
+    return parsed.codigos.map((x) => String(x || '').trim().toUpperCase()).filter(Boolean);
+  }
+  return [];
+}
+
 /**
  * Construye el snapshot completo del perfil (perfil + categorías + exámenes)
  * para un (perfil_id, tipo_emo) dado.
@@ -55,26 +74,55 @@ async function buildPerfilSnapshot(dbConn, perfilId, tipoEmo) {
   // Trae todos los exámenes del perfil para ese tipo_emo, junto con su
   // categoría y código legacy. Las reglas (sexo/edad/condicional) se preservan
   // tal cual existían al momento del snapshot.
-  const [filas] = await dbConn.query(
-    `SELECT
-        pe.examen_id,
-        pe.tipo_emo,
-        pe.sexo_aplicable,
-        pe.edad_minima,
-        pe.edad_maxima,
-        pe.es_condicional,
-        e.identificador  AS codigo_legacy,
-        e.nombre         AS examen_nombre,
-        c.id             AS categoria_id,
-        c.nombre         AS categoria_nombre,
-        c.id_cola        AS categoria_id_cola
-       FROM emo_perfil_examenes pe
-       JOIN examenes e         ON e.id = pe.examen_id
-       LEFT JOIN emo_categorias c ON c.id = e.categoria_id
-      WHERE pe.perfil_id = ? AND pe.tipo_emo = ?
-      ORDER BY c.nombre, e.nombre`,
-    [perfilId, safeUpper(tipoEmo)]
-  );
+  let filas;
+  try {
+    const [rows] = await dbConn.query(
+      `SELECT
+          pe.examen_id,
+          pe.tipo_emo,
+          pe.sexo_aplicable,
+          pe.edad_minima,
+          pe.edad_maxima,
+          pe.es_condicional,
+          pe.condiciones_json,
+          e.identificador  AS codigo_legacy,
+          e.nombre         AS examen_nombre,
+          c.id             AS categoria_id,
+          c.nombre         AS categoria_nombre,
+          c.id_cola        AS categoria_id_cola
+         FROM emo_perfil_examenes pe
+         JOIN examenes e         ON e.id = pe.examen_id
+         LEFT JOIN emo_categorias c ON c.id = e.categoria_id
+        WHERE pe.perfil_id = ? AND pe.tipo_emo = ?
+        ORDER BY c.nombre, e.nombre`,
+      [perfilId, safeUpper(tipoEmo)]
+    );
+    filas = rows;
+  } catch (err) {
+    // Compat: migración condiciones_json aún no aplicada.
+    if (!String(err?.message || '').includes('condiciones_json')) throw err;
+    const [rows] = await dbConn.query(
+      `SELECT
+          pe.examen_id,
+          pe.tipo_emo,
+          pe.sexo_aplicable,
+          pe.edad_minima,
+          pe.edad_maxima,
+          pe.es_condicional,
+          e.identificador  AS codigo_legacy,
+          e.nombre         AS examen_nombre,
+          c.id             AS categoria_id,
+          c.nombre         AS categoria_nombre,
+          c.id_cola        AS categoria_id_cola
+         FROM emo_perfil_examenes pe
+         JOIN examenes e         ON e.id = pe.examen_id
+         LEFT JOIN emo_categorias c ON c.id = e.categoria_id
+        WHERE pe.perfil_id = ? AND pe.tipo_emo = ?
+        ORDER BY c.nombre, e.nombre`,
+      [perfilId, safeUpper(tipoEmo)]
+    );
+    filas = rows;
+  }
 
   if (!filas.length) {
     // Perfil existe pero no tiene exámenes para ese tipo_emo. Devolvemos un
@@ -114,6 +162,7 @@ async function buildPerfilSnapshot(dbConn, perfilId, tipoEmo) {
       edad_minima: f.edad_minima ?? null,
       edad_maxima: f.edad_maxima ?? null,
       es_condicional: f.es_condicional ? 1 : 0,
+      condiciones: parseCondicionesJson(f.condiciones_json),
     });
   }
 

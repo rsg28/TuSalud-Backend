@@ -1007,7 +1007,10 @@ async function resolverNombres(req, res) {
     let examenesRows = [];
     if (nombresParaSql.length > 0) {
       const [rows] = await pool.execute(
-        `SELECT id, nombre FROM examenes WHERE activo = 1`
+        `SELECT e.id, e.nombre, c.nombre AS categoria_nombre
+           FROM examenes e
+           LEFT JOIN emo_categorias c ON c.id = e.categoria_id
+          WHERE e.activo = 1`
       );
       examenesRows = rows;
     }
@@ -1037,6 +1040,9 @@ async function resolverNombres(req, res) {
         matched: true,
         examen_id: match.id,
         nombre_bd: String(match.nombre || '').trim(),
+        categoria_nombre: match.categoria_nombre
+          ? String(match.categoria_nombre).trim()
+          : null,
         coincidencia_laxa: laxa,
       };
     });
