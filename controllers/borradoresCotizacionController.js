@@ -1132,10 +1132,10 @@ async function categoriasPorExamenIds(req, res) {
 }
 
 /**
- * GET /buscar-perfiles?q=...&tipo_emo=PREOC|ANUAL|RETIRO|VISITA
- * Búsqueda por nombre. `tipo_emo` solo prioriza resultados que ya tienen
- * exámenes para ese tipo; NO oculta el resto (así un perfil quitado solo
- * de la propuesta sigue apareciendo en el catálogo).
+ * GET /buscar-perfiles?q=...&tipo_emo=PREOC|ANUAL|RETIRO|VISITA&empresa_id=
+ * Búsqueda por nombre. Públicos (GLOBAL) siempre; privados solo si están
+ * asignados a empresa_id (directo o por grupo). Sin empresa_id → solo públicos.
+ * tipo_emo prioriza, no oculta.
  */
 async function buscarPerfilesCatalogo(req, res) {
   try {
@@ -1147,20 +1147,56 @@ async function buscarPerfilesCatalogo(req, res) {
     const tipoRaw = String(req.query?.tipo_emo || '').trim().toUpperCase();
     const tiposOk = new Set(['PREOC', 'ANUAL', 'RETIRO', 'VISITA']);
     const tipoEmo = tiposOk.has(tipoRaw) ? tipoRaw : null;
+    const empresaRaw = parseInt(String(req.query?.empresa_id || ''), 10);
+    const empresaId =
+      Number.isInteger(empresaRaw) && empresaRaw > 0 ? empresaRaw : null;
 
-    const [rows] = await pool.execute(
-      `SELECT p.id, p.nombre,
-              GROUP_CONCAT(DISTINCT pe.tipo_emo) AS tipos_emo
-         FROM emo_perfiles p
-         LEFT JOIN emo_perfil_examenes pe ON pe.perfil_id = p.id
-        WHERE p.nombre LIKE ?
-        GROUP BY p.id, p.nombre
-        ORDER BY
-          CASE WHEN LOWER(p.nombre) LIKE LOWER(?) THEN 0 ELSE 1 END,
-          p.nombre ASC
-        LIMIT 40`,
-      [like, prefix]
-    );
+    let rows;
+    if (empresaId) {
+      [rows] = await pool.execute(
+        `SELECT p.id, p.nombre, p.visibilidad,
+                GROUP_CONCAT(DISTINCT pe.tipo_emo) AS tipos_emo
+           FROM emo_perfiles p
+           LEFT JOIN emo_perfil_examenes pe ON pe.perfil_id = p.id
+          WHERE p.nombre LIKE ?
+            AND (
+              UPPER(COALESCE(p.visibilidad, 'GLOBAL')) = 'GLOBAL'
+              OR EXISTS (
+                SELECT 1 FROM emo_perfil_asignacion epa
+                 WHERE epa.perfil_id = p.id AND epa.empresa_id = ?
+              )
+              OR EXISTS (
+                SELECT 1
+                  FROM emo_perfil_grupo_asignacion epga
+                  INNER JOIN empresa_grupo eg
+                          ON eg.grupo_id = epga.grupo_id AND eg.empresa_id = ?
+                 WHERE epga.perfil_id = p.id
+              )
+            )
+          GROUP BY p.id, p.nombre, p.visibilidad
+          ORDER BY
+            CASE WHEN UPPER(COALESCE(p.visibilidad, 'GLOBAL')) = 'GLOBAL' THEN 0 ELSE 1 END,
+            CASE WHEN LOWER(p.nombre) LIKE LOWER(?) THEN 0 ELSE 1 END,
+            p.nombre ASC
+          LIMIT 40`,
+        [like, empresaId, empresaId, prefix]
+      );
+    } else {
+      [rows] = await pool.execute(
+        `SELECT p.id, p.nombre, p.visibilidad,
+                GROUP_CONCAT(DISTINCT pe.tipo_emo) AS tipos_emo
+           FROM emo_perfiles p
+           LEFT JOIN emo_perfil_examenes pe ON pe.perfil_id = p.id
+          WHERE p.nombre LIKE ?
+            AND UPPER(COALESCE(p.visibilidad, 'GLOBAL')) = 'GLOBAL'
+          GROUP BY p.id, p.nombre, p.visibilidad
+          ORDER BY
+            CASE WHEN LOWER(p.nombre) LIKE LOWER(?) THEN 0 ELSE 1 END,
+            p.nombre ASC
+          LIMIT 40`,
+        [like, prefix]
+      );
+    }
 
     const ordenTipo = ['PREOC', 'ANUAL', 'RETIRO', 'VISITA'];
     let perfiles = (rows || []).map((r) => {
@@ -1169,19 +1205,23 @@ async function buscarPerfilesCatalogo(req, res) {
         .map((t) => t.trim().toUpperCase())
         .filter((t) => tiposOk.has(t))
         .sort((a, b) => ordenTipo.indexOf(a) - ordenTipo.indexOf(b));
+      const visRaw = String(r.visibilidad || 'GLOBAL').trim().toUpperCase();
+      const visibilidad = visRaw === 'PRIVADO' ? 'PRIVADO' : 'PUBLICO';
       return {
         perfil_id: Number(r.id),
         nombre: String(r.nombre || '').trim(),
         tipos_emo: tipos,
+        visibilidad,
         tiene_tipo_filtro: tipoEmo ? tipos.includes(tipoEmo) : true,
       };
     });
 
-    // Con filtro de tipo: primero los que ya lo tienen, después el resto.
     if (tipoEmo) {
+      const sortVis = (a, b) =>
+        (a.visibilidad === 'PUBLICO' ? 0 : 1) - (b.visibilidad === 'PUBLICO' ? 0 : 1);
       perfiles = [
-        ...perfiles.filter((p) => p.tiene_tipo_filtro),
-        ...perfiles.filter((p) => !p.tiene_tipo_filtro),
+        ...perfiles.filter((p) => p.tiene_tipo_filtro).sort(sortVis),
+        ...perfiles.filter((p) => !p.tiene_tipo_filtro).sort(sortVis),
       ];
     }
 
