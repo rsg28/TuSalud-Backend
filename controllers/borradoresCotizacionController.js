@@ -1133,8 +1133,9 @@ async function categoriasPorExamenIds(req, res) {
 
 /**
  * GET /buscar-perfiles?q=...&tipo_emo=PREOC|ANUAL|RETIRO|VISITA
- * Búsqueda por letra en emo_perfiles. Si viene `tipo_emo`, solo perfiles que
- * tienen exámenes para ese tipo. Cada hit incluye `tipos_emo` disponibles.
+ * Búsqueda por nombre. `tipo_emo` solo prioriza resultados que ya tienen
+ * exámenes para ese tipo; NO oculta el resto (así un perfil quitado solo
+ * de la propuesta sigue apareciendo en el catálogo).
  */
 async function buscarPerfilesCatalogo(req, res) {
   try {
@@ -1147,44 +1148,44 @@ async function buscarPerfilesCatalogo(req, res) {
     const tiposOk = new Set(['PREOC', 'ANUAL', 'RETIRO', 'VISITA']);
     const tipoEmo = tiposOk.has(tipoRaw) ? tipoRaw : null;
 
-    const params = [like];
-    let tipoFilterSql = '';
-    if (tipoEmo) {
-      tipoFilterSql = ` AND EXISTS (
-          SELECT 1 FROM emo_perfil_examenes pe2
-           WHERE pe2.perfil_id = p.id AND pe2.tipo_emo = ?
-        )`;
-      params.push(tipoEmo);
-    }
-    params.push(prefix);
-
     const [rows] = await pool.execute(
       `SELECT p.id, p.nombre,
-              GROUP_CONCAT(DISTINCT pe.tipo_emo ORDER BY
-                FIELD(pe.tipo_emo, 'PREOC', 'ANUAL', 'RETIRO', 'VISITA'),
-                pe.tipo_emo
-              ) AS tipos_emo
+              GROUP_CONCAT(DISTINCT pe.tipo_emo) AS tipos_emo
          FROM emo_perfiles p
          LEFT JOIN emo_perfil_examenes pe ON pe.perfil_id = p.id
         WHERE p.nombre LIKE ?
-        ${tipoFilterSql}
         GROUP BY p.id, p.nombre
         ORDER BY
           CASE WHEN LOWER(p.nombre) LIKE LOWER(?) THEN 0 ELSE 1 END,
           p.nombre ASC
         LIMIT 40`,
-      params
+      [like, prefix]
     );
-    return res.json({
-      perfiles: (rows || []).map((r) => ({
+
+    const ordenTipo = ['PREOC', 'ANUAL', 'RETIRO', 'VISITA'];
+    let perfiles = (rows || []).map((r) => {
+      const tipos = String(r.tipos_emo || '')
+        .split(',')
+        .map((t) => t.trim().toUpperCase())
+        .filter((t) => tiposOk.has(t))
+        .sort((a, b) => ordenTipo.indexOf(a) - ordenTipo.indexOf(b));
+      return {
         perfil_id: Number(r.id),
         nombre: String(r.nombre || '').trim(),
-        tipos_emo: String(r.tipos_emo || '')
-          .split(',')
-          .map((t) => t.trim().toUpperCase())
-          .filter((t) => tiposOk.has(t)),
-      })),
+        tipos_emo: tipos,
+        tiene_tipo_filtro: tipoEmo ? tipos.includes(tipoEmo) : true,
+      };
     });
+
+    // Con filtro de tipo: primero los que ya lo tienen, después el resto.
+    if (tipoEmo) {
+      perfiles = [
+        ...perfiles.filter((p) => p.tiene_tipo_filtro),
+        ...perfiles.filter((p) => !p.tiene_tipo_filtro),
+      ];
+    }
+
+    return res.json({ perfiles });
   } catch (err) {
     console.error('[borradores-cotizacion] buscar-perfiles error:', err?.message || err);
     return res.status(500).json({ error: 'No se pudieron buscar perfiles' });
