@@ -1132,29 +1132,57 @@ async function categoriasPorExamenIds(req, res) {
 }
 
 /**
- * GET /buscar-perfiles?q=...
- * Búsqueda por letra en emo_perfiles para vincular un perfil de la propuesta
- * a uno ya existente en BD.
+ * GET /buscar-perfiles?q=...&tipo_emo=PREOC|ANUAL|RETIRO|VISITA
+ * Búsqueda por letra en emo_perfiles. Si viene `tipo_emo`, solo perfiles que
+ * tienen exámenes para ese tipo. Cada hit incluye `tipos_emo` disponibles.
  */
 async function buscarPerfilesCatalogo(req, res) {
   try {
     const q = String(req.query?.q || '').trim();
     if (q.length < 1) return res.json({ perfiles: [] });
-    const like = `%${q.replace(/[%_]/g, '')}%`;
+    const safeQ = q.replace(/[%_]/g, '');
+    const like = `%${safeQ}%`;
+    const prefix = `${safeQ}%`;
+    const tipoRaw = String(req.query?.tipo_emo || '').trim().toUpperCase();
+    const tiposOk = new Set(['PREOC', 'ANUAL', 'RETIRO', 'VISITA']);
+    const tipoEmo = tiposOk.has(tipoRaw) ? tipoRaw : null;
+
+    const params = [like];
+    let tipoFilterSql = '';
+    if (tipoEmo) {
+      tipoFilterSql = ` AND EXISTS (
+          SELECT 1 FROM emo_perfil_examenes pe2
+           WHERE pe2.perfil_id = p.id AND pe2.tipo_emo = ?
+        )`;
+      params.push(tipoEmo);
+    }
+    params.push(prefix);
+
     const [rows] = await pool.execute(
-      `SELECT id, nombre
-         FROM emo_perfiles
-        WHERE nombre LIKE ?
+      `SELECT p.id, p.nombre,
+              GROUP_CONCAT(DISTINCT pe.tipo_emo ORDER BY
+                FIELD(pe.tipo_emo, 'PREOC', 'ANUAL', 'RETIRO', 'VISITA'),
+                pe.tipo_emo
+              ) AS tipos_emo
+         FROM emo_perfiles p
+         LEFT JOIN emo_perfil_examenes pe ON pe.perfil_id = p.id
+        WHERE p.nombre LIKE ?
+        ${tipoFilterSql}
+        GROUP BY p.id, p.nombre
         ORDER BY
-          CASE WHEN LOWER(nombre) LIKE LOWER(?) THEN 0 ELSE 1 END,
-          nombre ASC
+          CASE WHEN LOWER(p.nombre) LIKE LOWER(?) THEN 0 ELSE 1 END,
+          p.nombre ASC
         LIMIT 40`,
-      [like, `${q.replace(/[%_]/g, '')}%`]
+      params
     );
     return res.json({
       perfiles: (rows || []).map((r) => ({
         perfil_id: Number(r.id),
         nombre: String(r.nombre || '').trim(),
+        tipos_emo: String(r.tipos_emo || '')
+          .split(',')
+          .map((t) => t.trim().toUpperCase())
+          .filter((t) => tiposOk.has(t)),
       })),
     });
   } catch (err) {
