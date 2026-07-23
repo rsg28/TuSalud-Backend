@@ -120,7 +120,62 @@ function snapshotExamenPerfilOrigenPedido(raw, it) {
     tipo_emo: tipoEmo,
     examen_id: it.examen_id,
     nombre_catalogo: it.nombre || null,
+    condiciones: normalizarCondicionesPedido(raw.condiciones || raw.condiciones_perfil),
+    condiciones_firma: condicionesFirmaDesdeRaw(raw),
   });
+}
+
+function normalizarCondicionesPedido(raw) {
+  if (!raw || typeof raw !== 'object') return { codigos: [], nota: null };
+  const codigos = Array.isArray(raw.codigos)
+    ? [
+        ...new Set(
+          raw.codigos
+            .map((c) => String(c || '').trim().toUpperCase())
+            .filter(Boolean)
+        ),
+      ].sort((a, b) => a.localeCompare(b))
+    : [];
+  const notaRaw = raw.nota != null ? String(raw.nota).trim() : '';
+  return { codigos, nota: notaRaw ? notaRaw.slice(0, 240) : null };
+}
+
+function firmaCondicionesPedido(codigos) {
+  return Array.isArray(codigos)
+    ? [
+        ...new Set(
+          codigos.map((c) => String(c || '').trim().toUpperCase()).filter(Boolean)
+        ),
+      ]
+        .sort((a, b) => a.localeCompare(b))
+        .join(',')
+    : '';
+}
+
+function condicionesFirmaDesdeRaw(raw) {
+  if (raw && raw.condiciones_firma != null) {
+    return String(raw.condiciones_firma)
+      .split(',')
+      .map((c) => c.trim().toUpperCase())
+      .filter(Boolean)
+      .sort((a, b) => a.localeCompare(b))
+      .join(',');
+  }
+  const cond = normalizarCondicionesPedido(raw?.condiciones || raw?.condiciones_perfil);
+  if (cond.codigos.length) return firmaCondicionesPedido(cond.codigos);
+  try {
+    const snap =
+      typeof raw?.examenes_snapshot_json === 'string'
+        ? JSON.parse(raw.examenes_snapshot_json)
+        : raw?.examenes_snapshot_json;
+    if (snap?.condiciones_firma) return String(snap.condiciones_firma);
+    if (snap?.condiciones) {
+      return firmaCondicionesPedido(normalizarCondicionesPedido(snap.condiciones).codigos);
+    }
+  } catch (_) {
+    /* ignore */
+  }
+  return '';
 }
 
 function perfilOrigenDesdeRaw(raw) {
@@ -159,11 +214,13 @@ async function insertarPedidoItem(connection, pedidoId, raw, precio_base) {
   const origen = perfilOrigenDesdeRaw(raw);
   const snapshotJson =
     it.tipo_item === 'EXAMEN' ? snapshotExamenPerfilOrigenPedido(raw, it) : null;
+  const condicionesFirma = condicionesFirmaDesdeRaw(raw);
   await connection.execute(
     `INSERT INTO pedido_items (
        pedido_id, tipo_item, perfil_id, tipo_emo, examen_id, nombre, cantidad, precio_base,
-       perfil_origen_id, perfil_origen_tipo_emo, perfil_origen_nombre, examenes_snapshot_json
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       perfil_origen_id, perfil_origen_tipo_emo, perfil_origen_nombre, examenes_snapshot_json,
+       condiciones_firma
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       pedidoId,
       it.tipo_item,
@@ -177,6 +234,7 @@ async function insertarPedidoItem(connection, pedidoId, raw, precio_base) {
       origen.perfil_origen_tipo_emo,
       origen.perfil_origen_nombre,
       snapshotJson,
+      condicionesFirma,
     ]
   );
   return it;
@@ -433,7 +491,7 @@ const obtenerPedido = async (req, res) => {
       `SELECT pi.id, pi.pedido_id, pi.tipo_item, pi.perfil_id, pi.tipo_emo, pi.examen_id,
               pi.nombre, pi.cantidad, pi.precio_base, pi.created_at,
               pi.perfil_origen_id, pi.perfil_origen_tipo_emo, pi.perfil_origen_nombre,
-              pi.examenes_snapshot_json,
+              pi.examenes_snapshot_json, pi.condiciones_firma,
               ex.nombre AS examen_nombre,
               pf.nombre AS perfil_nombre
        FROM pedido_items pi
@@ -1065,28 +1123,54 @@ function parsePerfilesAplicadosJson(raw) {
   return [];
 }
 
-function pacienteYaTienePerfil(pac, perfilId, tipoEmo) {
+function clavePerfilCondPedido(perfilId, tipoEmo, condicionesOrFirma) {
   const tipo = String(tipoEmo || '').toUpperCase();
-  const clave = `${Number(perfilId)}:${tipo}`;
+  let firma = '';
+  if (typeof condicionesOrFirma === 'string') {
+    firma = firmaCondicionesPedido(
+      condicionesOrFirma.split(',').map((c) => c.trim()).filter(Boolean)
+    );
+  } else if (condicionesOrFirma && typeof condicionesOrFirma === 'object') {
+    firma = firmaCondicionesPedido(
+      normalizarCondicionesPedido(condicionesOrFirma).codigos
+    );
+  }
+  return `${Number(perfilId)}:${tipo}:${firma}`;
+}
+
+function pacienteYaTienePerfil(pac, perfilId, tipoEmo, condiciones) {
+  const clave = clavePerfilCondPedido(perfilId, tipoEmo, condiciones);
   const list = parsePerfilesAplicadosJson(pac?.perfiles_aplicados_json);
   if (
-    list.some(
-      (x) =>
-        `${Number(x.emo_perfil_id)}:${String(x.emo_tipo || '').toUpperCase()}` === clave
+    list.some((x) =>
+      clavePerfilCondPedido(x.emo_perfil_id, x.emo_tipo, x.condiciones) === clave
     )
   ) {
     return true;
   }
+  // Legacy: solo primer perfil sin condicionales en columnas planas.
+  const firmaNueva = clave.split(':')[2] || '';
+  if (firmaNueva) return false;
   return (
     Number(pac?.emo_perfil_id) === Number(perfilId) &&
-    String(pac?.emo_tipo || '').toUpperCase() === tipo
+    String(pac?.emo_tipo || '').toUpperCase() === String(tipoEmo || '').toUpperCase() &&
+    list.length === 0
   );
 }
 
 function mergePerfilAplicadoJson(actual, entrada) {
   const list = parsePerfilesAplicadosJson(actual);
-  const k = `${entrada.emo_perfil_id}:${entrada.emo_tipo}`;
-  if (!list.some((x) => `${x.emo_perfil_id}:${x.emo_tipo}` === k)) {
+  const k = clavePerfilCondPedido(
+    entrada.emo_perfil_id,
+    entrada.emo_tipo,
+    entrada.condiciones
+  );
+  if (
+    !list.some(
+      (x) =>
+        clavePerfilCondPedido(x.emo_perfil_id, x.emo_tipo, x.condiciones) === k
+    )
+  ) {
     list.push(entrada);
   }
   return list;
@@ -1202,10 +1286,14 @@ const asignarPerfilAPacientes = async (req, res) => {
         return res.status(400).json({ error: 'El pedido no tiene pacientes cargados' });
       }
 
+      const condicionesAsignar = normalizarCondicionesPedido(
+        body.condiciones || body.condiciones_perfil
+      );
       const entradaPerfil = {
         emo_perfil_id: perfil_id,
         perfil_nombre: nombrePerfil,
         emo_tipo: tipo_emo,
+        condiciones: condicionesAsignar,
       };
 
       const aplicadosIds = [];
@@ -1215,7 +1303,7 @@ const asignarPerfilAPacientes = async (req, res) => {
           [pid]
         );
         const pac = pacRows[0] || {};
-        if (pacienteYaTienePerfil(pac, perfil_id, tipo_emo)) {
+        if (pacienteYaTienePerfil(pac, perfil_id, tipo_emo, condicionesAsignar)) {
           continue;
         }
 
@@ -1240,6 +1328,7 @@ const asignarPerfilAPacientes = async (req, res) => {
           tipoEmo: tipo_emo,
           perfilNombre: nombrePerfil,
           examenes: examenesDetalle,
+          condiciones: condicionesAsignar,
           tag: 'asignar-perfil-cotizacion',
         });
         aplicadosIds.push(pid);
@@ -1270,12 +1359,13 @@ const asignarPerfilAPacientes = async (req, res) => {
       }
       const cantidad = aplicadosIds.length;
 
+      const condicionesFirmaAsignar = condicionesFirmaDesdeRaw(body);
       await connection.execute(
         `INSERT INTO pedido_items
-           (pedido_id, tipo_item, perfil_id, tipo_emo, examen_id, nombre, cantidad, precio_base)
-         VALUES (?, 'PERFIL', ?, ?, NULL, ?, ?, ?)
+           (pedido_id, tipo_item, perfil_id, tipo_emo, examen_id, nombre, cantidad, precio_base, condiciones_firma)
+         VALUES (?, 'PERFIL', ?, ?, NULL, ?, ?, ?, ?)
          ON DUPLICATE KEY UPDATE cantidad = cantidad + VALUES(cantidad), precio_base = VALUES(precio_base)`,
-        [pedido_id, perfil_id, tipo_emo, nombrePerfil, cantidad, precio_base]
+        [pedido_id, perfil_id, tipo_emo, nombrePerfil, cantidad, precio_base, condicionesFirmaAsignar]
       );
 
       try {
@@ -1377,10 +1467,20 @@ const agregarExamen = async (req, res) => {
       // ítem ya existe, suma la cantidad y refresca precio_base.
       await connection.execute(
         `INSERT INTO pedido_items
-           (pedido_id, tipo_item, perfil_id, tipo_emo, examen_id, nombre, cantidad, precio_base)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+           (pedido_id, tipo_item, perfil_id, tipo_emo, examen_id, nombre, cantidad, precio_base, condiciones_firma)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON DUPLICATE KEY UPDATE cantidad = cantidad + VALUES(cantidad), precio_base = VALUES(precio_base)`,
-        [pedido_id, it.tipo_item, it.perfil_id, it.tipo_emo, it.examen_id, it.nombre, it.cantidad, precio_base]
+        [
+          pedido_id,
+          it.tipo_item,
+          it.perfil_id,
+          it.tipo_emo,
+          it.examen_id,
+          it.nombre,
+          it.cantidad,
+          precio_base,
+          condicionesFirmaDesdeRaw(body),
+        ]
       );
 
       try {

@@ -34,28 +34,74 @@ function parsePerfilesAplicadosJson(raw) {
   return [];
 }
 
-function pacienteYaTienePerfil(pac, perfilId, tipoEmo) {
+function firmaCondicionesSolicitud(codigos) {
+  return Array.isArray(codigos)
+    ? [
+        ...new Set(
+          codigos.map((c) => String(c || '').trim().toUpperCase()).filter(Boolean)
+        ),
+      ]
+        .sort((a, b) => a.localeCompare(b))
+        .join(',')
+    : '';
+}
+
+function normalizarCondicionesSolicitud(raw) {
+  if (!raw || typeof raw !== 'object') return { codigos: [], nota: null };
+  const codigos = Array.isArray(raw.codigos)
+    ? [
+        ...new Set(
+          raw.codigos
+            .map((c) => String(c || '').trim().toUpperCase())
+            .filter(Boolean)
+        ),
+      ].sort((a, b) => a.localeCompare(b))
+    : [];
+  const notaRaw = raw.nota != null ? String(raw.nota).trim() : '';
+  return { codigos, nota: notaRaw ? notaRaw.slice(0, 240) : null };
+}
+
+function clavePerfilCondSolicitud(perfilId, tipoEmo, condiciones) {
   const tipo = String(tipoEmo || '').toUpperCase();
-  const clave = `${Number(perfilId)}:${tipo}`;
+  const firma = firmaCondicionesSolicitud(
+    normalizarCondicionesSolicitud(condiciones).codigos
+  );
+  return `${Number(perfilId)}:${tipo}:${firma}`;
+}
+
+function pacienteYaTienePerfil(pac, perfilId, tipoEmo, condiciones) {
+  const clave = clavePerfilCondSolicitud(perfilId, tipoEmo, condiciones);
   const list = parsePerfilesAplicadosJson(pac?.perfiles_aplicados_json);
   if (
     list.some(
       (x) =>
-        `${Number(x.emo_perfil_id)}:${String(x.emo_tipo || '').toUpperCase()}` === clave
+        clavePerfilCondSolicitud(x.emo_perfil_id, x.emo_tipo, x.condiciones) === clave
     )
   ) {
     return true;
   }
+  const firmaNueva = clave.split(':')[2] || '';
+  if (firmaNueva) return false;
   return (
     Number(pac?.emo_perfil_id) === Number(perfilId) &&
-    String(pac?.emo_tipo || '').toUpperCase() === tipo
+    String(pac?.emo_tipo || '').toUpperCase() === String(tipoEmo || '').toUpperCase() &&
+    list.length === 0
   );
 }
 
 function mergePerfilAplicadoJson(actual, entrada) {
   const list = parsePerfilesAplicadosJson(actual);
-  const k = `${entrada.emo_perfil_id}:${entrada.emo_tipo}`;
-  if (!list.some((x) => `${x.emo_perfil_id}:${x.emo_tipo}` === k)) {
+  const k = clavePerfilCondSolicitud(
+    entrada.emo_perfil_id,
+    entrada.emo_tipo,
+    entrada.condiciones
+  );
+  if (
+    !list.some(
+      (x) =>
+        clavePerfilCondSolicitud(x.emo_perfil_id, x.emo_tipo, x.condiciones) === k
+    )
+  ) {
     list.push(entrada);
   }
   return list;
@@ -181,19 +227,22 @@ async function aplicarSolicitudAgregarAlPedido(connection, opts) {
     pacienteId,
     perfilId,
     tipoEmo,
-    nombrePerfil
+    nombrePerfil,
+    condiciones
   ) => {
+    const cond = normalizarCondicionesSolicitud(condiciones);
     const [pacRows] = await connection.execute(
       'SELECT emo_perfil_id, emo_tipo, perfiles_aplicados_json FROM pedido_pacientes WHERE id = ?',
       [pacienteId]
     );
     const pac = pacRows[0] || {};
-    if (pacienteYaTienePerfil(pac, perfilId, tipoEmo)) return false;
+    if (pacienteYaTienePerfil(pac, perfilId, tipoEmo, cond)) return false;
 
     const entradaPerfil = {
       emo_perfil_id: perfilId,
       perfil_nombre: nombrePerfil,
       emo_tipo: tipoEmo,
+      condiciones: cond,
     };
     const perfilesMerged = mergePerfilAplicadoJson(pac.perfiles_aplicados_json, entradaPerfil);
     await connection.execute(
@@ -205,12 +254,13 @@ async function aplicarSolicitudAgregarAlPedido(connection, opts) {
       [perfilId, tipoEmo, JSON.stringify(perfilesMerged), pacienteId]
     );
 
-    const gKey = `${perfilId}|${tipoEmo}`;
+    const gKey = clavePerfilCondSolicitud(perfilId, tipoEmo, cond);
     if (!perfilesAplicadosPedido.has(gKey)) {
       perfilesAplicadosPedido.set(gKey, {
         perfilId,
         tipoEmo,
         nombre: nombrePerfil,
+        condicionesFirma: firmaCondicionesSolicitud(cond.codigos),
         pacienteIds: new Set(),
       });
     }
@@ -286,8 +336,8 @@ async function aplicarSolicitudAgregarAlPedido(connection, opts) {
     if (cantidadPerfil <= 0) continue;
     await connection.execute(
       `INSERT INTO pedido_items
-         (pedido_id, tipo_item, perfil_id, tipo_emo, examen_id, nombre, cantidad, precio_base)
-       VALUES (?, 'PERFIL', ?, ?, NULL, ?, ?, ?)
+         (pedido_id, tipo_item, perfil_id, tipo_emo, examen_id, nombre, cantidad, precio_base, condiciones_firma)
+       VALUES (?, 'PERFIL', ?, ?, NULL, ?, ?, ?, ?)
        ON DUPLICATE KEY UPDATE cantidad = cantidad + VALUES(cantidad), precio_base = VALUES(precio_base)`,
       [
         pedido_id,
@@ -296,6 +346,7 @@ async function aplicarSolicitudAgregarAlPedido(connection, opts) {
         grupo.nombre,
         cantidadPerfil,
         precioPerfil,
+        grupo.condicionesFirma || '',
       ]
     );
   }

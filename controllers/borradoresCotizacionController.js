@@ -28,6 +28,36 @@ const chunkSessions = require('../utils/borradoresCotizacionSessions');
 const ROLES_VALIDOS = new Set(['manager', 'vendedor']);
 const MAX_PARSEO_BYTES = 512 * 1024; // 512 KB de JSON: suficiente para docenas de perfiles
 
+/** Condicionales de un ítem de perfil (propuesta → cotización). */
+function normalizarCondicionesItemBackend(raw) {
+  if (!raw || typeof raw !== 'object') return { codigos: [], nota: null };
+  const codigos = Array.isArray(raw.codigos)
+    ? [
+        ...new Set(
+          raw.codigos
+            .map((c) => String(c || '').trim().toUpperCase())
+            .filter(Boolean)
+        ),
+      ].sort((a, b) => a.localeCompare(b))
+    : [];
+  const notaRaw = raw.nota != null ? String(raw.nota).trim() : '';
+  return {
+    codigos,
+    nota: notaRaw ? notaRaw.slice(0, 240) : null,
+  };
+}
+
+function firmaCondicionesBackend(codigos) {
+  const n = Array.isArray(codigos)
+    ? [
+        ...new Set(
+          codigos.map((c) => String(c || '').trim().toUpperCase()).filter(Boolean)
+        ),
+      ].sort((a, b) => a.localeCompare(b))
+    : [];
+  return n.join(',');
+}
+
 /* -------------------------------------------------------------------------- */
 /* Helpers de key S3                                                          */
 /* -------------------------------------------------------------------------- */
@@ -199,6 +229,7 @@ function normalizeParseo(rawJson, meta) {
         perfil_id: matched && it.perfil_id != null ? Number(it.perfil_id) || null : null,
         nombre_bd: it.nombre_bd ? String(it.nombre_bd).slice(0, 300) : null,
         examenes,
+        condiciones: normalizarCondicionesItemBackend(it.condiciones),
       };
     }
     // EXAMEN
@@ -728,6 +759,8 @@ async function adjuntarAPedido(req, res) {
         const tipoEmo = String(it.tipo_emo).toUpperCase();
         const perfilNombre = it.nombre_bd || it.nombre_archivo || 'Perfil';
         const examenes = Array.isArray(it.examenes) ? it.examenes : [];
+        const condiciones = normalizarCondicionesItemBackend(it.condiciones);
+        const condicionesFirma = firmaCondicionesBackend(condiciones.codigos);
 
         if (examenes.length === 0) {
           // Perfil sin detalle de exámenes: guardamos la fila PERFIL (precio total).
@@ -743,7 +776,15 @@ async function adjuntarAPedido(req, res) {
             precio_final: precio_base,
             variacion_pct: 0,
             subtotal: precio_base * cantidad,
-            examenes_snapshot_json: null,
+            examenes_snapshot_json: {
+              origen: 'perfil',
+              snapshot_at: new Date().toISOString(),
+              perfil_id: perfilId,
+              perfil_nombre: perfilNombre,
+              tipo_emo: tipoEmo,
+              condiciones,
+              condiciones_firma: condicionesFirma,
+            },
           });
           continue;
         }
@@ -778,6 +819,8 @@ async function adjuntarAPedido(req, res) {
               nombre_catalogo: nombreEx,
               precio_archivo: precio,
               nombre_archivo: ex.nombre_archivo || null,
+              condiciones,
+              condiciones_firma: condicionesFirma,
             },
           });
         }
@@ -1175,7 +1218,7 @@ async function buscarPerfilesCatalogo(req, res) {
             )
           GROUP BY p.id, p.nombre, p.visibilidad
           ORDER BY
-            CASE WHEN UPPER(COALESCE(p.visibilidad, 'GLOBAL')) = 'GLOBAL' THEN 0 ELSE 1 END,
+            CASE WHEN UPPER(COALESCE(p.visibilidad, 'GLOBAL')) = 'GLOBAL' THEN 1 ELSE 0 END,
             CASE WHEN LOWER(p.nombre) LIKE LOWER(?) THEN 0 ELSE 1 END,
             p.nombre ASC
           LIMIT 40`,
@@ -1218,7 +1261,7 @@ async function buscarPerfilesCatalogo(req, res) {
 
     if (tipoEmo) {
       const sortVis = (a, b) =>
-        (a.visibilidad === 'PUBLICO' ? 0 : 1) - (b.visibilidad === 'PUBLICO' ? 0 : 1);
+        (a.visibilidad === 'PRIVADO' ? 0 : 1) - (b.visibilidad === 'PRIVADO' ? 0 : 1);
       perfiles = [
         ...perfiles.filter((p) => p.tiene_tipo_filtro).sort(sortVis),
         ...perfiles.filter((p) => !p.tiene_tipo_filtro).sort(sortVis),

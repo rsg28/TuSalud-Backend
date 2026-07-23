@@ -18,12 +18,39 @@ function precioSnapshot(valor) {
   return Number.isFinite(n) && n >= 0 ? n : 0;
 }
 
-function clavePerfil(perfilId, emoTipo) {
-  return `${perfilId}:${emoTipo}`;
+function clavePerfil(perfilId, emoTipo, condicionesFirma) {
+  return `${perfilId}:${emoTipo}:${condicionesFirma || ''}`;
 }
 
-function claveItemPedido(examenId, perfilOrigenId, perfilOrigenTipoEmo) {
-  return `${examenId}|${perfilOrigenId ?? 0}|${perfilOrigenTipoEmo ?? ''}`;
+function claveItemPedido(examenId, perfilOrigenId, perfilOrigenTipoEmo, condicionesFirma) {
+  return `${examenId}|${perfilOrigenId ?? 0}|${perfilOrigenTipoEmo ?? ''}|${condicionesFirma || ''}`;
+}
+
+function normalizarCondicionesSnap(raw) {
+  if (!raw || typeof raw !== 'object') return { codigos: [], nota: null };
+  const codigos = Array.isArray(raw.codigos)
+    ? [
+        ...new Set(
+          raw.codigos
+            .map((c) => String(c || '').trim().toUpperCase())
+            .filter(Boolean)
+        ),
+      ].sort((a, b) => a.localeCompare(b))
+    : [];
+  const notaRaw = raw.nota != null ? String(raw.nota).trim() : '';
+  return { codigos, nota: notaRaw ? notaRaw.slice(0, 240) : null };
+}
+
+function firmaCondicionesSnap(codigos) {
+  return Array.isArray(codigos)
+    ? [
+        ...new Set(
+          codigos.map((c) => String(c || '').trim().toUpperCase()).filter(Boolean)
+        ),
+      ]
+        .sort((a, b) => a.localeCompare(b))
+        .join(',')
+    : '';
 }
 
 function parseExamenSnapshotRef(raw) {
@@ -47,11 +74,13 @@ function parsePerfilSnapshot(raw) {
   const examenes = (Array.isArray(raw.examenes) ? raw.examenes : [])
     .map(parseExamenSnapshotRef)
     .filter(Boolean);
+  const condiciones = normalizarCondicionesSnap(raw.condiciones);
   return {
     perfil_id,
     perfil_nombre: String(raw.perfil_nombre ?? `Perfil ${perfil_id}`).trim(),
     emo_tipo,
     examenes,
+    condiciones,
   };
 }
 
@@ -109,6 +138,7 @@ function buildSnapItemPedido({
   perfilId,
   perfilNombre,
   tipoEmo,
+  condiciones,
 }) {
   const snap = {
     origen,
@@ -125,6 +155,9 @@ function buildSnapItemPedido({
     snap.perfil_id = perfilId;
     snap.perfil_nombre = perfilNombre;
     snap.tipo_emo = tipoEmo;
+    const cond = normalizarCondicionesSnap(condiciones);
+    snap.condiciones = cond;
+    snap.condiciones_firma = firmaCondicionesSnap(cond.codigos);
   }
   return snap;
 }
@@ -138,6 +171,7 @@ function buildWizardPacienteSnapshotJson(pac) {
       perfil_id: pr.perfil_id,
       perfil_nombre: pr.perfil_nombre,
       emo_tipo: pr.emo_tipo,
+      condiciones: pr.condiciones || { codigos: [], nota: null },
       examenes: pr.examenes.map((ex) => ({
         examen_id: ex.examen_id,
         nombre: ex.nombre,
@@ -173,11 +207,13 @@ function expandirSnapshotPacientesAPedido(pacientesRaw) {
       emo_perfil_id: pr.perfil_id,
       perfil_nombre: pr.perfil_nombre,
       emo_tipo: pr.emo_tipo,
+      condiciones: pr.condiciones || { codigos: [], nota: null },
     }));
     const examenIds = new Set();
 
     for (const pr of pac.perfiles) {
-      const bucketKey = clavePerfil(pr.perfil_id, pr.emo_tipo);
+      const firma = firmaCondicionesSnap(pr.condiciones?.codigos);
+      const bucketKey = clavePerfil(pr.perfil_id, pr.emo_tipo, firma);
       let bucket = perfilBuckets.get(bucketKey);
       if (!bucket) {
         bucket = new Map();
@@ -194,6 +230,8 @@ function expandirSnapshotPacientesAPedido(pacientesRaw) {
             perfilId: pr.perfil_id,
             perfilNombre: pr.perfil_nombre,
             tipoEmo: pr.emo_tipo,
+            condiciones: pr.condiciones || { codigos: [], nota: null },
+            condicionesFirma: firma,
           },
         });
       }
@@ -244,6 +282,7 @@ function expandirSnapshotPacientesAPedido(pacientesRaw) {
         perfilId: meta.perfilId,
         perfilNombre: meta.perfilNombre,
         tipoEmo: meta.tipoEmo,
+        condiciones: meta.condiciones,
       });
       items.push({
         tipo_item: 'EXAMEN',
@@ -255,6 +294,8 @@ function expandirSnapshotPacientesAPedido(pacientesRaw) {
         perfil_origen_id: meta.perfilId,
         perfil_origen_nombre: meta.perfilNombre,
         perfil_origen_tipo_emo: meta.tipoEmo,
+        condiciones: meta.condiciones,
+        condiciones_firma: meta.condicionesFirma || '',
         examenes_snapshot_json: snap,
       });
     }
@@ -308,7 +349,7 @@ async function sincronizarPedidoWizardSnapshot(dbConn, pedidoId, pacientesRaw, o
   const [existingRows] = await dbConn.execute(
     `SELECT id, examen_id, cantidad, precio_base,
             perfil_origen_id, perfil_origen_tipo_emo, perfil_origen_nombre,
-            examenes_snapshot_json, nombre
+            examenes_snapshot_json, nombre, condiciones_firma
      FROM pedido_items
      WHERE pedido_id = ? AND tipo_item = 'EXAMEN'`,
     [pedidoId]
@@ -317,7 +358,12 @@ async function sincronizarPedidoWizardSnapshot(dbConn, pedidoId, pacientesRaw, o
   const existingByKey = new Map();
   for (const row of existingRows) {
     existingByKey.set(
-      claveItemPedido(row.examen_id, row.perfil_origen_id, row.perfil_origen_tipo_emo),
+      claveItemPedido(
+        row.examen_id,
+        row.perfil_origen_id,
+        row.perfil_origen_tipo_emo,
+        row.condiciones_firma || ''
+      ),
       row
     );
   }
@@ -329,7 +375,8 @@ async function sincronizarPedidoWizardSnapshot(dbConn, pedidoId, pacientesRaw, o
     const key = claveItemPedido(
       item.examen_id,
       item.perfil_origen_id ?? null,
-      item.perfil_origen_tipo_emo ?? null
+      item.perfil_origen_tipo_emo ?? null,
+      item.condiciones_firma || ''
     );
     let match = existingByKey.get(key);
     if (!match && item.perfil_origen_id == null) {
@@ -350,13 +397,14 @@ async function sincronizarPedidoWizardSnapshot(dbConn, pedidoId, pacientesRaw, o
       perfilId: item.perfil_origen_id ?? undefined,
       perfilNombre: item.perfil_origen_nombre ?? undefined,
       tipoEmo: item.perfil_origen_tipo_emo ?? undefined,
+      condiciones: item.condiciones,
     });
     const snapJson = JSON.stringify(snapObj);
 
     if (match) {
       await dbConn.execute(
-        'UPDATE pedido_items SET cantidad = ?, examenes_snapshot_json = ? WHERE id = ?',
-        [item.cantidad, snapJson, match.id]
+        'UPDATE pedido_items SET cantidad = ?, examenes_snapshot_json = ?, condiciones_firma = ? WHERE id = ?',
+        [item.cantidad, snapJson, item.condiciones_firma || '', match.id]
       );
       itemsActualizados += 1;
       continue;
@@ -371,8 +419,9 @@ async function sincronizarPedidoWizardSnapshot(dbConn, pedidoId, pacientesRaw, o
     await dbConn.execute(
       `INSERT INTO pedido_items (
          pedido_id, tipo_item, perfil_id, tipo_emo, examen_id, nombre, cantidad, precio_base,
-         perfil_origen_id, perfil_origen_tipo_emo, perfil_origen_nombre, examenes_snapshot_json
-       ) VALUES (?, 'EXAMEN', NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         perfil_origen_id, perfil_origen_tipo_emo, perfil_origen_nombre, examenes_snapshot_json,
+         condiciones_firma
+       ) VALUES (?, 'EXAMEN', NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         pedidoId,
         item.examen_id,
@@ -383,6 +432,7 @@ async function sincronizarPedidoWizardSnapshot(dbConn, pedidoId, pacientesRaw, o
         item.perfil_origen_tipo_emo ?? null,
         item.perfil_origen_nombre ?? null,
         snapJson,
+        item.condiciones_firma || '',
       ]
     );
     itemsActualizados += 1;
@@ -447,14 +497,21 @@ function mergePerfilEnWizardPacienteSnapshotJson(rawJson, opts = {}) {
     })
     .filter(Boolean);
 
+  const condiciones = normalizarCondicionesSnap(opts.condiciones);
+  const firma = firmaCondicionesSnap(condiciones.codigos);
+  const keyNueva = clavePerfil(perfilId, tipoEmo, firma);
+
   const perfiles = Array.isArray(snap.perfiles) ? [...snap.perfiles] : [];
   let adicionales = Array.isArray(snap.adicionales) ? [...snap.adicionales] : [];
   const idsPerfil = new Set(examenesNorm.map((e) => e.examen_id));
   adicionales = adicionales.filter((a) => !idsPerfil.has(Number(a.examen_id)));
 
-  const idx = perfiles.findIndex(
-    (pr) => Number(pr.perfil_id) === perfilId && String(pr.emo_tipo || '').toUpperCase() === tipoEmo
-  );
+  const idx = perfiles.findIndex((pr) => {
+    const f = firmaCondicionesSnap(
+      normalizarCondicionesSnap(pr.condiciones).codigos
+    );
+    return clavePerfil(pr.perfil_id, pr.emo_tipo, f) === keyNueva;
+  });
   if (idx >= 0) {
     const prev = perfiles[idx];
     const prevEx = Array.isArray(prev.examenes) ? [...prev.examenes] : [];
@@ -467,6 +524,7 @@ function mergePerfilEnWizardPacienteSnapshotJson(rawJson, opts = {}) {
     perfiles[idx] = {
       ...prev,
       perfil_nombre: opts.perfilNombre || prev.perfil_nombre,
+      condiciones,
       examenes: prevEx,
     };
   } else {
@@ -474,6 +532,7 @@ function mergePerfilEnWizardPacienteSnapshotJson(rawJson, opts = {}) {
       perfil_id: perfilId,
       perfil_nombre: opts.perfilNombre || `Perfil ${perfilId}`,
       emo_tipo: tipoEmo,
+      condiciones,
       examenes: examenesNorm,
     });
   }
