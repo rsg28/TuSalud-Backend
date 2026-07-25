@@ -1178,7 +1178,7 @@ async function categoriasPorExamenIds(req, res) {
  * GET /buscar-perfiles?q=...&tipo_emo=PREOC|ANUAL|RETIRO|VISITA&empresa_id=
  * Búsqueda por nombre. Públicos (GLOBAL) siempre; privados solo si están
  * asignados a empresa_id (directo o por grupo). Sin empresa_id → solo públicos.
- * tipo_emo prioriza, no oculta.
+ * Si viene tipo_emo, solo perfiles que YA tienen ese tipo con exámenes.
  */
 async function buscarPerfilesCatalogo(req, res) {
   try {
@@ -1260,12 +1260,10 @@ async function buscarPerfilesCatalogo(req, res) {
     });
 
     if (tipoEmo) {
+      perfiles = perfiles.filter((p) => p.tiene_tipo_filtro);
       const sortVis = (a, b) =>
         (a.visibilidad === 'PRIVADO' ? 0 : 1) - (b.visibilidad === 'PRIVADO' ? 0 : 1);
-      perfiles = [
-        ...perfiles.filter((p) => p.tiene_tipo_filtro).sort(sortVis),
-        ...perfiles.filter((p) => !p.tiene_tipo_filtro).sort(sortVis),
-      ];
+      perfiles = perfiles.sort(sortVis);
     }
 
     return res.json({ perfiles });
