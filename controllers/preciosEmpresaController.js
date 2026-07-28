@@ -196,33 +196,46 @@ exports.buscarExamenes = async (req, res) => {
 // Listar todas las categorías de exámenes activos en la sede (incluso si
 // no tienen precio asignado todavía). Devuelve además cuántos están sin asignar
 // para que el manager pueda priorizar la carga del catálogo.
+// Listar categorías con conteo de exámenes activos y sin precio en la sede.
+// Agrupa por examen_id antes de sumar: si hay varias filas en examen_precio
+// (histórico / duplicados), no se infla `sin_precio` ni `cantidad`.
 exports.listarCategorias = async (req, res) => {
   try {
     const { sede_id } = req.query;
     if (!sede_id) {
       return res.status(400).json({ error: 'sede_id es requerido' });
     }
+    const d16 = sqlPrecioDesde16Expr('ep', 'ep_general');
+    const h15 = sqlPrecioHasta15Expr('ep', 'ep_general');
     const [rows] = await pool.query(
       `SELECT
-         ${SQL_CATEGORIA_EXAMEN} AS nombre,
+         cat_nombre AS nombre,
          COUNT(*) AS cantidad,
-         SUM(CASE WHEN COALESCE(
-                  ${sqlPrecioDesde16Expr('ep', 'ep_general')},
-                  ${sqlPrecioHasta15Expr('ep', 'ep_general')}
-                ) IS NULL
-                  OR COALESCE(
-                  ${sqlPrecioDesde16Expr('ep', 'ep_general')},
-                  ${sqlPrecioHasta15Expr('ep', 'ep_general')},
-                  0
-                ) = 0
-                  THEN 1 ELSE 0 END) AS sin_precio
-       FROM examenes e
-       LEFT JOIN emo_categorias ec ON ec.id = e.categoria_id
-       LEFT JOIN examen_precio ep ON e.id = ep.examen_id AND ep.sede_id = ?
-       LEFT JOIN examen_precio ep_general ON e.id = ep_general.examen_id AND ep_general.sede_id IS NULL
-       WHERE e.activo = 1
-       GROUP BY ${SQL_CATEGORIA_EXAMEN}
-       ORDER BY nombre`,
+         SUM(sin_p) AS sin_precio
+       FROM (
+         SELECT
+           e.id AS examen_id,
+           ${SQL_CATEGORIA_EXAMEN} AS cat_nombre,
+           CASE
+             WHEN COALESCE(MAX(${d16}), MAX(${h15})) IS NULL
+               OR COALESCE(MAX(${d16}), MAX(${h15}), 0) = 0
+             THEN 1 ELSE 0
+           END AS sin_p
+         FROM examenes e
+         LEFT JOIN emo_categorias ec ON ec.id = e.categoria_id
+         LEFT JOIN examen_precio ep
+           ON e.id = ep.examen_id
+          AND ep.sede_id = ?
+          AND (ep.vigente_hasta IS NULL OR ep.vigente_hasta >= CURDATE())
+         LEFT JOIN examen_precio ep_general
+           ON e.id = ep_general.examen_id
+          AND ep_general.sede_id IS NULL
+          AND (ep_general.vigente_hasta IS NULL OR ep_general.vigente_hasta >= CURDATE())
+         WHERE e.activo = 1
+         GROUP BY e.id, ${SQL_CATEGORIA_EXAMEN}
+       ) por_examen
+       GROUP BY cat_nombre
+       ORDER BY cat_nombre`,
       [sede_id]
     );
     res.json({ categorias: rows });
@@ -249,17 +262,24 @@ exports.listarExamenesPorCategoria = async (req, res) => {
         e.nombre AS nombre_examen,
         ${SQL_CATEGORIA_EXAMEN} AS examen_principal,
         e.codigo,
-        ${precioExpr} AS precio,
-        ${sqlPrecioHasta15Expr('ep', 'ep_general')} AS precio_hasta_15,
-        ${sqlPrecioDesde16Expr('ep', 'ep_general')} AS precio_desde_16,
-        ep.id AS precio_sede_id,
-        ep_general.id AS precio_general_id
+        MAX(${precioExpr}) AS precio,
+        MAX(${sqlPrecioHasta15Expr('ep', 'ep_general')}) AS precio_hasta_15,
+        MAX(${sqlPrecioDesde16Expr('ep', 'ep_general')}) AS precio_desde_16,
+        MAX(ep.id) AS precio_sede_id,
+        MAX(ep_general.id) AS precio_general_id
        FROM examenes e
        LEFT JOIN emo_categorias ec ON ec.id = e.categoria_id
-       LEFT JOIN examen_precio ep ON e.id = ep.examen_id AND ep.sede_id = ?
-       LEFT JOIN examen_precio ep_general ON e.id = ep_general.examen_id AND ep_general.sede_id IS NULL
+       LEFT JOIN examen_precio ep
+         ON e.id = ep.examen_id
+        AND ep.sede_id = ?
+        AND (ep.vigente_hasta IS NULL OR ep.vigente_hasta >= CURDATE())
+       LEFT JOIN examen_precio ep_general
+         ON e.id = ep_general.examen_id
+        AND ep_general.sede_id IS NULL
+        AND (ep_general.vigente_hasta IS NULL OR ep_general.vigente_hasta >= CURDATE())
        WHERE e.activo = 1
          AND (${SQL_CATEGORIA_EXAMEN} = ?)
+       GROUP BY e.id, e.nombre, e.codigo, ${SQL_CATEGORIA_EXAMEN}
        ORDER BY e.nombre`,
       [sede_id, categoriaDecoded]
     );
