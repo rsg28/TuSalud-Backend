@@ -104,6 +104,14 @@ function parsePacienteSnapshot(raw) {
     nombre_completo,
     cargo: raw.cargo != null ? String(raw.cargo).trim() || null : null,
     area: raw.area != null ? String(raw.area).trim() || null : null,
+    sexo: (() => {
+      const s = String(raw.sexo ?? '').trim().toUpperCase();
+      return s === 'HOMBRE' || s === 'MUJER' ? s : null;
+    })(),
+    fecha_nacimiento: (() => {
+      const f = raw.fecha_nacimiento != null ? String(raw.fecha_nacimiento).trim() : '';
+      return /^\d{4}-\d{2}-\d{2}$/.test(f) ? f : null;
+    })(),
     perfiles,
     adicionales,
   };
@@ -252,6 +260,8 @@ function expandirSnapshotPacientesAPedido(pacientesRaw) {
       nombre_completo: pac.nombre_completo,
       cargo: pac.cargo,
       area: pac.area,
+      sexo: pac.sexo ?? null,
+      fecha_nacimiento: pac.fecha_nacimiento ?? null,
       examenes: [...examenIds],
       emo_tipo: pac.perfiles[0]?.emo_tipo ?? null,
       emo_perfil_id: pac.perfiles[0]?.perfil_id ?? null,

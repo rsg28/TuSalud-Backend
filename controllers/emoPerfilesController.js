@@ -87,6 +87,52 @@ function normalizarIdsArray(arr) {
 
 const VISIBILIDADES_VALIDAS = ['GLOBAL', 'PRIVADO'];
 
+/**
+ * Normaliza el JSON de condicionales del catálogo de perfiles.
+ * Formato: `{ codigos: string[], nota: string | null }`.
+ * `null` = perfil sin condicional. Cualquier objeto que no calce el shape se degrada a `null`.
+ */
+function normalizarCondicionesJson(raw) {
+  if (raw == null) return null;
+  let obj = raw;
+  if (typeof raw === 'string') {
+    const trimmed = raw.trim();
+    if (!trimmed) return null;
+    try {
+      obj = JSON.parse(trimmed);
+    } catch (_) {
+      return null;
+    }
+  }
+  if (obj == null || typeof obj !== 'object') return null;
+  const codigos = Array.isArray(obj.codigos)
+    ? [
+        ...new Set(
+          obj.codigos
+            .map((c) => String(c || '').trim().toUpperCase())
+            .filter(Boolean)
+        ),
+      ].sort((a, b) => a.localeCompare(b))
+    : [];
+  const notaRaw = obj.nota != null ? String(obj.nota).trim() : '';
+  const nota = notaRaw ? notaRaw.slice(0, 240) : null;
+  if (codigos.length === 0 && !nota) return null;
+  return { codigos, nota };
+}
+
+/** Parsea `condiciones_json` de la BD para devolverlo al cliente. */
+function condicionesDesdeBd(raw) {
+  if (raw == null) return null;
+  if (typeof raw === 'string') {
+    try {
+      return normalizarCondicionesJson(JSON.parse(raw));
+    } catch (_) {
+      return null;
+    }
+  }
+  return normalizarCondicionesJson(raw);
+}
+
 exports.crearPerfil = async (req, res) => {
   try {
     const nombre = String(req.body?.nombre ?? '').trim();
@@ -96,6 +142,7 @@ exports.crearPerfil = async (req, res) => {
     const visibilidad = VISIBILIDADES_VALIDAS.includes(visibilidadRaw) ? visibilidadRaw : 'GLOBAL';
     const empresaIds = normalizarIdsArray(req.body?.empresa_ids);
     const grupoIds = normalizarIdsArray(req.body?.grupo_ids);
+    const condiciones = normalizarCondicionesJson(req.body?.condiciones);
 
     // Coherencia: si se piden asignaciones (empresas o grupos) el perfil debe ser PRIVADO.
     const visibilidadFinal =
@@ -113,8 +160,8 @@ exports.crearPerfil = async (req, res) => {
     try {
       await conn.beginTransaction();
       const [result] = await conn.execute(
-        'INSERT INTO emo_perfiles (nombre, visibilidad) VALUES (?, ?)',
-        [nombre, visibilidadFinal]
+        'INSERT INTO emo_perfiles (nombre, visibilidad, condiciones_json) VALUES (?, ?, ?)',
+        [nombre, visibilidadFinal, condiciones ? JSON.stringify(condiciones) : null]
       );
       const perfilId = result.insertId;
 
@@ -135,9 +182,13 @@ exports.crearPerfil = async (req, res) => {
       await conn.commit();
 
       const [rows] = await pool.execute(
-        'SELECT id, nombre, visibilidad FROM emo_perfiles WHERE id = ?',
+        'SELECT id, nombre, visibilidad, condiciones_json FROM emo_perfiles WHERE id = ?',
         [perfilId]
       );
+      const perfil = rows[0]
+        ? { ...rows[0], condiciones: condicionesDesdeBd(rows[0].condiciones_json) }
+        : null;
+      if (perfil) delete perfil.condiciones_json;
 
       // Notificar a clientes (best-effort).
       if (visibilidadFinal === 'PRIVADO') {
@@ -154,7 +205,7 @@ exports.crearPerfil = async (req, res) => {
         }
       }
 
-      return res.status(201).json({ perfil: rows[0] });
+      return res.status(201).json({ perfil });
     } catch (err) {
       await conn.rollback();
       throw err;
@@ -333,7 +384,7 @@ exports.listarVisiblesParaEmpresa = async (req, res) => {
     // Dentro de cada bucket, alfabético. De esta forma los popups y los pickers
     // muestran primero "lo de la empresa" antes que el catálogo genérico.
     const [rows] = await pool.execute(
-      `SELECT p.id, p.nombre, p.visibilidad,
+      `SELECT p.id, p.nombre, p.visibilidad, p.condiciones_json,
               CASE WHEN p.visibilidad = 'GLOBAL' THEN 1 ELSE 0 END AS es_global,
               CASE WHEN EXISTS (
                 SELECT 1 FROM emo_perfil_asignacion epa
@@ -379,6 +430,7 @@ exports.listarVisiblesParaEmpresa = async (req, res) => {
         id: r.id,
         nombre: r.nombre,
         visibilidad: r.visibilidad,
+        condiciones: condicionesDesdeBd(r.condiciones_json),
         origenes,
       };
     });
@@ -435,7 +487,7 @@ exports.listarPerfiles = async (req, res) => {
     const filtrarPorTipo = tipoEmoRaw && EMO_TIPOS_VALIDOS.includes(tipoEmoRaw) ? true : false;
 
     // Base de perfiles: si hay búsqueda y/o filtro por tipo, se reduce en BD.
-    let sql = 'SELECT id, nombre, visibilidad FROM emo_perfiles';
+    let sql = 'SELECT id, nombre, visibilidad, condiciones_json FROM emo_perfiles';
     const params = [];
     const wheres = [];
     if (q) {
@@ -504,6 +556,7 @@ exports.listarPerfiles = async (req, res) => {
         id: p.id,
         nombre: p.nombre,
         visibilidad: p.visibilidad,
+        condiciones: condicionesDesdeBd(p.condiciones_json),
         empresas: empresasPorPerfil.get(p.id) || [],
         grupos: gruposPorPerfil.get(p.id) || [],
       }));
@@ -529,6 +582,7 @@ exports.listarPerfiles = async (req, res) => {
         id: p.id,
         nombre: p.nombre,
         visibilidad: p.visibilidad,
+        condiciones: condicionesDesdeBd(p.condiciones_json),
         empresas: empresasPorPerfil.get(p.id) || [],
         grupos: gruposPorPerfil.get(p.id) || [],
         examenes_por_tipo: { PREOC: [], ANUAL: [], RETIRO: [], VISITA: [] },
@@ -672,22 +726,46 @@ exports.obtenerExamenesPorTipo = async (req, res) => {
 exports.actualizarPerfil = async (req, res) => {
   try {
     const perfilId = parseInt(String(req.params?.perfilId ?? ''), 10);
-    const nombre = String(req.body?.nombre ?? '').trim();
     if (!Number.isInteger(perfilId) || perfilId <= 0) return res.status(400).json({ error: 'perfilId inválido' });
-    if (!nombre) return res.status(400).json({ error: 'nombre es requerido' });
 
     const [perfilRows] = await pool.execute('SELECT id FROM emo_perfiles WHERE id = ?', [perfilId]);
     if (perfilRows.length === 0) return res.status(404).json({ error: 'Perfil no encontrado' });
 
-    const [dup] = await pool.execute(
-      'SELECT id FROM emo_perfiles WHERE LOWER(nombre) = LOWER(?) AND id <> ? LIMIT 1',
-      [nombre, perfilId]
-    );
-    if (dup.length > 0) return res.status(409).json({ error: 'Ya existe otro perfil con ese nombre' });
+    const bodyHasNombre = Object.prototype.hasOwnProperty.call(req.body || {}, 'nombre');
+    const bodyHasCondiciones = Object.prototype.hasOwnProperty.call(req.body || {}, 'condiciones');
+    if (!bodyHasNombre && !bodyHasCondiciones) {
+      return res.status(400).json({ error: 'Nada que actualizar (nombre o condiciones requeridos)' });
+    }
 
-    await pool.execute('UPDATE emo_perfiles SET nombre = ? WHERE id = ?', [nombre, perfilId]);
-    const [rows] = await pool.execute('SELECT id, nombre FROM emo_perfiles WHERE id = ?', [perfilId]);
-    res.json({ perfil: rows[0] });
+    const sets = [];
+    const params = [];
+    if (bodyHasNombre) {
+      const nombre = String(req.body?.nombre ?? '').trim();
+      if (!nombre) return res.status(400).json({ error: 'nombre es requerido' });
+      const [dup] = await pool.execute(
+        'SELECT id FROM emo_perfiles WHERE LOWER(nombre) = LOWER(?) AND id <> ? LIMIT 1',
+        [nombre, perfilId]
+      );
+      if (dup.length > 0) return res.status(409).json({ error: 'Ya existe otro perfil con ese nombre' });
+      sets.push('nombre = ?');
+      params.push(nombre);
+    }
+    if (bodyHasCondiciones) {
+      const condiciones = normalizarCondicionesJson(req.body?.condiciones);
+      sets.push('condiciones_json = ?');
+      params.push(condiciones ? JSON.stringify(condiciones) : null);
+    }
+    params.push(perfilId);
+    await pool.execute(`UPDATE emo_perfiles SET ${sets.join(', ')} WHERE id = ?`, params);
+
+    const [rows] = await pool.execute(
+      'SELECT id, nombre, condiciones_json FROM emo_perfiles WHERE id = ?',
+      [perfilId]
+    );
+    const perfil = rows[0]
+      ? { id: rows[0].id, nombre: rows[0].nombre, condiciones: condicionesDesdeBd(rows[0].condiciones_json) }
+      : null;
+    res.json({ perfil });
   } catch (error) {
     console.error('Error al actualizar perfil EMO:', error);
     res.status(500).json({ error: 'Error al actualizar perfil EMO', details: error.message });

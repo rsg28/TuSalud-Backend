@@ -203,6 +203,7 @@ CREATE TABLE `emo_perfiles` (
   `nombre` varchar(255) NOT NULL,
   `descripcion` text,
   `tipo` enum('PERFIL','ADICIONAL') NOT NULL DEFAULT 'PERFIL',
+  `condiciones_json` json DEFAULT NULL COMMENT 'Condicionales del perfil (sexo/edad/clínico + nota). NULL = aplica a todos.',
   `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),

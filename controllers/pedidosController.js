@@ -853,14 +853,18 @@ const crearPedido = async (req, res) => {
         }
       }
       const [insPac] = await connection.execute(
-        `INSERT INTO pedido_pacientes (pedido_id, dni, nombre_completo, cargo, area, emo_tipo, emo_perfil_id, perfiles_aplicados_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO pedido_pacientes (pedido_id, dni, nombre_completo, cargo, area, sexo, fecha_nacimiento, emo_tipo, emo_perfil_id, perfiles_aplicados_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           pedido_id,
           dni,
           nombre_completo,
           emp.cargo ?? null,
           emp.area ?? null,
+          emp.sexo === 'HOMBRE' || emp.sexo === 'MUJER' ? emp.sexo : null,
+          emp.fecha_nacimiento && /^\d{4}-\d{2}-\d{2}$/.test(String(emp.fecha_nacimiento))
+            ? String(emp.fecha_nacimiento)
+            : null,
           emp.emo_tipo ?? null,
           emp.emo_perfil_id ?? null,
           perfilesJson,
@@ -1775,7 +1779,7 @@ const cargarEmpleados = async (req, res) => {
 
     let agregados = 0;
     for (const emp of empleados || []) {
-      const { dni, nombre_completo, cargo, area, examenes, emo_tipo, emo_perfil_id, perfiles_aplicados } = emp;
+      const { dni, nombre_completo, cargo, area, sexo, fecha_nacimiento, examenes, emo_tipo, emo_perfil_id, perfiles_aplicados } = emp;
       if (!dni || !nombre_completo) continue;
 
       let perfilesJson = null;
@@ -1787,17 +1791,25 @@ const cargarEmpleados = async (req, res) => {
         }
       }
 
+      const sexoNorm = sexo === 'HOMBRE' || sexo === 'MUJER' ? sexo : null;
+      const fechaNorm =
+        fecha_nacimiento && /^\d{4}-\d{2}-\d{2}$/.test(String(fecha_nacimiento))
+          ? String(fecha_nacimiento)
+          : null;
+
       await connection.execute(
-        `INSERT INTO pedido_pacientes (pedido_id, dni, nombre_completo, cargo, area, emo_tipo, emo_perfil_id, perfiles_aplicados_json) 
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO pedido_pacientes (pedido_id, dni, nombre_completo, cargo, area, sexo, fecha_nacimiento, emo_tipo, emo_perfil_id, perfiles_aplicados_json) 
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON DUPLICATE KEY UPDATE 
            nombre_completo = VALUES(nombre_completo),
            cargo = VALUES(cargo),
            area = VALUES(area),
+           sexo = VALUES(sexo),
+           fecha_nacimiento = VALUES(fecha_nacimiento),
            emo_tipo = VALUES(emo_tipo),
            emo_perfil_id = VALUES(emo_perfil_id),
            perfiles_aplicados_json = VALUES(perfiles_aplicados_json)`,
-        [pedido_id, dni, nombre_completo, cargo || null, area || null, emo_tipo ?? null, emo_perfil_id ?? null, perfilesJson]
+        [pedido_id, dni, nombre_completo, cargo || null, area || null, sexoNorm, fechaNorm, emo_tipo ?? null, emo_perfil_id ?? null, perfilesJson]
       );
 
       const [ex] = await connection.execute('SELECT id FROM pedido_pacientes WHERE pedido_id = ? AND dni = ?', [pedido_id, dni]);
