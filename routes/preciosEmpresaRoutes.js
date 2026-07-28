@@ -39,6 +39,12 @@ router.patch(
   verificarRol(['manager', 'vendedor']),
   preciosController.actualizarExamenCatalogo
 );
+router.delete(
+  '/examen/:examen_id',
+  verificarToken,
+  verificarRol(['manager', 'vendedor']),
+  preciosController.eliminarExamenCatalogo
+);
 router.put(
   '/examen/:examen_id',
   verificarToken,

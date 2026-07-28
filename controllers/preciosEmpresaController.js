@@ -758,6 +758,38 @@ exports.crearExamenCatalogo = async (req, res) => {
   }
 };
 
+/**
+ * Soft-delete de un examen del catálogo (manager / vendedor).
+ * Marca `activo = 0` para no romper cotizaciones/facturas históricas.
+ */
+exports.eliminarExamenCatalogo = async (req, res) => {
+  try {
+    const examenId = parseInt(String(req.params.examen_id), 10);
+    if (!Number.isInteger(examenId) || examenId <= 0) {
+      return res.status(400).json({ error: 'examen_id inválido' });
+    }
+
+    const [exRows] = await pool.execute(
+      'SELECT id, nombre FROM examenes WHERE id = ? AND activo = 1',
+      [examenId]
+    );
+    if (exRows.length === 0) {
+      return res.status(404).json({ error: 'Examen no encontrado' });
+    }
+
+    await pool.execute('UPDATE examenes SET activo = 0 WHERE id = ?', [examenId]);
+
+    res.json({
+      message: 'Examen eliminado del catálogo',
+      examen_id: examenId,
+      nombre: exRows[0].nombre,
+    });
+  } catch (error) {
+    console.error('Error al eliminar examen del catálogo:', error);
+    res.status(500).json({ error: 'Error al eliminar el examen' });
+  }
+};
+
 // Listar precios por sede (examen_precio)
 exports.listarPreciosSede = async (req, res) => {
   try {
