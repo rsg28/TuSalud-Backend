@@ -256,17 +256,26 @@ exports.listarExamenesPorCategoria = async (req, res) => {
     const numPacientes = parseNumPacientesQuery(num_pacientes);
     const precioExpr = sqlPrecioExamenExpr('ep', 'ep_general', String(numPacientes));
     const categoriaDecoded = decodeURIComponent(categoria || '');
+    const d16 = sqlPrecioDesde16Expr('ep', 'ep_general');
+    const h15 = sqlPrecioHasta15Expr('ep', 'ep_general');
     const [examenes] = await pool.query(
       `SELECT
         e.id AS examen_id,
-        e.nombre AS nombre_examen,
+        CASE
+          WHEN NULLIF(TRIM(e.nombre), '') IS NULL THEN CONCAT('Examen #', e.id)
+          ELSE e.nombre
+        END AS nombre_examen,
+        CASE WHEN NULLIF(TRIM(e.nombre), '') IS NULL THEN 1 ELSE 0 END AS sin_nombre,
         ${SQL_CATEGORIA_EXAMEN} AS examen_principal,
         e.codigo,
         MAX(${precioExpr}) AS precio,
-        MAX(${sqlPrecioHasta15Expr('ep', 'ep_general')}) AS precio_hasta_15,
-        MAX(${sqlPrecioDesde16Expr('ep', 'ep_general')}) AS precio_desde_16,
+        MAX(${h15}) AS precio_hasta_15,
+        MAX(${d16}) AS precio_desde_16,
         MAX(ep.id) AS precio_sede_id,
-        MAX(ep_general.id) AS precio_general_id
+        MAX(ep_general.id) AS precio_general_id,
+        CASE
+          WHEN COALESCE(MAX(${d16}), MAX(${h15}), 0) = 0 THEN 1 ELSE 0
+        END AS sin_precio
        FROM examenes e
        LEFT JOIN emo_categorias ec ON ec.id = e.categoria_id
        LEFT JOIN examen_precio ep
@@ -280,7 +289,7 @@ exports.listarExamenesPorCategoria = async (req, res) => {
        WHERE e.activo = 1
          AND (${SQL_CATEGORIA_EXAMEN} = ?)
        GROUP BY e.id, e.nombre, e.codigo, ${SQL_CATEGORIA_EXAMEN}
-       ORDER BY e.nombre`,
+       ORDER BY sin_nombre DESC, sin_precio DESC, nombre_examen ASC`,
       [sede_id, categoriaDecoded]
     );
     res.json({ examenes });
