@@ -12,6 +12,10 @@ const {
   enrichCotizacionItemsSnapshots,
 } = require('../utils/perfilSnapshot');
 const {
+  assertExamenesActivos,
+  collectExamenIdsFromCotizacionItems,
+} = require('../utils/examenesActivos');
+const {
   aplicarSolicitudAgregarAlPedido,
   marcarSolicitudPorComplementaria,
 } = require('../services/solicitudAgregarPedido');
@@ -202,6 +206,7 @@ const crearCotizacionComplementariaConConnection = async (connection, opts) => {
   const tipo = (creador_tipo === 'CLIENTE' ? 'CLIENTE' : 'VENDEDOR');
   const numero_cotizacion = await generarNumeroCotizacionComplementaria(connection);
   const itemsNorm = items.map(normalizeItem);
+  await assertExamenesActivos(connection, collectExamenIdsFromCotizacionItems(itemsNorm));
   const total = itemsNorm.reduce((acc, it) => acc + it.subtotal, 0);
   const snapJson = serializeWizardSnapshotField(wizard_snapshot_json);
   let result;
@@ -456,6 +461,7 @@ const createCotizacion = async (req, res) => {
     try {
       const numero_cotizacion = await generarNumeroCotizacion(connection);
       const itemsNorm = items.map(normalizeItem);
+      await assertExamenesActivos(connection, collectExamenIdsFromCotizacionItems(itemsNorm));
       const total = itemsNorm.reduce((acc, it) => acc + it.subtotal, 0);
       const snapJson = serializeWizardSnapshotField(wizard_snapshot_json);
 
@@ -544,6 +550,9 @@ const createCotizacion = async (req, res) => {
     }
   } catch (error) {
     console.error('Error al crear cotización:', error);
+    if (error?.code === 'EXAMENES_INACTIVOS') {
+      return res.status(400).json({ error: error.message, code: error.code });
+    }
     res.status(500).json({ error: 'Error al crear cotización' });
   }
 };
@@ -656,6 +665,9 @@ const createCotizacionComplementaria = async (req, res) => {
     }
   } catch (error) {
     console.error('Error al crear cotización complementaria:', error);
+    if (error?.code === 'EXAMENES_INACTIVOS') {
+      return res.status(400).json({ error: error.message, code: error.code });
+    }
     res.status(500).json({ error: error.message || 'Error al crear cotización complementaria' });
   }
 };
@@ -852,8 +864,18 @@ const updateCotizacion = async (req, res) => {
       // Actualizar ítems en BORRADOR, ENVIADA (vendedor revisando) o ENVIADA_AL_MANAGER (manager edita y aprueba)
       const puedeActualizarItems = ['BORRADOR', 'ENVIADA', 'ENVIADA_AL_MANAGER'].includes(existing[0].estado);
       if (items && Array.isArray(items) && puedeActualizarItems) {
-        await connection.execute('DELETE FROM cotizacion_items WHERE cotizacion_id = ?', [id]);
         const itemsNorm = items.map(normalizeItem);
+        // Al reeditar un borrador, permitir ítems ya congelados en la cotización
+        // aunque el examen se haya retirado después (el usuario puede quitarlos).
+        const [prevItems] = await connection.execute(
+          'SELECT examen_id FROM cotizacion_items WHERE cotizacion_id = ? AND examen_id IS NOT NULL',
+          [id]
+        );
+        const allowIds = (prevItems || []).map((r) => r.examen_id);
+        await assertExamenesActivos(connection, collectExamenIdsFromCotizacionItems(itemsNorm), {
+          allowIds,
+        });
+        await connection.execute('DELETE FROM cotizacion_items WHERE cotizacion_id = ?', [id]);
         for (const it of itemsNorm) {
           await insertarCotizacionItem(connection, id, it);
         }
@@ -922,6 +944,9 @@ const updateCotizacion = async (req, res) => {
     }
   } catch (error) {
     console.error('Error al actualizar cotización:', error);
+    if (error?.code === 'EXAMENES_INACTIVOS') {
+      return res.status(400).json({ error: error.message, code: error.code });
+    }
     res.status(500).json({ error: 'Error al actualizar cotización' });
   }
 };

@@ -444,7 +444,7 @@ exports.listarVisiblesParaEmpresa = async (req, res) => {
     const placeholders = perfilIds.map(() => '?').join(',');
     let mapSql = `SELECT mpe.perfil_id, mpe.tipo_emo, e.id AS examen_id, e.nombre AS nombre_examen
                   FROM emo_perfil_examenes mpe
-                  JOIN examenes e ON e.id = mpe.examen_id
+                  JOIN examenes e ON e.id = mpe.examen_id AND e.activo = 1
                   WHERE mpe.perfil_id IN (${placeholders})`;
     const mapParams = [...perfilIds];
     if (filtrarPorTipo) {
@@ -566,7 +566,7 @@ exports.listarPerfiles = async (req, res) => {
     // Incluye exámenes por tipo para que UI pueda mostrar/usar sin resolver uno a uno.
     let mapSql = `SELECT mpe.perfil_id, mpe.tipo_emo, e.id AS examen_id, e.nombre AS nombre_examen
                   FROM emo_perfil_examenes mpe
-                  JOIN examenes e ON e.id = mpe.examen_id`;
+                  JOIN examenes e ON e.id = mpe.examen_id AND e.activo = 1`;
     const mapParams = [];
     if (filtrarPorTipo) {
       mapSql += ' WHERE mpe.tipo_emo = ?';
@@ -605,6 +605,7 @@ exports.listarPerfiles = async (req, res) => {
 
 exports.guardarExamenesPorTipo = async (req, res) => {
   try {
+    const { assertExamenesActivos } = require('../utils/examenesActivos');
     const perfilId = parseInt(String(req.params?.perfilId ?? ''), 10);
     const tipoEmoRaw = String(req.body?.tipo_emo ?? '').trim().toUpperCase();
     const examenes = Array.isArray(req.body?.examenes) ? req.body.examenes : [];
@@ -615,6 +616,15 @@ exports.guardarExamenesPorTipo = async (req, res) => {
     const examenesIds = (Array.isArray(examenes) ? examenes : [])
       .map((x) => parseInt(String(x), 10))
       .filter((n) => Number.isInteger(n) && n > 0);
+
+    try {
+      await assertExamenesActivos(pool, examenesIds);
+    } catch (valErr) {
+      if (valErr?.code === 'EXAMENES_INACTIVOS') {
+        return res.status(400).json({ error: valErr.message, code: valErr.code });
+      }
+      throw valErr;
+    }
 
     const connection = await pool.getConnection();
     try {
@@ -710,7 +720,7 @@ exports.obtenerExamenesPorTipo = async (req, res) => {
     const [rows] = await pool.execute(
       `SELECT e.id AS examen_id, e.nombre AS nombre_examen
        FROM emo_perfil_examenes mpe
-       JOIN examenes e ON e.id = mpe.examen_id
+       JOIN examenes e ON e.id = mpe.examen_id AND e.activo = 1
        WHERE mpe.perfil_id = ? AND mpe.tipo_emo = ?
        ORDER BY e.nombre ASC`,
       [perfilId, tipoEmoRaw]

@@ -790,32 +790,67 @@ exports.crearExamenCatalogo = async (req, res) => {
 /**
  * Soft-delete de un examen del catálogo (manager / vendedor).
  * Marca `activo = 0` para no romper cotizaciones/facturas históricas.
+ * Limpia vínculos en perfiles EMO para que propuestas nuevas no arrastren el examen.
  */
 exports.eliminarExamenCatalogo = async (req, res) => {
+  const connection = await pool.getConnection();
   try {
     const examenId = parseInt(String(req.params.examen_id), 10);
     if (!Number.isInteger(examenId) || examenId <= 0) {
       return res.status(400).json({ error: 'examen_id inválido' });
     }
 
-    const [exRows] = await pool.execute(
+    await connection.beginTransaction();
+
+    const [exRows] = await connection.execute(
       'SELECT id, nombre FROM examenes WHERE id = ? AND activo = 1',
       [examenId]
     );
     if (exRows.length === 0) {
+      await connection.rollback();
       return res.status(404).json({ error: 'Examen no encontrado' });
     }
 
-    await pool.execute('UPDATE examenes SET activo = 0 WHERE id = ?', [examenId]);
+    const [perfilRows] = await connection.execute(
+      `SELECT DISTINCT p.id AS perfil_id, p.nombre AS perfil_nombre
+         FROM emo_perfil_examenes mpe
+         JOIN emo_perfiles p ON p.id = mpe.perfil_id
+        WHERE mpe.examen_id = ?
+        ORDER BY p.nombre ASC`,
+      [examenId]
+    );
+
+    const [delMap] = await connection.execute(
+      'DELETE FROM emo_perfil_examenes WHERE examen_id = ?',
+      [examenId]
+    );
+
+    await connection.execute('UPDATE examenes SET activo = 0 WHERE id = ?', [examenId]);
+
+    await connection.commit();
+
+    const perfilesAfectados = (perfilRows || []).map((r) => ({
+      perfil_id: r.perfil_id,
+      perfil_nombre: r.perfil_nombre,
+    }));
 
     res.json({
       message: 'Examen eliminado del catálogo',
       examen_id: examenId,
       nombre: exRows[0].nombre,
+      perfiles_afectados: perfilesAfectados,
+      mapeos_eliminados: Number(delMap?.affectedRows ?? 0),
     });
   } catch (error) {
+    try {
+      await connection.rollback();
+    } catch (_) {
+      /* ignore */
+    }
     console.error('Error al eliminar examen del catálogo:', error);
     res.status(500).json({ error: 'Error al eliminar el examen' });
+  } finally {
+    connection.release();
   }
 };
 

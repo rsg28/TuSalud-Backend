@@ -91,7 +91,7 @@ async function buildPerfilSnapshot(dbConn, perfilId, tipoEmo) {
           c.nombre         AS categoria_nombre,
           c.id_cola        AS categoria_id_cola
          FROM emo_perfil_examenes pe
-         JOIN examenes e         ON e.id = pe.examen_id
+         JOIN examenes e         ON e.id = pe.examen_id AND e.activo = 1
          LEFT JOIN emo_categorias c ON c.id = e.categoria_id
         WHERE pe.perfil_id = ? AND pe.tipo_emo = ?
         ORDER BY c.nombre, e.nombre`,
@@ -115,7 +115,7 @@ async function buildPerfilSnapshot(dbConn, perfilId, tipoEmo) {
           c.nombre         AS categoria_nombre,
           c.id_cola        AS categoria_id_cola
          FROM emo_perfil_examenes pe
-         JOIN examenes e         ON e.id = pe.examen_id
+         JOIN examenes e         ON e.id = pe.examen_id AND e.activo = 1
          LEFT JOIN emo_categorias c ON c.id = e.categoria_id
         WHERE pe.perfil_id = ? AND pe.tipo_emo = ?
         ORDER BY c.nombre, e.nombre`,

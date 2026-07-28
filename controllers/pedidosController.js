@@ -834,7 +834,10 @@ const crearPedido = async (req, res) => {
     if (idsDesdePacientes.size > 0) {
       const arrIds = [...idsDesdePacientes];
       const ph = arrIds.map(() => '?').join(',');
-      const [existRows] = await connection.execute(`SELECT id FROM examenes WHERE id IN (${ph})`, arrIds);
+      const [existRows] = await connection.execute(
+        `SELECT id FROM examenes WHERE activo = 1 AND id IN (${ph})`,
+        arrIds
+      );
       for (const row of existRows) {
         pedidoExamenIds.add(Number(row.id));
       }
